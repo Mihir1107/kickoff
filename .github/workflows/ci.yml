@@ -44,6 +44,9 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
+      - uses: actions/setup-node@v4  # independent RFC 8785 reference for the canonical JSON cross-check
+        with:
+          node-version: "20"
       - run: uv sync --all-packages --locked
       - run: uv run pytest tests/unit
 

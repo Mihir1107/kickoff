@@ -17,9 +17,27 @@ fetches (reply counters, presigned URLs, profile embeds), so hashing raw bytes w
 
 | item_type | Version-defining fields (in fingerprint) | Explicitly excluded |
 |---|---|---|
-| message | author external id; body text; rich body (blocks/HTML) as delivered; message subtype/type; thread root id; parent id; source edit marker (edited ts/etag-independent `lastModified` of content); deleted state + deletion ts; sorted list of attached file ids with their file content_hash | reactions; reply counts/reply users/latest reply; read receipts; pins/stars/bookmarks; presigned/expiring URLs; embedded user profiles; unfurl previews fetched by the platform |
-| file | SHA-256 of file bytes (content_hash = byte hash); file name; mime type | download URLs, thumbnails, preview renditions |
-| event (reaction snapshot) | parent message source id; sorted list of `(reaction name, sorted user ids)` | counts (derived) |
+| message | author external user id (not name); body text; rich body (blocks/HTML) as delivered; message type/subtype; thread root id; parent id; deleted flag; sorted list of attached file source ids with each file's content_hash | reactions; reply counts/reply users/latest reply; read receipts; pins/stars/bookmarks; presigned/expiring URLs; **author display name, avatar, profile embeds**; **link unfurls/previews**; **source change markers (etag, `edited.ts`, `lastModifiedDateTime`, deletion ts)** |
+| file | SHA-256 of file bytes; file name; mime type | download URLs, thumbnails, preview renditions, etag/lastModified |
+| event: reaction snapshot | parent message source id; sorted list of `(reaction name, sorted user ids)` | counts (derived) |
+| event: identity snapshot | external user id; display name; real name; email; avatar image hash; title; deactivated flag | presence, status emoji/text, timezone |
+
+### Rules that apply to every fingerprint
+- **Source change markers are hints, never identity.** etag, `lastModifiedDateTime`, Slack `edited.ts`
+  and similar are used only to decide *whether to look closer* (e.g. delta queries, skip-unchanged
+  optimizations). They are never part of `content_hash` or the idempotency key. They are still recorded
+  on the item as metadata (`edited_at_utc`, raw page), so nothing is lost. Consequence: an "edit" that
+  leaves every version-defining field identical does not mint a new version.
+- **Text is hashed exactly as delivered.** No Unicode normalization (NFC/NFKC), no whitespace
+  trimming/collapsing, no case folding, no entity decoding. RFC 8785 canonical JSON does not normalize
+  strings either, so the bytes hashed are the source's code points, re-encoded as UTF-8.
+- **Author presentation is not message content.** Display names, avatars and profile embeds are
+  excluded from message versions and captured as **identity snapshot** event items
+  (`source_item_id = user/<external id>#profile`), versioned when they change and linked to the
+  custodian identity. What the reviewer saw at the time is therefore reconstructable without making
+  every profile change look like a message edit.
+- **Link unfurls/previews are excluded** from the message version: they are fetched by the platform,
+  change over time and are not authored content. They remain preserved verbatim in the raw page object.
 
 - **Reactions never create message versions**, but are never dropped: each observed reaction set is an
   `item_type=event` item, `source_item_id = <message id>#reactions`, `parent_item_id` = message item.

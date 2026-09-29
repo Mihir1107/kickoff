@@ -43,9 +43,13 @@ make worker / api       # run the Temporal worker / API
 ## Conventions
 - Python 3.12, `uv` only (no pip). Add deps with `uv add --package <member> <dep>`.
 - mypy `--strict` on all source (packages/apps/workers). ruff is the formatter and linter.
-- All timestamps are timezone-aware UTC (`edisc_core.time`). Naive datetimes are bugs (ruff DTZ enforces this).
+- All timestamps are timezone-aware UTC (`edisc_core.time`). Naive datetimes and nonexistent (DST-gap) local times
+  raise; nothing is ever assumed to be UTC. Use `UtcDatetime` for Pydantic fields. ruff DTZ enforces the rest.
+- Logging: `edisc_core.logs.configure_logging()` at process start; register decrypted secrets with
+  `edisc_core.redaction.register_secret()`. Redaction covers nested fields, exception text and tracebacks.
 - IDs are UUIDv7 (`edisc_core.ids`).
-- Hash inputs use RFC 8785 canonical JSON (`edisc_core.canonical`), never `json.dumps`.
+- Hash inputs use RFC 8785 canonical JSON (`edisc_core.canonical`), never `json.dumps`. Vectors + Node cross-check
+  live in `tests/golden/jcs/`; keep non-ASCII in golden files as `\\u` escapes so editors cannot normalize them.
 - Workflows carry IDs and small cursors only. Raw data, tokens and large payloads never enter Temporal history.
 - The DB checkpoint is the source of truth for resume, not Temporal heartbeat details.
 - Per-batch writes (items + job_items + custody event + checkpoint + counts) happen in ONE transaction.

@@ -31,6 +31,18 @@ must be physically unable to alter or delete it.
   community rebuild pinned by tag + digest. Mirroring it and re-running the WORM acceptance tests against
   AWS S3 Object Lock are in the backlog.
 
+- **Plain S3 API only.** The evidence package uses standard S3 calls (PutObject/multipart with
+  `ObjectLockMode`/`ObjectLockRetainUntilDate`, `If-None-Match`, GetObject, HeadObject,
+  GetObjectRetention). No MinIO admin APIs or `mc` in application code, so production switches to AWS S3
+  Object Lock with configuration only.
+- **WORM acceptance test** (a plain DELETE on a versioned bucket just adds a delete marker and proves
+  nothing, so the test targets versions):
+  1. `DeleteObject` with the specific `VersionId` of the evidence object → must fail (AccessDenied).
+  2. `PutObjectRetention` shortening retain-until (and with `BypassGovernanceRetention`) → must fail.
+  3. Overwrite via `PutObject` with `If-None-Match: *` → must fail (412).
+  4. After all attempts: `GetObject` of that exact `VersionId` still returns bytes that re-hash to the
+     recorded SHA-256, and retention mode/date are unchanged.
+
 ## Consequences
 - + Deletion/overwrite is impossible even with root credentials until retention expires.
 - + Page-level objects preserve exact provenance and cut object count ~200× vs per-message objects.

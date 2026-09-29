@@ -75,10 +75,11 @@ select = [
 ]
 ignore = [
     "TRY003",  # long messages in exception constructors are fine
+    "E501",    # ruff format owns code layout; long docstrings/strings are allowed
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S311", "S603", "S607", "T20", "BLE001"]
+"tests/**" = ["S101", "S105", "S106", "S311", "S603", "S607", "T20", "BLE001", "TRY301"]
 
 # ---------------------------------------------------------------- mypy
 [tool.mypy]
