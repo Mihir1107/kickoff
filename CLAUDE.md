@@ -23,14 +23,16 @@ The plan of record is in `docs/ARCHITECTURE.md` and `docs/adr/`. Read them befor
 - `packages/*`: libraries (`edisc_core`, `edisc_evidence`, `edisc_custody`, `edisc_connectors_base`,
   `edisc_connector_*`, `edisc_normalizer`, `edisc_renderers`). src layout, one uv workspace member each.
 - `apps/api` (`edisc_api`): FastAPI. `workers/collection` (`edisc_worker`): Temporal workers, one task queue per source.
-- `infra/docker-compose.yml`: Postgres, Redis, MinIO (object lock), Temporal + UI, Elasticsearch. All image versions pinned.
+- `infra/docker-compose.yml`: Postgres, Redis, MinIO (object lock), Temporal + UI, Elasticsearch. Pinned by tag + digest.
+  MinIO is the `pgsty/minio` community rebuild (upstream stopped publishing images). Temporal UI: http://localhost:8080.
 - `tests/unit` (no services), `tests/integration` (real compose services, **never mock DB, S3 or Temporal**), `tests/golden`.
 
 ## Commands
 ```
 make sync               # uv sync --all-packages
-make up / down          # infra up (waits for health) / stop
-make nuke               # down + delete volumes (only way to discard local WORM data)
+make up / down          # infra up (waits for health, runs idempotent init jobs) / stop
+make up-ci              # subset CI uses (no UI, no Elasticsearch)
+make nuke               # down + delete volumes; refuses unless EDISC_ENV=local|ci
 make migrate            # alembic upgrade head
 make lint fmt typecheck # ruff, ruff format, mypy --strict
 make test               # unit tests

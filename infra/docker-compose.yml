@@ -1,0 +1,139 @@
+# Local + CI infrastructure. Every image is pinned by tag AND digest.
+# Bring up: `make up` (docker compose up -d --wait). Variables come from ../.env (see .env.example).
+name: edisc
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  postgres:
+    <<: *restart
+    image: postgres:16.15-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    environment:
+      POSTGRES_USER: ${EDISC_PG_SUPERUSER}
+      POSTGRES_PASSWORD: ${EDISC_PG_SUPERUSER_PASSWORD}
+      POSTGRES_DB: ${EDISC_PG_DB}
+      TEMPORAL_DB_PASSWORD: ${TEMPORAL_DB_PASSWORD}
+    command: ["postgres", "-c", "max_connections=300"]
+    ports: ["${EDISC_PG_PORT:-5432}:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/10-databases.sh:/docker-entrypoint-initdb.d/10-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${EDISC_PG_SUPERUSER} -d ${EDISC_PG_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    <<: *restart
+    image: redis:8.10.2-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["${EDISC_REDIS_PORT:-6379}:6379"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Upstream MinIO no longer publishes images; pgsty/minio is a community rebuild (see ADR 0002).
+  minio:
+    <<: *restart
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${EDISC_S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${EDISC_S3_SECRET_KEY}
+    ports:
+      - "${EDISC_S3_PORT:-9000}:9000"
+      - "${EDISC_S3_CONSOLE_PORT:-9001}:9001"
+    volumes: [miniodata:/data]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  minio-init:
+    image: pgsty/mc:RELEASE.2026-09-16T00-00-00Z@sha256:cfc83108c3abb371f8fb84d99c1fdc88f8c237e022409b0081fb7c0a3be634dd
+    entrypoint: ["/bin/sh", "/init.sh"]
+    environment:
+      MINIO_ROOT_USER: ${EDISC_S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${EDISC_S3_SECRET_KEY}
+      BUCKET: ${EDISC_S3_EVIDENCE_BUCKET}
+      DEFAULT_RETENTION_DAYS: ${EDISC_S3_DEFAULT_RETENTION_DAYS}
+    volumes: [./minio/init.sh:/init.sh:ro]
+    depends_on:
+      minio: { condition: service_healthy }
+
+  temporal-schema:
+    image: temporalio/admin-tools:1.31.3@sha256:76a70ead160808b54acdbc98944dfc07990d9637dda999118a2d9ee1f58b9bc9
+    entrypoint: ["/bin/sh", "/setup.sh"]
+    environment:
+      TEMPORAL_DB_PASSWORD: ${TEMPORAL_DB_PASSWORD}
+    volumes: [./temporal/setup.sh:/setup.sh:ro]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  temporal:
+    <<: *restart
+    image: temporalio/server:1.31.3@sha256:b4a78d2186e558aa3502be08d576086c3a82fccdf6184cb4c819eb27bea7bd63
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_SEEDS: postgres
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: ${TEMPORAL_DB_PASSWORD}
+      DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/config/dynamicconfig/docker.yaml
+    ports: ["${EDISC_TEMPORAL_PORT:-7233}:7233"]
+    volumes:
+      - ./temporal/dynamicconfig.yaml:/etc/temporal/config/dynamicconfig/docker.yaml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z $$(hostname -i) 7233"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+    depends_on:
+      temporal-schema: { condition: service_completed_successfully }
+
+  temporal-namespace:
+    image: temporalio/admin-tools:1.31.3@sha256:76a70ead160808b54acdbc98944dfc07990d9637dda999118a2d9ee1f58b9bc9
+    entrypoint: ["/bin/sh", "/namespace.sh"]
+    environment:
+      NAMESPACE: ${EDISC_TEMPORAL_NAMESPACE}
+    volumes: [./temporal/namespace.sh:/namespace.sh:ro]
+    depends_on:
+      temporal: { condition: service_healthy }
+
+  temporal-ui:
+    <<: *restart
+    image: temporalio/ui:2.54.1@sha256:ff0943fe532b8e33c46cd28b29e81e0ce0b6f55b9ee50a38ef1b437cc4de3fa5
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports: ["${EDISC_TEMPORAL_UI_PORT:-8080}:8080"]
+    depends_on:
+      temporal: { condition: service_healthy }
+
+  # Idle in Phase 1 (search arrives later). Not started in CI.
+  elasticsearch:
+    <<: *restart
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.19.22@sha256:e98f9c3b09beb2fbb9eaf667d602df3f0e00bd3644138b8458dc17ba1a675595
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports: ["${EDISC_ES_PORT:-9200}:9200"]
+    volumes: [esdata:/usr/share/elasticsearch/data]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=2s'"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  esdata:

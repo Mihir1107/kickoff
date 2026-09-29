@@ -24,6 +24,11 @@ dev = [
     "pytest>=8.4",
     "pytest-asyncio>=1.2",
     "hypothesis>=6.140",
+    "asyncpg>=0.31.0",
+    "redis>=8.1.0",
+    "boto3>=1.43.104",
+    "temporalio>=1.33.0",
+    "httpx>=0.28.1",
 ]
 
 [tool.uv]
@@ -105,4 +110,5 @@ addopts = "-ra --strict-markers"
 markers = [
     "integration: requires the docker compose services (make up)",
     "slow: long-running acceptance tests",
+    "elasticsearch: needs Elasticsearch (not started in CI during Phase 1)",
 ]

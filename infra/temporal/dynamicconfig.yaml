@@ -1,0 +1,5 @@
+# Temporal dynamic config for local/CI. Keep payload/history limits at server defaults so we
+# notice early if raw data ever leaks into workflow history.
+limit.maxIDLength:
+  - value: 255
+    constraints: {}
