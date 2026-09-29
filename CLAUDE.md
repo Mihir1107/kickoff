@@ -49,7 +49,17 @@ make worker / api       # run the Temporal worker / API
 - Workflows carry IDs and small cursors only. Raw data, tokens and large payloads never enter Temporal history.
 - The DB checkpoint is the source of truth for resume, not Temporal heartbeat details.
 - Per-batch writes (items + job_items + custody event + checkpoint + counts) happen in ONE transaction.
-- The app connects as the least-privilege `edisc_app` role. Superuser is only for migrations and tamper tests.
+- Tenant isolation: FORCE RLS on every tenant table. The app connects as `edisc_app` (not owner, not superuser,
+  no BYPASSRLS) and sets `SET LOCAL app.tenant_id` per transaction via the single `tenant_tx()` helper, in activities too.
+  Superuser is only for migrations and tamper tests.
+- Evidence: raw pages stored as exact bytes (page hash recorded); files are always separate objects; items point to
+  `(storage_key, json_path)`. Every write uses `If-None-Match: *`. Matter `retention_until` is required.
+  `EDISC_EVIDENCE_RETENTION_OVERRIDE_DAYS` is honoured only when `EDISC_ENV` is local/ci.
+- Versions: `content_hash` = hash of the version fingerprint defined in ADR 0004, not raw bytes. Reactions never
+  create message versions; they are `item_type=event` reaction-snapshot items linked to the message.
+- Custody: one `items_collected` event per batch with a Merkle root over (idempotency_key, content_hash);
+  lifecycle actions get individual events; `verify_chain` recomputes Merkle roots from the items table.
+- `completed_unverified` is never presented as a clean completion (ADR 0005).
 - Secrets: `.env.example` has placeholders only. Never commit `.env`. Wrap secrets in `SecretStr`.
 
 ## Working agreement
