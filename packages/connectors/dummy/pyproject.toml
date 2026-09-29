@@ -1,0 +1,20 @@
+[project]
+name = "edisc-connector-dummy"
+version = "0.1.0"
+description = "Deterministic fake source for testing."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "edisc-core",
+    "edisc-connectors-base",
+]
+
+[tool.uv.sources]
+edisc-core = { workspace = true }
+edisc-connectors-base = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/edisc_connector_dummy"]
