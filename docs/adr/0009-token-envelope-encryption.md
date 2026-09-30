@@ -73,12 +73,33 @@ stale rows without decrypting.
 - Tokens are never Temporal inputs or outputs: activities load them from the DB by connection id
   (enforced in M12).
 
+### Refresh tokens: designed out where possible (review, 2026-09-30)
+- **Microsoft Teams / Graph:** application permissions via the **client-credentials** flow, so there are
+  **no refresh tokens**. Our app authenticates with a **certificate**, not a client secret. The
+  certificate lives in the secret manager (backlog, required before production). Access tokens are
+  short-lived and re-minted on demand.
+- **Slack, internal-app tier:** **token rotation stays disabled**, so bot tokens do not expire and
+  there is no refresh token to lose.
+- **Where refresh tokens are unavoidable** (future providers): the provider's refresh response is
+  sealed and **committed to `token_refresh_journal` in its own transaction immediately on receipt**,
+  before any other work, and only then applied to the connection row.
+  - The connection row is locked `FOR NO KEY UPDATE`, which serializes refreshers without blocking
+    the journal's foreign-key check. Plain `FOR UPDATE` deadlocks through the application; found and
+    fixed in testing.
+  - `reconcile_token_refreshes` runs at worker startup. It applies any `received` entry whose
+    `based_on_version` still matches the row, by copying ciphertext: same context, no decryption. It
+    marks older entries `superseded`.
+  - It finds entries across tenants through `pending_token_refreshes()`, executable only by the
+    sweeper login and returning ids only.
+  - Tested: a crash between journaling and applying heals on reconcile. A journaled response
+    overtaken by a later re-authorization is superseded, not applied.
+
 ## Consequences
 - + A database dump alone reveals no tokens. Ciphertext moved between rows is useless.
 - + Rotation needs no downtime and no plaintext handling.
-- − **Residual risk:** if a provider rotates the refresh token and our process dies before the commit,
-  the stored refresh token is now revoked. The connection needs re-authorization. This is detected
-  on the next refresh (`invalid_grant`), which will mark the connection `error` and emit a custody
-  event (API/worker layer, M13).
+- − **Residual risk, narrowed:** the only remaining window is between the provider responding and the
+  journal commit, a single small insert. If the journal commit itself fails (the database is
+  unreachable), the rotated refresh token is lost. The connection then needs re-authorization,
+  detected on the next refresh (`invalid_grant`), which marks it `error` with a custody event (M13).
 - − Custody events for connection lifecycle (created, validated, refreshed, rotated) are emitted by the
   API/worker layer that owns the tenant custody stream, not by this module.

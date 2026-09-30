@@ -141,7 +141,11 @@ async def test_security_definer_functions_are_hardened(connect: Connect) -> None
         )
     finally:
         await conn.close()
-    assert {r["fn"].split("(")[0] for r in rows} == {"create_tenant", "due_anchor_streams"}
+    assert {r["fn"].split("(")[0] for r in rows} == {
+        "create_tenant",
+        "due_anchor_streams",
+        "pending_token_refreshes",
+    }
     for r in rows:
         assert "search_path=pg_catalog, edisc, pg_temp" in (r["proconfig"] or []), r["fn"]
         assert r["acl"] is not None, f"{r['fn']} has default ACL (PUBLIC may execute)"

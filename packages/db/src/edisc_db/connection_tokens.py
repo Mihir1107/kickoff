@@ -29,6 +29,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from edisc_core.envelope import SecretBox, SecretContext, SecretPurpose
+from edisc_core.ids import new_id
 from edisc_core.time import ensure_utc, utc_now
 from edisc_db.session import tenant_tx
 
@@ -65,15 +66,23 @@ async def _kek(session: AsyncSession, tenant_id: uuid.UUID) -> str:
     return key
 
 
-async def _write(
+@dataclass(frozen=True)
+class _SealedSet:
+    access: bytes
+    refresh: bytes | None
+    expires_at: datetime | None
+    key_id: str
+    key_version: str
+
+
+async def _seal_set(
     session: AsyncSession,
     box: SecretBox,
     *,
     tenant_id: uuid.UUID,
     connection_id: uuid.UUID,
     tokens: TokenSet,
-    expected_version: int,
-) -> int:
+) -> _SealedSet:
     key_id = await _kek(session, tenant_id)
     access = await box.seal(
         tokens.access_token,
@@ -89,6 +98,19 @@ async def _write(
         if tokens.refresh_token is not None
         else None
     )
+    return _SealedSet(
+        access.blob,
+        refresh.blob if refresh else None,
+        tokens.expires_at,
+        access.key_id,
+        access.key_version,
+    )
+
+
+async def _apply(
+    session: AsyncSession, *, connection_id: uuid.UUID, sealed: _SealedSet, expected_version: int
+) -> int:
+    """ONE statement replaces the whole token set; optimistic on token_version."""
     new_version: int | None = (
         await session.execute(
             text(
@@ -98,11 +120,11 @@ async def _write(
                 " WHERE id = :c AND token_version = :expected RETURNING token_version"
             ),
             {
-                "a": access.blob,
-                "r": refresh.blob if refresh else None,
-                "e": tokens.expires_at,
-                "k": access.key_id,
-                "kv": access.key_version,
+                "a": sealed.access,
+                "r": sealed.refresh,
+                "e": sealed.expires_at,
+                "k": sealed.key_id,
+                "kv": sealed.key_version,
                 "c": connection_id,
                 "expected": expected_version,
             },
@@ -115,11 +137,31 @@ async def _write(
     return new_version
 
 
+async def _write(
+    session: AsyncSession,
+    box: SecretBox,
+    *,
+    tenant_id: uuid.UUID,
+    connection_id: uuid.UUID,
+    tokens: TokenSet,
+    expected_version: int,
+) -> int:
+    sealed = await _seal_set(
+        session, box, tenant_id=tenant_id, connection_id=connection_id, tokens=tokens
+    )
+    return await _apply(
+        session, connection_id=connection_id, sealed=sealed, expected_version=expected_version
+    )
+
+
 _READ = (
     "SELECT encrypted_access_token, encrypted_refresh_token, token_expires_at, token_version"
     " FROM connections WHERE id = :c"
 )
-_READ_LOCKED = _READ + " FOR UPDATE"
+# NO KEY UPDATE: serializes refreshers (conflicts with itself) but does NOT block the KEY SHARE lock a
+# foreign-key check on this row takes. The refresh journal insert (own transaction, FK to connections)
+# runs while this lock is held; with plain FOR UPDATE that would deadlock through the application.
+_READ_LOCKED = _READ + " FOR NO KEY UPDATE"
 
 
 async def _read(
@@ -213,14 +255,36 @@ async def refresh_tokens(
         if min_valid_for is not None and not current.expires_within(min_valid_for):
             return current
         fresh = await refresher(current)
-        version = await _write(
-            session,
-            box,
-            tenant_id=tenant_id,
-            connection_id=connection_id,
-            tokens=fresh,
-            expected_version=current.version,
+        # The provider may already have revoked the old refresh token. Persist the response FIRST, in
+        # its own transaction, before anything else can fail; then apply it to the row.
+        sealed = await _seal_set(
+            session, box, tenant_id=tenant_id, connection_id=connection_id, tokens=fresh
         )
+        journal_id = new_id()
+        async with tenant_tx(sessions, tenant_id) as journal:
+            await journal.execute(
+                text(
+                    "INSERT INTO token_refresh_journal (id, tenant_id, connection_id, based_on_version,"
+                    " encrypted_access_token, encrypted_refresh_token, token_expires_at, token_key_id,"
+                    " token_key_version) VALUES (:id, :t, :c, :v, :a, :r, :e, :k, :kv)"
+                ),
+                {
+                    "id": journal_id,
+                    "t": tenant_id,
+                    "c": connection_id,
+                    "v": current.version,
+                    "a": sealed.access,
+                    "r": sealed.refresh,
+                    "e": sealed.expires_at,
+                    "k": sealed.key_id,
+                    "kv": sealed.key_version,
+                },
+            )
+        await _before_apply_hook()
+        version = await _apply(
+            session, connection_id=connection_id, sealed=sealed, expected_version=current.version
+        )
+        await _resolve_journal(session, journal_id, "applied")
         return TokenSet(fresh.access_token, fresh.refresh_token, fresh.expires_at, version)
 
 
@@ -286,3 +350,79 @@ async def rewrap_tenant_tokens(
             )
         count += 1
     return count
+
+
+async def _before_apply_hook() -> None:
+    """Test seam: crash-injection point between journaling and applying a refresh (no-op in production)."""
+
+
+async def _resolve_journal(session: AsyncSession, journal_id: uuid.UUID, state: str) -> None:
+    await session.execute(
+        text(
+            "UPDATE token_refresh_journal SET state = :s, resolved_at = now()"
+            " WHERE id = :id AND state = 'received'"
+        ),
+        {"s": state, "id": journal_id},
+    )
+
+
+async def reconcile_token_refreshes(
+    sweeper_sessions: async_sessionmaker[AsyncSession],
+    sessions: async_sessionmaker[AsyncSession],
+    *,
+    limit: int = 500,
+) -> dict[str, int]:
+    """Startup reconciler: apply journaled refresh responses that never reached their connection row.
+
+    For each ``received`` entry (oldest first per connection), under the connection row lock:
+    - row still at ``based_on_version``: copy the journaled ciphertext into the row (no decryption: the
+      context is identical), bump the version, mark ``applied``;
+    - row moved on (a later write succeeded): mark ``superseded``.
+    Cross-tenant discovery uses the sweeper login (ids only); all writes go through ``tenant_tx``.
+    """
+    async with sweeper_sessions() as s, s.begin():
+        targets = (
+            await s.execute(
+                text("SELECT tenant_id, connection_id FROM pending_token_refreshes(:n)"),
+                {"n": limit},
+            )
+        ).all()
+    counts = {"applied": 0, "superseded": 0}
+    for target in targets:
+        async with tenant_tx(sessions, target.tenant_id) as session:
+            row = (
+                await session.execute(
+                    text("SELECT token_version FROM connections WHERE id = :c FOR NO KEY UPDATE"),
+                    {"c": target.connection_id},
+                )
+            ).one()
+            entries = (
+                await session.execute(
+                    text(
+                        "SELECT * FROM token_refresh_journal WHERE connection_id = :c AND state = 'received'"
+                        " ORDER BY created_at"
+                    ),
+                    {"c": target.connection_id},
+                )
+            ).all()
+            version = row.token_version
+            for entry in entries:
+                if entry.based_on_version == version:
+                    version = await _apply(
+                        session,
+                        connection_id=target.connection_id,
+                        sealed=_SealedSet(
+                            entry.encrypted_access_token,
+                            entry.encrypted_refresh_token,
+                            entry.token_expires_at,
+                            entry.token_key_id,
+                            entry.token_key_version,
+                        ),
+                        expected_version=version,
+                    )
+                    await _resolve_journal(session, entry.id, "applied")
+                    counts["applied"] += 1
+                else:
+                    await _resolve_journal(session, entry.id, "superseded")
+                    counts["superseded"] += 1
+    return counts

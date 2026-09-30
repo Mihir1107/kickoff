@@ -81,6 +81,10 @@ make worker / api       # run the Temporal worker / API
 - Connection tokens (ADR 0009): only via `edisc_db.connection_tokens` (store/load/refresh_tokens/rewrap_tenant_tokens)
   with a `SecretBox` over a `KmsClient`. Context = tenant + connection + purpose. Never pass tokens to Temporal,
   never log them, never add a new secret column without envelope encryption + context binding.
+  Refresh responses are journaled in their own transaction before being applied; run `reconcile_token_refreshes`
+  at worker startup. Prefer designs without refresh tokens (client credentials + certificate; Slack rotation off).
+- Row locks that must coexist with FK inserts referencing the row: use `FOR NO KEY UPDATE`, not `FOR UPDATE`.
+- Tests have a 120 s timeout (pytest-timeout): a hang is a failure.
 
 ## Working agreement
 - One milestone at a time: implement → tests → run → commit (message ends with the attribution trailer).

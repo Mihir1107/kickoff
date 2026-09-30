@@ -32,6 +32,7 @@ dev = [
     "httpx>=0.28.1",
     "asyncpg-stubs>=0.31.3",
     "types-aiobotocore[s3]>=3.9.1",
+    "pytest-timeout>=2.4.0",
 ]
 
 [tool.uv]
@@ -117,6 +118,8 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 addopts = "-ra --strict-markers"
+# hangs (e.g. a deadlock through the application) fail loudly instead of blocking CI
+timeout = 120
 markers = [
     "integration: requires the docker compose services (make up)",
     "slow: long-running acceptance tests",

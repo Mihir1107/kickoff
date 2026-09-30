@@ -28,6 +28,7 @@ from edisc_db.connection_tokens import (
     StaleTokenVersionError,
     TokenSet,
     load_tokens,
+    reconcile_token_refreshes,
     refresh_tokens,
     rewrap_tenant_tokens,
     store_tokens,
@@ -379,3 +380,117 @@ async def test_no_token_material_in_logs_across_the_whole_lifecycle(
     assert "[REDACTED]" in output
     for canary in canaries:
         assert canary not in output, "token material leaked into logs"
+
+
+# ------------------------------------------------------------------ refresh journal (crash after provider rotation)
+async def test_crash_after_provider_rotation_is_recovered_from_the_journal(
+    app_sessions: Sessions,
+    sweeper_sessions: Sessions,
+    box: SecretBox,
+    kms: LocalKmsClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import edisc_db.connection_tokens as ct
+
+    t = await new_tenant(app_sessions, kms)
+    c = await new_connection(app_sessions, t)
+    await store_tokens(
+        app_sessions, box, tenant_id=t, connection_id=c, tokens=tokens("g1"), expected_version=0
+    )
+    issued = tokens("g2")  # the provider has now revoked g1's refresh token
+
+    async def provider(_: TokenSet) -> TokenSet:
+        return issued
+
+    async def die() -> None:
+        raise SystemExit("worker killed between journaling and applying")
+
+    monkeypatch.setattr(ct, "_before_apply_hook", die)
+    with pytest.raises(SystemExit):
+        await refresh_tokens(app_sessions, box, tenant_id=t, connection_id=c, refresher=provider)
+    monkeypatch.undo()
+
+    stale = await load_tokens(app_sessions, box, tenant_id=t, connection_id=c)
+    assert (stale.version, stale.access_token.get_secret_value().split("-")[1]) == (
+        1,
+        "g1",
+    )  # row not updated
+
+    counts = await reconcile_token_refreshes(sweeper_sessions, app_sessions)
+    assert counts["applied"] >= 1
+    healed = await load_tokens(app_sessions, box, tenant_id=t, connection_id=c)
+    assert healed.version == 2
+    assert healed.access_token.get_secret_value() == issued.access_token.get_secret_value()
+    assert healed.refresh_token is not None
+    assert issued.refresh_token is not None
+    assert healed.refresh_token.get_secret_value() == issued.refresh_token.get_secret_value()
+    async with tenant_tx(app_sessions, t) as s:
+        states = (
+            (
+                await s.execute(
+                    text("SELECT state FROM token_refresh_journal WHERE connection_id = :c"),
+                    {"c": c},
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert states == ["applied"]
+
+
+async def test_stale_journal_entry_is_superseded_not_applied(
+    app_sessions: Sessions,
+    sweeper_sessions: Sessions,
+    box: SecretBox,
+    kms: LocalKmsClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import edisc_db.connection_tokens as ct
+
+    t = await new_tenant(app_sessions, kms)
+    c = await new_connection(app_sessions, t)
+    await store_tokens(
+        app_sessions, box, tenant_id=t, connection_id=c, tokens=tokens("g1"), expected_version=0
+    )
+
+    async def provider(_: TokenSet) -> TokenSet:
+        return tokens("g2")
+
+    async def die() -> None:
+        raise SystemExit("killed")
+
+    monkeypatch.setattr(ct, "_before_apply_hook", die)
+    with pytest.raises(SystemExit):
+        await refresh_tokens(app_sessions, box, tenant_id=t, connection_id=c, refresher=provider)
+    monkeypatch.undo()
+    # meanwhile an operator re-authorized the connection (newer write wins)
+    reauth = tokens("g3")
+    await store_tokens(
+        app_sessions, box, tenant_id=t, connection_id=c, tokens=reauth, expected_version=1
+    )
+    await reconcile_token_refreshes(sweeper_sessions, app_sessions)
+    final = await load_tokens(app_sessions, box, tenant_id=t, connection_id=c)
+    assert final.access_token.get_secret_value() == reauth.access_token.get_secret_value()
+    async with tenant_tx(app_sessions, t) as s:
+        states = (
+            (
+                await s.execute(
+                    text("SELECT state FROM token_refresh_journal WHERE connection_id = :c"),
+                    {"c": c},
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert states == ["superseded"]
+
+
+async def test_app_role_cannot_list_pending_refreshes(connect: Connect) -> None:
+    import asyncpg
+
+    app = await connect("app")
+    try:
+        with pytest.raises(asyncpg.InsufficientPrivilegeError):
+            await app.fetch("SELECT * FROM pending_token_refreshes(10)")
+    finally:
+        await app.close()

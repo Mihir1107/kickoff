@@ -20,3 +20,6 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - **[required before production]** `AwsKmsClient` implementing `edisc_core.kms.KmsClient` (GenerateDataKey/Decrypt/ReEncrypt with EncryptionContext), per-tenant CMKs with rotation enabled, key policies restricting use to the worker/API roles.
 - Connection re-authorization flow: on `invalid_grant` or `DecryptionError`, mark the connection `error`, emit a custody event, notify the tenant (M13+).
 - Scheduled KEK rotation job calling `rewrap_tenant_tokens` per tenant, with custody events.
+- **[required before production]** Microsoft Graph app authentication with a certificate (not a client secret), stored in the secret manager, with a rotation runbook (ADR 0009).
+- Slack connector: document and enforce "token rotation disabled" for the internal-app tier (validate_connection checks the token type and non-expiry).
+- Periodic mutation-testing CI job (e.g. mutmut) on `packages/custody`, `packages/evidence` and `edisc_core.kms`/`envelope`/`canonical`, publishing a surviving-mutants report; this automates the manual "teeth" checks done per milestone.

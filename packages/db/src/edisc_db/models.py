@@ -301,6 +301,29 @@ class Item(Base):
     collected_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
 
 
+class TokenRefreshJournal(Base):
+    __tablename__ = "token_refresh_journal"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "connection_id"], ["connections.tenant_id", "connections.id"]
+        ),
+        Index(None, "state"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    connection_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    based_on_version: Mapped[int] = mapped_column(BigInteger)
+    encrypted_access_token: Mapped[bytes] = mapped_column(LargeBinary)
+    encrypted_refresh_token: Mapped[bytes | None] = mapped_column(LargeBinary)
+    token_expires_at: Mapped[datetime | None] = mapped_column(TZ)
+    token_key_id: Mapped[str] = mapped_column(Text)
+    token_key_version: Mapped[str] = mapped_column(Text)
+    state: Mapped[str] = mapped_column(Text, server_default=text("'received'"))
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    resolved_at: Mapped[datetime | None] = mapped_column(TZ)
+
+
 class JobItem(Base):
     __tablename__ = "job_items"
     __table_args__ = (
