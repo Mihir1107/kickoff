@@ -113,22 +113,39 @@ async def test_evidence_objects_only_pending_to_final(connect: Connect) -> None:
         await app.close()
 
 
-async def test_chain_head_advances_by_exactly_one(connect: Connect) -> None:
+async def test_chain_head_guard(connect: Connect) -> None:
     app = await connect("app")
     try:
-        s = await seed_tenant(app)  # head at seq 1
-        for bad in ("last_seq + 2", "last_seq", "last_seq - 1"):
-            await _expect_sqlstate(
-                app,
-                s,
-                f"UPDATE custody_chain_heads SET last_seq = {bad} WHERE stream_id = '{s.job_id}'",
-                "EA003",
-            )
+        s = await seed_tenant(app)  # head at seq 1, anchored 0
+        sid = f"'{s.job_id}'"
+        for bad in (
+            "last_seq = last_seq + 2",
+            "last_seq = last_seq - 1",
+            f"last_hash = '{'cd' * 32}'",  # same seq, different hash: rewriting the head
+            "last_seq = last_seq + 1, last_anchored_seq = 1",  # append may not touch anchor bookkeeping
+            "last_anchored_seq = last_seq + 1",  # cannot anchor beyond the head (check constraint)
+        ):
+            with pytest.raises(asyncpg.PostgresError) as exc:
+                async with tenant_ctx(app, s.tenant_id):
+                    await app.execute(
+                        f"UPDATE custody_chain_heads SET {bad} WHERE stream_id = {sid}"
+                    )
+            assert exc.value.sqlstate in {"EA003", "23514"}, bad
         async with tenant_ctx(app, s.tenant_id):
+            await app.execute(
+                "UPDATE custody_chain_heads SET last_anchored_seq = 1, anchor_due = false WHERE stream_id = $1",
+                s.job_id,
+            )
             await app.execute(
                 "UPDATE custody_chain_heads SET last_seq = last_seq + 1 WHERE stream_id = $1",
                 s.job_id,
             )
+        await _expect_sqlstate(
+            app,
+            s,
+            f"UPDATE custody_chain_heads SET last_anchored_seq = 0 WHERE stream_id = {sid}",
+            "EA003",
+        )
     finally:
         await app.close()
 

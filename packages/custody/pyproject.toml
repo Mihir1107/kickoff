@@ -5,10 +5,17 @@ description = "Append-only, hash-chained chain-of-custody log and verifier."
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "edisc-core",
+    "edisc-db",
+    "edisc-evidence",
 ]
+
+[project.scripts]
+edisc-verify = "edisc_custody.cli:main"
 
 [tool.uv.sources]
 edisc-core = { workspace = true }
+edisc-db = { workspace = true }
+edisc-evidence = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

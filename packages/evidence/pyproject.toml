@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Evidence writer: streaming SHA-256, S3 multipart upload, object lock."
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "aiobotocore>=3.9.1",
     "edisc-core",
 ]
 

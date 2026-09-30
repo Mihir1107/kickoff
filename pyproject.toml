@@ -27,10 +27,11 @@ dev = [
     "hypothesis>=6.140",
     "asyncpg>=0.31.0",
     "redis>=8.1.0",
-    "boto3>=1.43.104",
+    "boto3>=1.43",
     "temporalio>=1.33.0",
     "httpx>=0.28.1",
     "asyncpg-stubs>=0.31.3",
+    "types-aiobotocore[s3]>=3.9.1",
 ]
 
 [tool.uv]
@@ -84,6 +85,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106", "S311", "S603", "S607", "S608", "T20", "BLE001", "TRY301"]
+"scripts/**" = ["T20", "S311", "PERF401"]
 # migrations interpolate only module-level constants and fixed identifiers into DDL
 "packages/db/migrations/**" = ["S608"]
 

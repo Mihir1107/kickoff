@@ -65,8 +65,11 @@ make worker / api       # run the Temporal worker / API
   `EDISC_EVIDENCE_RETENTION_OVERRIDE_DAYS` is honoured only when `EDISC_ENV` is local/ci.
 - Versions: `content_hash` = hash of the version fingerprint defined in ADR 0004, not raw bytes. Reactions never
   create message versions; they are `item_type=event` reaction-snapshot items linked to the message.
-- Custody: one `items_collected` event per batch with a Merkle root over (idempotency_key, content_hash);
-  lifecycle actions get individual events; `verify_chain` recomputes Merkle roots from the items table.
+- Custody (`edisc_custody`): call `append`/`append_batch` INSIDE the tenant transaction; after commit call
+  `anchor_if_due` (WORM anchor of the head). Lifecycle events and every N events are anchored; `seal_job_chain` at
+  finalize. `verify_chain` (DB) and `edisc-verify` (offline package, ADR 0008) share `ChainVerifier`. Anchors are always
+  listed from S3 versions, never from the DB. Merkle = RFC 6962, leaves ordered by idempotency_key.
+- Keep `edisc_custody.package`/`cli`/`chain`/`merkle` free of DB and cloud imports (a test enforces it).
 - `completed_unverified` is never presented as a clean completion (ADR 0005).
 - Secrets: `.env.example` has placeholders only. Never commit `.env`. Wrap secrets in `SecretStr`.
 

@@ -1,48 +1,19 @@
-"""DB fixtures: real Postgres from compose, migrated to head, three roles (superuser, owner, app)."""
+"""DB seeding helpers. Shared fixtures (settings, migrated, connect) live in tests/integration/conftest.py."""
 
 from __future__ import annotations
 
-import asyncio
 import secrets
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Literal
 
 import asyncpg
 import pytest
 
 from edisc_core.ids import new_id
-from edisc_core.settings import Settings
-from edisc_db.bootstrap import bootstrap
-from edisc_db.migrate import upgrade
 
-Role = Literal["app", "owner", "superuser"]
-
-
-@pytest.fixture(scope="session")
-def settings() -> Settings:
-    return Settings()
-
-
-@pytest.fixture(scope="session")
-async def migrated(settings: Settings) -> None:
-    await bootstrap(settings)
-    await asyncio.to_thread(upgrade)
-
-
-Connect = Callable[..., Awaitable[asyncpg.Connection]]
-
-
-@pytest.fixture(scope="session")
-def connect(settings: Settings, migrated: None) -> Connect:
-    async def _connect(role: Role = "app", db: str | None = None) -> asyncpg.Connection:
-        return await asyncpg.connect(
-            settings.pg_dsn(role, db=db), server_settings={"search_path": "edisc,pg_temp"}
-        )
-
-    return _connect
+from ..conftest import Connect
 
 
 @asynccontextmanager

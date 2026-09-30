@@ -55,6 +55,13 @@ class Settings(BaseSettings):
         description="Caps per-object retention. Only allowed when env is local/ci (ADR 0002).",
     )
 
+    custody_anchor_every_n_batches: int = Field(
+        default=8, ge=1, description="Seal the chain head to WORM at least every N batch events."
+    )
+    custody_tenant_anchor_retention_days: int = Field(
+        default=3650, ge=1, description="Retention for anchors of tenant-level streams (no matter)."
+    )
+
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "edisc"
 

@@ -77,7 +77,7 @@ TRUNCATE to the app role; see ADR 0007 for roles.
 |---|---|
 | No silent loss | Per-unit reconciliation; job status never `completed` unless every unit has expected == collected (ADR 0005); orphaned evidence and unverifiable units listed in the report |
 | Tamper evidence | SHA-256 of every page, file and item; S3 Object Lock COMPLIANCE; `If-None-Match` on writes; verify re-downloads and re-hashes (ADR 0002) |
-| Chain of custody | Hash chain per stream; Merkle root per batch recomputed by `verify_chain`; WORM seal at job end (ADR 0003) |
+| Chain of custody | Hash chain per stream; RFC 6962 Merkle root per batch recomputed from items; WORM anchors at lifecycle events, every N batches and a seal at job end; offline `edisc-verify` on exported packages (ADR 0003, 0008) |
 | Idempotency | `UNIQUE(idempotency_key)`, key = tenant + source + source_item_id + content_hash (ADR 0004) |
 | Resumability | DB checkpoint committed atomically with items (ADR 0006) |
 | Tokens stay with us | Envelope encryption per tenant via `KmsClient`; decrypted only inside activities; redaction filter; never in Temporal payloads |

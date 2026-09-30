@@ -13,6 +13,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Date,
     DateTime,
     ForeignKeyConstraint,
@@ -248,6 +249,8 @@ class CustodyChainHead(Base):
     last_seq: Mapped[int] = mapped_column(BigInteger)
     last_hash: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    last_anchored_seq: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+    anchor_due: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
 
 
 class Item(Base):
