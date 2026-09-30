@@ -212,6 +212,7 @@ class EvidenceObject(Base):
     retain_until: Mapped[datetime] = mapped_column(TZ)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     completed_at: Mapped[datetime | None] = mapped_column(TZ)
+    upload_id: Mapped[str | None] = mapped_column(Text)
 
 
 class CustodyEvent(Base):

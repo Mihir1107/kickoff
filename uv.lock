@@ -398,12 +398,14 @@ source = { editable = "packages/evidence" }
 dependencies = [
     { name = "aiobotocore" },
     { name = "edisc-core" },
+    { name = "edisc-db" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "aiobotocore", specifier = ">=3.9.1" },
     { name = "edisc-core", editable = "packages/core" },
+    { name = "edisc-db", editable = "packages/db" },
 ]
 
 [[package]]

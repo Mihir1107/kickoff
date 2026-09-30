@@ -1,0 +1,11 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-staging-objects",
+      "Status": "Enabled",
+      "Filter": {},
+      "Expiration": { "Days": 1 },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+    }
+  ]
+}

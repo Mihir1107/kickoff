@@ -39,7 +39,7 @@ Hierarchy follows Relativity: tenant (client) > matter > workspace.
 ## 3. Data flow for one batch (the exactly-once boundary, ADR 0006)
 1. `collect_pages` activity loads the unit's checkpoint (cursor) from `work_units` under `SET LOCAL app.tenant_id`.
 2. It awaits the rate limiter, then connector `fetch` returns one raw page (exact bytes) + next cursor.
-3. Evidence: write-ahead `evidence_objects` row → stream page bytes to WORM (`If-None-Match: *`, retain-until = matter retention) → mark complete with SHA-256 of the page. Attachments/files are **separate** objects, never embedded in pages.
+3. Evidence (ADR 0002): write-ahead `evidence_objects` row → stream page bytes to WORM (`If-None-Match: *`, lock set at create, rolling retain-until) → mark complete with our streaming SHA-256. Attachments/files are **separate** objects: streamed to the staging bucket while hashing, then copied into the content-addressed WORM key (dedup per tenant) and verified.
 4. Normalizer turns the page into canonical items (messages, message versions, reaction snapshot events, files), each with `raw_hash`, `content_hash`, pointer `(storage_key, json_path)` and idempotency key.
 5. **One transaction:** `INSERT items … ON CONFLICT (idempotency_key) DO NOTHING`; `INSERT job_items` for every observed item; append one `items_collected` custody event with the batch Merkle root; advance `work_units.cursor`; update `collected_count`. Commit.
 6. A crash before step 5 commits replays the page from the old cursor (items dedup, the orphan page object is accounted for by its `evidence_objects` row). A crash after commit resumes from the new cursor.

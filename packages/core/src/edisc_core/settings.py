@@ -50,7 +50,21 @@ class Settings(BaseSettings):
     s3_access_key: SecretStr | None = None
     s3_secret_key: SecretStr | None = None
     s3_evidence_bucket: str = "edisc-evidence"
+    s3_staging_bucket: str = (
+        "edisc-staging"  # unlocked, short expiry; files land here before the WORM copy
+    )
     s3_default_retention_days: int = 1
+    evidence_retention_window_days: int = Field(
+        default=90,
+        ge=1,
+        description="Rolling COMPLIANCE window: objects are locked this far ahead and extended while the "
+        "matter is active, so matter close + expiry can honour destruction requests (ADR 0002).",
+    )
+    evidence_part_size_bytes: int = Field(default=8 * 1024 * 1024, ge=5 * 1024 * 1024)
+    evidence_single_copy_max_bytes: int = Field(
+        default=5 * 1024**3, ge=1, description="Above this, files are copied with UploadPartCopy."
+    )
+    evidence_copy_part_size_bytes: int = Field(default=512 * 1024 * 1024, ge=5 * 1024 * 1024)
     evidence_retention_override_days: int | None = Field(
         default=None,
         ge=1,
@@ -64,9 +78,6 @@ class Settings(BaseSettings):
         default=600,
         ge=0,
         description="The sweeper also anchors streams whose unanchored tail has been idle this long.",
-    )
-    custody_tenant_anchor_retention_days: int = Field(
-        default=3650, ge=1, description="Retention for anchors of tenant-level streams (no matter)."
     )
 
     temporal_address: str = "localhost:7233"

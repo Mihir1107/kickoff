@@ -21,7 +21,7 @@ import json
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import text
@@ -191,8 +191,7 @@ async def _anchor_retain_until(
     ).first()
     if row is not None:
         return effective_retain_until(settings, row.retention_until), row.job_id
-    requested = utc_now() + timedelta(days=settings.custody_tenant_anchor_retention_days)
-    return effective_retain_until(settings, requested), None
+    return effective_retain_until(settings), None  # tenant stream: rolling window only
 
 
 async def anchor_if_due(

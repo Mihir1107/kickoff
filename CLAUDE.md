@@ -61,9 +61,13 @@ make worker / api       # run the Temporal worker / API
 - Tenant isolation: FORCE RLS on every tenant table. The app connects as `edisc_app` (not owner, not superuser,
   no BYPASSRLS) and sets `SET LOCAL app.tenant_id` per transaction via the single `tenant_tx()` helper, in activities too.
   Superuser is only for migrations and tamper tests.
-- Evidence: raw pages stored as exact bytes (page hash recorded); files are always separate objects; items point to
-  `(storage_key, json_path)`. Every write uses `If-None-Match: *`. Matter `retention_until` is required.
-  `EDISC_EVIDENCE_RETENTION_OVERRIDE_DAYS` is honoured only when `EDISC_ENV` is local/ci.
+- Evidence (`edisc_evidence.writer.EvidenceWriter`, ADR 0002): pages -> job-scoped keys, single pass; files -> staging
+  bucket (hash while streaming) -> server-side copy into content-addressed `t/{tenant}/files/sha256/...` (dedup per
+  tenant, advisory-locked, destination verified). Evidence hash = our own streaming SHA-256, never S3's composite.
+  Lock set at create; abort multipart on any failure; `recover_pending` at job finalize. No evidence on local disk.
+- Retention: rolling window `min(matter.retention_until, now + EDISC_EVIDENCE_RETENTION_WINDOW_DAYS)`, extended while the
+  matter is active (extension job: backlog, required before production). Never lock for the full matter upfront.
+  `EDISC_EVIDENCE_RETENTION_OVERRIDE_DAYS` caps it and is honoured only when `EDISC_ENV` is local/ci.
 - Versions: `content_hash` = hash of the version fingerprint defined in ADR 0004, not raw bytes. Reactions never
   create message versions; they are `item_type=event` reaction-snapshot items linked to the message.
 - Custody (`edisc_custody`): call `append`/`append_batch` INSIDE the tenant transaction; after commit call

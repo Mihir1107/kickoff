@@ -129,8 +129,12 @@ async def export_package(
 
         evidence = await session.execute(
             text(
+                # the job's own objects, plus content-addressed files first stored by another job and
+                # shared by dedup: those are found through this job's items, not by job_id
                 "SELECT id, storage_key, kind, state, sha256, size_bytes FROM evidence_objects"
-                " WHERE job_id = :j ORDER BY storage_key"
+                " WHERE job_id = :j OR id IN (SELECT i.evidence_object_id FROM job_items ji"
+                " JOIN items i ON i.tenant_id = ji.tenant_id AND i.id = ji.item_id WHERE ji.job_id = :j)"
+                " ORDER BY storage_key"
             ),
             {"j": job_id},
         )
