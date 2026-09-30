@@ -26,7 +26,7 @@ from edisc_core.settings import Settings
 
 def create_engine(
     settings: Settings,
-    role: Literal["app", "owner", "superuser"] = "app",
+    role: Literal["app", "owner", "superuser", "sweeper"] = "app",
     *,
     db: str | None = None,
     pool_size: int = 10,

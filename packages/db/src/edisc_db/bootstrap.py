@@ -5,8 +5,8 @@ grants) is created by Alembic running as the owner role. In production this step
 provisioning; locally/CI ``make migrate`` runs it.
 
 - ``edisc_owner``: owns the schema and all objects; used only by migrations.
-- ``edisc_sweeper``: NOLOGIN; owns SECURITY DEFINER maintenance functions with row policies limited to
-  what they need (anchor sweeper: ids of streams with overdue anchors).
+- ``edisc_sweeper``: login used only by the anchor sweeper; owns and alone may execute the SECURITY
+  DEFINER lookup of overdue anchor streams (row policy limited to overdue heads, returns ids only).
 - ``edisc_app``: API and workers. NOSUPERUSER, NOBYPASSRLS, NOCREATEDB, NOCREATEROLE, not a member
   of the owner role, cannot create objects in the schema.
 """
@@ -19,8 +19,6 @@ import sys
 import asyncpg
 
 from edisc_core.settings import Settings, get_settings
-
-SWEEPER_ROLE = "edisc_sweeper"
 
 
 async def _ensure_role(conn: asyncpg.Connection, name: str, password: str) -> None:
@@ -39,21 +37,17 @@ async def _ensure_role(conn: asyncpg.Connection, name: str, password: str) -> No
 async def bootstrap(settings: Settings, *, db: str | None = None) -> None:
     database = db or settings.pg_db
     owner, app, schema = settings.pg_owner_user, settings.pg_app_user, settings.pg_schema
+    sweeper = settings.pg_sweeper_user
     conn = await asyncpg.connect(settings.pg_dsn("superuser", db="postgres"))
     try:
         await _ensure_role(conn, owner, settings.pg_owner_password.get_secret_value())
         await _ensure_role(conn, app, settings.pg_app_password.get_secret_value())
-        # NOLOGIN role that owns narrow cross-tenant maintenance functions (e.g. the anchor sweeper).
-        # The owner is a member only so migrations can hand function ownership to it.
-        if not await conn.fetchval("SELECT 1 FROM pg_roles WHERE rolname = $1", SWEEPER_ROLE):
-            await conn.execute(
-                await conn.fetchval(
-                    "SELECT format('CREATE ROLE %I NOLOGIN NOINHERIT', $1::text)", SWEEPER_ROLE
-                )
-            )
+        # Maintenance login used only by the anchor sweeper. It owns the narrow cross-tenant lookup
+        # function and nothing else. The owner is a member only so migrations can manage that function.
+        await _ensure_role(conn, sweeper, settings.pg_sweeper_password.get_secret_value())
         await conn.execute(
             await conn.fetchval(
-                "SELECT format('GRANT %I TO %I', $1::text, $2::text)", SWEEPER_ROLE, owner
+                "SELECT format('GRANT %I TO %I', $1::text, $2::text)", sweeper, owner
             )
         )
         if not await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", database):
@@ -67,21 +61,23 @@ async def bootstrap(settings: Settings, *, db: str | None = None) -> None:
     try:
         stmts = [
             "REVOKE ALL ON DATABASE %1$I FROM PUBLIC",
-            "GRANT CONNECT, TEMPORARY ON DATABASE %1$I TO %2$I, %3$I",
+            "GRANT CONNECT, TEMPORARY ON DATABASE %1$I TO %2$I, %3$I, %5$I",
             "REVOKE ALL ON SCHEMA public FROM PUBLIC",
             "CREATE SCHEMA IF NOT EXISTS %4$I AUTHORIZATION %2$I",
             "ALTER SCHEMA %4$I OWNER TO %2$I",
             "ALTER ROLE %2$I IN DATABASE %1$I SET search_path = %4$I, pg_temp",
             "ALTER ROLE %3$I IN DATABASE %1$I SET search_path = %4$I, pg_temp",
+            "ALTER ROLE %5$I IN DATABASE %1$I SET search_path = %4$I, pg_temp",
         ]
         for stmt in stmts:
             sql = await conn.fetchval(
-                "SELECT format($1::text, $2::text, $3::text, $4::text, $5::text)",
+                "SELECT format($1::text, $2::text, $3::text, $4::text, $5::text, $6::text)",
                 stmt,
                 database,
                 owner,
                 app,
                 schema,
+                sweeper,
             )
             await conn.execute(sql)
     finally:

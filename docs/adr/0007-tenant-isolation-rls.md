@@ -22,6 +22,13 @@ Status: Accepted (2026-09-30), implemented in migration 0001
   and every Temporal activity uses it; pooled connections cannot leak context.
 - **Composite foreign keys** `(tenant_id, x_id) -> parent(tenant_id, id)` make cross-tenant references
   impossible even for code that sets the right context.
+- **SECURITY DEFINER functions** (`create_tenant`, `due_anchor_streams`) pin
+  `search_path = pg_catalog, edisc, pg_temp` (pg_temp last). PUBLIC never has EXECUTE:
+  `create_tenant` is executable by `edisc_app`, and `due_anchor_streams` only by its owner, the
+  `edisc_sweeper` login. The sweeper login can read nothing else in the schema. A test enumerates
+  every definer function and asserts both properties.
+- **Downgrades** are refused outside `EDISC_ENV` local/ci and always need an explicit target
+  revision (fix-forward only in shared environments).
 - **Tests** (`tests/integration/db`): through `edisc_app`, tenant A cannot read B's rows in any table or
   view, insert rows carrying B's id, update B's rows, or move its own rows to B. With no context it sees
   nothing. The app role cannot ALTER/DROP tables, disable or un-force RLS, drop or create policies,

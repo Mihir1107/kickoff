@@ -1,5 +1,9 @@
 """Anchor sweeper: seals overdue chain heads that no writer will ever come back for.
 
+Two identities: ``sweeper_sessions`` (the ``edisc_sweeper`` login, the only role allowed to call
+``due_anchor_streams``) finds overdue streams across tenants; ``sessions`` (the app role) anchors each
+one inside its own tenant transaction.
+
 A stream is swept when ``anchor_due`` is set (a lifecycle event or threshold whose anchor was never
 written, e.g. the worker died) or when its unanchored tail has been idle for
 ``custody_anchor_sweep_idle_seconds`` (e.g. an abandoned job). Run periodically (Temporal schedule, M12).
@@ -32,6 +36,7 @@ class SweepError(ExceptionGroup[Exception]):
 
 
 async def sweep_anchors(
+    sweeper_sessions: async_sessionmaker[AsyncSession],
     sessions: async_sessionmaker[AsyncSession],
     s3: S3Client,
     settings: Settings,
@@ -43,7 +48,8 @@ async def sweep_anchors(
     idle = (
         idle if idle is not None else timedelta(seconds=settings.custody_anchor_sweep_idle_seconds)
     )
-    async with sessions() as session, session.begin():
+    # Cross-tenant lookup (ids only) as the sweeper login; anchoring below as the app role, per tenant.
+    async with sweeper_sessions() as session, session.begin():
         rows = (
             await session.execute(
                 text("SELECT tenant_id, stream_id FROM due_anchor_streams(:idle, :limit, :tenant)"),

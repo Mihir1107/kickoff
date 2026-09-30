@@ -44,7 +44,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             item.add_marker(pytest.mark.integration)
 
 
-Role = Literal["app", "owner", "superuser"]
+Role = Literal["app", "owner", "superuser", "sweeper"]
 Connect = Callable[..., Awaitable[asyncpg.Connection]]
 
 
@@ -74,6 +74,15 @@ async def app_sessions(
     settings: Settings, migrated: None
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     engine = create_engine(settings, "app", pool_size=40)
+    yield session_factory(engine)
+    await engine.dispose()
+
+
+@pytest.fixture(scope="session")
+async def sweeper_sessions(
+    settings: Settings, migrated: None
+) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    engine = create_engine(settings, "sweeper", pool_size=2)
     yield session_factory(engine)
     await engine.dispose()
 

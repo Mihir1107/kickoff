@@ -128,3 +128,21 @@ async def test_app_has_no_update_on_append_only_tables(
                 await conn.execute(f"UPDATE {table} SET tenant_id = tenant_id")
     finally:
         await conn.close()
+
+
+async def test_security_definer_functions_are_hardened(connect: Connect) -> None:
+    """Every SECURITY DEFINER function pins a safe search_path and is not executable by PUBLIC."""
+    conn = await connect("superuser")
+    try:
+        rows = await conn.fetch(
+            "SELECT p.oid::regprocedure::text AS fn, p.proconfig, p.proacl::text[] AS acl"
+            " FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace"
+            " WHERE n.nspname = 'edisc' AND p.prosecdef"
+        )
+    finally:
+        await conn.close()
+    assert {r["fn"].split("(")[0] for r in rows} == {"create_tenant", "due_anchor_streams"}
+    for r in rows:
+        assert "search_path=pg_catalog, edisc, pg_temp" in (r["proconfig"] or []), r["fn"]
+        assert r["acl"] is not None, f"{r['fn']} has default ACL (PUBLIC may execute)"
+        assert not any(entry.startswith("=") for entry in r["acl"]), f"PUBLIC can execute {r['fn']}"

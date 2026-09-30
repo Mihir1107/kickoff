@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     pg_owner_password: SecretStr = SecretStr("")
     pg_app_user: str = "edisc_app"  # API + workers: not owner, not superuser, no BYPASSRLS
     pg_app_password: SecretStr = SecretStr("")
+    pg_sweeper_user: str = "edisc_sweeper"  # anchor sweeper's cross-tenant lookup only
+    pg_sweeper_password: SecretStr = SecretStr("")
     pg_schema: str = "edisc"
 
     redis_url: str = "redis://localhost:6379/0"
@@ -82,10 +84,14 @@ class Settings(BaseSettings):
         return self
 
     def pg_dsn(
-        self, role: Literal["app", "owner", "superuser"] = "app", *, db: str | None = None
+        self,
+        role: Literal["app", "owner", "superuser", "sweeper"] = "app",
+        *,
+        db: str | None = None,
     ) -> str:
         user, pwd = {
             "app": (self.pg_app_user, self.pg_app_password),
+            "sweeper": (self.pg_sweeper_user, self.pg_sweeper_password),
             "owner": (self.pg_owner_user, self.pg_owner_password),
             "superuser": (self.pg_superuser, self.pg_superuser_password),
         }[role]

@@ -8,6 +8,8 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 
+from edisc_core.settings import get_settings
+
 ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
 
 
@@ -22,8 +24,21 @@ def upgrade(database: str | None = None, revision: str = "head") -> None:
     command.upgrade(alembic_config(database), revision)
 
 
+class DowngradeRefusedError(RuntimeError):
+    pass
+
+
 def downgrade(database: str | None = None, *, revision: str) -> None:
-    """Downgrade to an explicit revision. There is deliberately no default: "base" drops everything."""
+    """Downgrade to an explicit revision, local/ci only. There is no default: "base" drops everything.
+
+    Outside disposable environments schema changes only move forward (fix-forward migrations): a
+    downgrade would drop append-only evidence tables or custody columns.
+    """
+    settings = get_settings()
+    if not settings.env.is_disposable:
+        raise DowngradeRefusedError(
+            f"downgrade refused: EDISC_ENV={settings.env.value} (only local/ci)"
+        )
     command.downgrade(alembic_config(database), revision)
 
 
