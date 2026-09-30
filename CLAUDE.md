@@ -78,6 +78,9 @@ make worker / api       # run the Temporal worker / API
 - Keep `edisc_custody.package`/`cli`/`chain`/`merkle` free of DB and cloud imports (a test enforces it).
 - `completed_unverified` is never presented as a clean completion (ADR 0005).
 - Secrets: `.env.example` has placeholders only. Never commit `.env`. Wrap secrets in `SecretStr`.
+- Connection tokens (ADR 0009): only via `edisc_db.connection_tokens` (store/load/refresh_tokens/rewrap_tenant_tokens)
+  with a `SecretBox` over a `KmsClient`. Context = tenant + connection + purpose. Never pass tokens to Temporal,
+  never log them, never add a new secret column without envelope encryption + context binding.
 
 ## Working agreement
 - One milestone at a time: implement → tests → run → commit (message ends with the attribution trailer).

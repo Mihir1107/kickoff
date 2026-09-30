@@ -10,5 +10,6 @@
 | 0006 | Exactly-once effects via one transaction per batch |
 | 0007 | Tenant isolation with Postgres row-level security |
 | 0008 | Custody package format and offline verifier (`edisc-verify`) |
+| 0009 | Envelope encryption for connection tokens |
 
 New ADRs: copy the structure (Status / Context / Decision / Consequences). Superseded ADRs are kept and marked.
