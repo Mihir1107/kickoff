@@ -33,7 +33,10 @@ class DatasetSpec(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     seed: int
-    dialect: Literal["slack"] = "slack"  # a "teams" dialect can be added without touching the model
+    # "slack": Discovery-style, deleted messages come back as tombstones.
+    # "slack_history": standard conversations.history, deleted messages are OMITTED entirely.
+    # A "teams" dialect can be added without touching the model.
+    dialect: Literal["slack", "slack_history"] = "slack"
     workspace_id: str = "T0DUMMY01"
     conversations: int = Field(default=4, ge=1)
     days: int = Field(default=3, ge=1)  # base days at epoch 0; every epoch adds one more day

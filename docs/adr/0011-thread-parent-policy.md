@@ -26,9 +26,14 @@ be outside the agreed scope of the matter.
   counted toward `expected` / `collected`, and they are listed separately in the collection report.
 - The policy used is recorded on the scope and in custody events.
 
-## To confirm with the product owner
-1. Is `include_parent_and_thread` the right default, or should the default be the strictest
-   (`replies_only`) with context as an explicit opt-in per matter?
-2. Should out-of-range context be producible, or review-only?
-3. The mirror case (parent in range, replies after the range end) is not covered by this policy today:
-   replies outside the range are not collected. Should it be?
+## Recommended answers (engineering, 2026-09-30), pending product-owner confirmation
+1. **Default stays `include_parent_and_thread`.** Collect wide, produce narrow: context can be
+   excluded later, but material not collected cannot be recovered after the source changes.
+2. **Out-of-range context is collected and reviewable.** Whether it is producible is decided at
+   production time, not at collection. Collection only marks it out-of-range.
+3. **The mirror case is covered.** Under `include_parent_and_thread`, an in-range parent whose replies
+   fall after the range end gets its full thread collected, with those replies marked out-of-range.
+   Implemented in the dummy source (`Dataset.after_range_threads`) and tested.
+   `include_parent_only` and `replies_only` add nothing in the mirror case.
+
+Status remains **Proposed** until the product owner confirms these three answers.

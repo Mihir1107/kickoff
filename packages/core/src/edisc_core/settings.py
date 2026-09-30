@@ -84,6 +84,11 @@ class Settings(BaseSettings):
         default=5 * 1024**3, ge=1, description="Above this, files are copied with UploadPartCopy."
     )
     evidence_copy_part_size_bytes: int = Field(default=512 * 1024 * 1024, ge=5 * 1024 * 1024)
+    evidence_copy_timeout_seconds: float = Field(
+        default=1800,
+        gt=0,
+        description="Max time a file promotion (copy into WORM) may hold its content lock.",
+    )
     evidence_retention_override_days: int | None = Field(
         default=None,
         ge=1,

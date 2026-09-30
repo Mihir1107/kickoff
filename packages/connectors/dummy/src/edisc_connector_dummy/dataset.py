@@ -289,11 +289,20 @@ class Dataset:
             return ()
         return self._unit(conversation_id, day_index, epoch)
 
+    @property
+    def omits_deleted(self) -> bool:
+        return self.spec.dialect == "slack_history"
+
+    def visible_messages(self, conversation_id: str, day_index: int, epoch: int) -> tuple[Msg, ...]:
+        """What the SOURCE shows: everything, except deleted messages in the omission dialect."""
+        msgs = self.unit_messages(conversation_id, day_index, epoch)
+        return tuple(m for m in msgs if m.deleted_ts is None) if self.omits_deleted else msgs
+
     def expected_count(self, conversation_id: str, day_index: int, epoch: int) -> int:
-        return len(self.unit_messages(conversation_id, day_index, epoch))
+        return len(self.visible_messages(conversation_id, day_index, epoch))
 
     def expected_ids(self, conversation_id: str, day_index: int, epoch: int) -> frozenset[str]:
-        return frozenset(m.ts for m in self.unit_messages(conversation_id, day_index, epoch))
+        return frozenset(m.ts for m in self.visible_messages(conversation_id, day_index, epoch))
 
     def total_messages(self, epoch: int) -> int:
         return self.spec.conversations * self.n_days(epoch) * self.spec.messages_per_unit
@@ -502,10 +511,12 @@ class Dataset:
         """Parent first, then every reply that exists at ``epoch`` (same day and next day), by ts."""
         d = self.day_index(ts_to_datetime(thread_ts).date())
         msgs = [
-            m for m in self.unit_messages(conversation_id, d, epoch) if m.thread_ts == thread_ts
+            m for m in self.visible_messages(conversation_id, d, epoch) if m.thread_ts == thread_ts
         ]
         msgs += [
-            m for m in self.unit_messages(conversation_id, d + 1, epoch) if m.thread_ts == thread_ts
+            m
+            for m in self.visible_messages(conversation_id, d + 1, epoch)
+            if m.thread_ts == thread_ts
         ]
         parent = [m for m in msgs if m.ts == thread_ts]
         rest = sorted((m for m in msgs if m.ts != thread_ts), key=lambda m: m.ts)
@@ -516,7 +527,7 @@ class Dataset:
     ) -> tuple[str, ...]:
         """thread_ts of threads with a reply in this unit whose parent was sent before ``date_from``."""
         seen: list[str] = []
-        for m in self.unit_messages(conversation_id, day_index, epoch):
+        for m in self.visible_messages(conversation_id, day_index, epoch):
             if (
                 m.thread_ts
                 and m.thread_ts != m.ts
@@ -526,21 +537,43 @@ class Dataset:
                 seen.append(m.thread_ts)
         return tuple(seen)
 
+    def after_range_threads(
+        self, conversation_id: str, day_index: int, epoch: int, date_to: datetime
+    ) -> tuple[str, ...]:
+        """Mirror case: parents IN this unit with replies sent at/after ``date_to``."""
+        return tuple(
+            m.ts
+            for m in self.visible_messages(conversation_id, day_index, epoch)
+            if m.is_parent and any(ts_to_datetime(r) >= date_to for r in m.reply_ts)
+        )
+
     def thread_context(
         self,
         conversation_id: str,
         day_index: int,
         epoch: int,
         date_from: datetime,
+        date_to: datetime,
         policy: ThreadParentPolicy,
     ) -> tuple[tuple[str, tuple[Msg, ...]], ...]:
-        """What the policy adds for this unit: (thread_ts, messages) per out-of-range-parent thread."""
+        """What the policy adds for this unit, as (thread_ts, messages):
+        - replies in range whose parent is before the range: the parent (parent_only) or the full
+          thread (include_parent_and_thread);
+        - mirror case (include_parent_and_thread only): parents in range with replies after the range.
+        """
         if policy is ThreadParentPolicy.REPLIES_ONLY:
             return ()
-        out = []
+        out: list[tuple[str, tuple[Msg, ...]]] = []
         for thread_ts in self.out_of_range_parents(conversation_id, day_index, epoch, date_from):
             full = self.thread(conversation_id, thread_ts, epoch)
             out.append(
                 (thread_ts, full[:1] if policy is ThreadParentPolicy.INCLUDE_PARENT_ONLY else full)
+            )
+        if policy is ThreadParentPolicy.INCLUDE_PARENT_AND_THREAD:
+            out.extend(
+                (thread_ts, self.thread(conversation_id, thread_ts, epoch))
+                for thread_ts in self.after_range_threads(
+                    conversation_id, day_index, epoch, date_to
+                )
             )
         return tuple(out)

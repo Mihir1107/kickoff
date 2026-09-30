@@ -173,7 +173,7 @@ class DummyConnector:
         f = spec.failures
         items = [
             m
-            for m in ds.unit_messages(conv, d, epoch)
+            for m in ds.visible_messages(conv, d, epoch)
             if not (f.drop_rate > 0 and unit(ds.seed, "drop", f.seed, conv, m.ts) < f.drop_rate)
         ]
         if spec.messy_pagination:  # out-of-order: deterministic neighbour swaps
@@ -203,9 +203,9 @@ class DummyConnector:
             )
             pos += size
             page += 1
-        date_from = ensure_utc(scope.date_from)
+        date_from, date_to = ensure_utc(scope.date_from), ensure_utc(scope.date_to)
         for thread_ts, msgs in ds.thread_context(
-            conv, d, epoch, date_from, scope.thread_parent_policy
+            conv, d, epoch, date_from, date_to, scope.thread_parent_policy
         ):
             req = {
                 "method": "conversations.replies",

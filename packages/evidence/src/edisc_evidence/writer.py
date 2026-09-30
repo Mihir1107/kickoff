@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import random
 import uuid
 from collections.abc import AsyncIterable, AsyncIterator
 from contextlib import asynccontextmanager
@@ -27,19 +28,32 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+import asyncpg
 from botocore.exceptions import ClientError
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
 from types_aiobotocore_s3.type_defs import CompletedPartTypeDef, CopySourceTypeDef
 
 from edisc_core.ids import new_id
+from edisc_core.logs import get_logger
 from edisc_core.settings import Settings
 from edisc_core.time import ensure_utc
 from edisc_db.session import tenant_tx
 from edisc_evidence.retention import effective_retain_until
 from edisc_evidence.upload import Lock, UploadResult, rehash_object, stream_upload
 from edisc_evidence.worm import list_versions
+
+log = get_logger(__name__)
+
+
+class EvidenceCopyTimeoutError(TimeoutError):
+    """Promotion (copy into WORM) exceeded its timeout. Retryable: the row stays pending with its source
+    hash, and the next writer of the same content completes it under the lock."""
+
+
+class ContentLockTimeoutError(TimeoutError):
+    """Waited longer than the copy timeout for another writer's content lock. Retryable."""
 
 
 class EvidenceIntegrityError(RuntimeError):
@@ -187,7 +201,16 @@ class EvidenceWriter:
         # Serialize writers of the same content: MinIO ignores If-None-Match on CopyObject, so the DB
         # advisory lock (dedicated autocommit connection, held for the whole promotion) prevents a second copy.
         async with self._content_lock(key):
-            return await self._promote_locked(tenant_id, job_id, staging_key, staged, key, retain)
+            try:
+                # a hung copy must not hold the content lock forever
+                async with asyncio.timeout(self._settings.evidence_copy_timeout_seconds):
+                    return await self._promote_locked(
+                        tenant_id, job_id, staging_key, staged, key, retain
+                    )
+            except TimeoutError as exc:
+                raise EvidenceCopyTimeoutError(
+                    f"{key}: promotion exceeded {self._settings.evidence_copy_timeout_seconds}s; lock released"
+                ) from exc
 
     async def _promote_locked(
         self,
@@ -260,33 +283,52 @@ class EvidenceWriter:
 
     @asynccontextmanager
     async def _content_lock(self, key: str) -> AsyncIterator[None]:
-        """Session-level advisory lock on a content key, held on a dedicated AUTOCOMMIT connection.
+        """Session-level advisory lock on a content key, on a DEDICATED, never-pooled connection.
 
-        - Not inside a transaction, so a long copy is not "idle in transaction" and is not killed by
-          idle_in_transaction_session_timeout.
-        - Waiters POLL with pg_try_advisory_lock (no blocking lock wait), so lock_timeout never fires
-          while another worker legitimately copies a large file.
-        - If this process dies, the connection closes and Postgres releases the lock.
+        - A direct asyncpg connection opened for this lock only (not from the SQLAlchemy pool), outside
+          any transaction: a long copy is never "idle in transaction", and no other work can run on it.
+        - Unlocked in ``finally``; the connection is ALWAYS closed afterwards (terminated if closing
+          hangs). Closing a session releases its advisory locks even if the unlock itself failed.
+        - Waiters poll ``pg_try_advisory_lock`` with capped exponential backoff and jitter, up to a
+          deadline (copy timeout + margin), then raise a retryable ``ContentLockTimeoutError``.
         """
-        engine: AsyncEngine = self._sessions.kw["bind"]
-        async with engine.connect() as raw:
-            conn = await raw.execution_options(isolation_level="AUTOCOMMIT")
+        settings = self._settings
+        conn = await asyncpg.connect(
+            settings.pg_dsn("app"), server_settings={"application_name": "edisc-content-lock"}
+        )
+        try:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + settings.evidence_copy_timeout_seconds + 60
             delay = 0.05
-            while True:
-                result = await conn.execute(
-                    text("SELECT pg_try_advisory_lock(hashtextextended(:k, 0))"), {"k": key}
-                )
-                acquired: bool = bool(result.scalar_one())
-                if acquired:
-                    break
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, 1.0)
+            while not await conn.fetchval(
+                "SELECT pg_try_advisory_lock(hashtextextended($1, 0))", key
+            ):
+                if loop.time() >= deadline:
+                    raise ContentLockTimeoutError(
+                        f"{key}: another writer held the content lock too long"
+                    )
+                await asyncio.sleep(delay * random.uniform(0.5, 1.0))  # noqa: S311 - jitter, not crypto
+                delay = min(delay * 2, 2.0)
             try:
                 yield
             finally:
-                await conn.execute(
-                    text("SELECT pg_advisory_unlock(hashtextextended(:k, 0))"), {"k": key}
-                )
+                try:
+                    await asyncio.wait_for(
+                        conn.execute("SELECT pg_advisory_unlock(hashtextextended($1, 0))", key),
+                        timeout=10,
+                    )
+                except (asyncpg.PostgresError, OSError, TimeoutError) as unlock_exc:
+                    # closing the connection below releases the lock anyway; record, never swallow silently
+                    log.warning(
+                        "advisory unlock failed; closing the lock connection releases it",
+                        key=key,
+                        error=type(unlock_exc).__name__,
+                    )
+        finally:
+            try:
+                await asyncio.wait_for(conn.close(), timeout=10)
+            except (asyncpg.PostgresError, OSError, TimeoutError):
+                conn.terminate()
 
     async def _copy_into_worm(
         self, staging_key: str, key: str, staged: UploadResult, retain_until: datetime

@@ -234,7 +234,9 @@ async def test_replies_in_range_with_parent_out_of_range(policy: ThreadParentPol
         )  # the full thread repeats in-range replies: dedup downstream
     # oracle agreement
     oracle = {
-        m.ts for _, msgs in ds.thread_context(conv, 1, 0, scope.date_from, policy) for m in msgs
+        m.ts
+        for _, msgs in ds.thread_context(conv, 1, 0, scope.date_from, scope.date_to, policy)
+        for m in msgs
     }
     assert {m["ts"] for m in context} == oracle
 
@@ -261,3 +263,55 @@ async def test_enumerate_scopes() -> None:
     expected = {cv.id for cv in ds.conversations() if member in cv.members}
     assert {u.conversation_id for u in await units(c, conn, custodian)} == expected
     assert len(await units(c, conn, full_scope(spec, first_day=1, days=1))) == spec.conversations
+
+
+@pytest.mark.parametrize("policy", list(ThreadParentPolicy))
+async def test_mirror_case_parent_in_range_with_replies_after_the_range(
+    policy: ThreadParentPolicy,
+) -> None:
+    spec = make_spec()
+    ds = Dataset(spec)
+    c, _ = connector()
+    conn = connection(spec)
+    scope = full_scope(
+        spec, first_day=0, days=1, policy=policy
+    )  # only day 0; day 1 is AFTER the range
+    conv = ds.conversations()[0].id
+    u = WorkUnit(conv, ds.day(0))
+    mirror = ds.after_range_threads(conv, 0, 0, scope.date_to)
+    assert mirror, "day-0 parents with day-1 replies are guaranteed"
+    context = [
+        m
+        for b in await batches(c, conn, u, scope)
+        if b.kind is BatchKind.THREAD_CONTEXT
+        for m in messages(b)
+    ]
+    after = {m["ts"] for m in context if ts_to_datetime(m["ts"]) >= scope.date_to}
+    if policy is ThreadParentPolicy.INCLUDE_PARENT_AND_THREAD:
+        expected_after = {
+            m.ts for p in mirror for m in ds.thread(conv, p, 0) if m.sent_at >= scope.date_to
+        }
+        assert (
+            after == expected_after and after
+        )  # replies after the range are collected (marked out-of-range)
+    else:
+        assert after == set()
+
+
+async def test_history_dialect_omits_deleted_messages_entirely() -> None:
+    spec = make_spec(dialect="slack_history")
+    ds = Dataset(spec)
+    conv0 = ds.conversations()[0].id
+    deleted_ts = ds.ts(conv0, 0, 7)  # forced deletion at epoch 1
+    e0, e1 = await _state(spec, 0), await _state(spec, 1)
+    assert (conv0, deleted_ts) in e0
+    assert (conv0, deleted_ts) not in e1  # gone without a trace: no tombstone
+    assert not any(m.get("subtype") == "message_deleted" for m in e1.values())
+    c, _ = connector()
+    u = WorkUnit(conv0, ds.day(0))
+    truth = ds.unit_messages(conv0, 0, 1)
+    assert await c.expected_count(connection(spec, 1), u) == len(
+        [m for m in truth if m.deleted_ts is None]
+    )
+    tombstone_spec = make_spec()
+    assert (await _state(tombstone_spec, 1))[(conv0, deleted_ts)]["subtype"] == "message_deleted"

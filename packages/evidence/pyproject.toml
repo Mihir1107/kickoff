@@ -5,6 +5,7 @@ description = "Evidence writer: streaming SHA-256, S3 multipart upload, object l
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "aiobotocore>=3.9.1",
+    "asyncpg>=0.31.0",
     "edisc-core",
     "edisc-db",
 ]

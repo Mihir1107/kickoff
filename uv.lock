@@ -463,6 +463,7 @@ version = "0.1.0"
 source = { editable = "packages/evidence" }
 dependencies = [
     { name = "aiobotocore" },
+    { name = "asyncpg" },
     { name = "edisc-core" },
     { name = "edisc-db" },
 ]
@@ -470,6 +471,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "aiobotocore", specifier = ">=3.9.1" },
+    { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "edisc-core", editable = "packages/core" },
     { name = "edisc-db", editable = "packages/db" },
 ]
