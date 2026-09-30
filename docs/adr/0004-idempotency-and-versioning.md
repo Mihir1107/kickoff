@@ -59,6 +59,61 @@ fetches (reply counters, presigned URLs, profile embeds), so hashing raw bytes w
 - Each source's fingerprint mapping is documented here as it lands (dummy in Phase 1; Slack/Teams later).
   Changing a fingerprint definition is a normalizer version bump.
 
+## Implementation (M10: `packages/normalizer`, migration 0009)
+
+**Pure core.** `edisc_normalizer.slack` maps raw page bytes plus a prior-state snapshot plus
+collected file evidence to derived records. It does no I/O, uses no clock, and is deterministic.
+`edisc_normalizer.store` loads prior state and persists, inside the caller's batch transaction.
+
+**Identity:**
+- messages: `{workspace}/{channel}/{ts}` (channel + ts, never ts alone);
+- files: `{workspace}/file/{id}`;
+- directory profiles: `{workspace}/user/{id}#profile`;
+- profile embeds: `…#profile-embed`;
+- derived streams: `{subject}#reactions`, `#change`, `#observation`.
+
+Fingerprints carry an `fp` tag (e.g. `slack.message/1`); changing a definition changes the tag.
+
+**Files are inputs.** The pipeline downloads referenced files first. Each file's content hash
+(`slack.file/1`: bytes SHA-256, name, mime type) goes into the message fingerprint. A missing file
+raises; it is never guessed.
+
+**Profile embeds** (`user_profile` in messages) show what the message displayed about its author.
+They become `#profile-embed` identity snapshots, a set of observed states with no latest/revert
+semantics because they are historical. Directory snapshots (`#profile`) are versioned with revert
+detection. Messages reference user ids only.
+
+**Reverts are observed.** The idempotency key would make a return to an earlier state (A→B→A) a
+silent no-op. The normalizer emits a `#change` observation `{kind: reverted, from, to, occurrence}` for
+messages, reaction snapshots and directory profiles.
+
+**Absence is never deletion:**
+- Only an explicit tombstone creates a deleted version.
+- A message recorded before for a conversation-day and missing from a complete re-collection of that
+  unit gets a `no_longer_observed` observation (event kind of the same name). It points at the unit's
+  last page, where it was absent.
+- If it reappears, it gets `observed_again`.
+- Occurrence counters keep repeated disappearances distinct.
+
+**Reactions:** a snapshot whenever present, and an empty snapshot when a live message that had
+reactions no longer has them (Slack omits empty reaction lists). Tombstones say nothing about
+reactions.
+
+**Derived records** live in `item_derivations`: one row per (item, normalizer version), append-only.
+- Reprocessing stored raw pages with a newer normalizer adds derivation rows only.
+- Items (keyed by fingerprint) and evidence objects, including their retention, are untouched.
+- The normalizer version is also recorded on each item row that it created.
+
+**Verified by** `tests/integration/normalizer`:
+- After each of epochs 0, 1 and 2 (both dialects: tombstones, and omission of deleted messages), the
+  database equals an oracle computed independently from the dummy model. That covers versions, change
+  observations, reverts, reaction snapshots, directory and embed identity snapshots, files, and
+  no-longer-observed / observed-again items.
+- Idempotency (same page twice gives zero rows; overlapping pages give no duplicates) and reprocessing
+  are also tested.
+- Mutation-checked: a volatile field leaking into the fingerprint, missing hint observations, and
+  missing absence detection each fail.
+
 ## Consequences
 - + Re-fetches are free no-ops; edits/deletes produce versions; nothing volatile is lost.
 - − Fingerprint definitions are consequential and must be reviewed per source.

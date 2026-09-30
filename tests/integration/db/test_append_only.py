@@ -9,7 +9,7 @@ from edisc_core.ids import new_id
 
 from .conftest import HEX, Connect, Seeded, seed_tenant, tenant_ctx
 
-APPEND_ONLY = ["custody_events", "items", "job_items"]
+APPEND_ONLY = ["custody_events", "items", "job_items", "item_derivations"]
 NO_TRUNCATE = [*APPEND_ONLY, "evidence_objects", "custody_chain_heads", "matters", "tenants"]
 
 

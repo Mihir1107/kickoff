@@ -71,6 +71,10 @@ make worker / api       # run the Temporal worker / API
   `EDISC_EVIDENCE_RETENTION_OVERRIDE_DAYS` caps it and is honoured only when `EDISC_ENV` is local/ci.
 - Versions: `content_hash` = hash of the version fingerprint defined in ADR 0004, not raw bytes. Reactions never
   create message versions; they are `item_type=event` reaction-snapshot items linked to the message.
+- Normalizer (`edisc_normalizer`): `slack.py` is PURE (bytes + prior state + file evidence -> `Derived`); all DB access
+  is in `store.py` (load_prior / previously_observed / persist). Absence is never deletion (no_longer_observed);
+  reverts are observed; derived records go to `item_derivations` per normalizer version. Download a page's files
+  (`file_refs`) before normalizing it. Tests compare against the oracle in `tests/integration/normalizer/oracle.py`.
 - Custody (`edisc_custody`): call `append`/`append_batch` INSIDE the tenant transaction; after commit call
   `anchor_if_due` (WORM anchor of the head). Lifecycle events and every N events are anchored; `seal_job_chain` at
   finalize; `sweep_anchors` (periodic) seals overdue/abandoned streams. `verify_chain` (DB) and `edisc-verify` (offline package, ADR 0008) share `ChainVerifier`. Anchors are always

@@ -144,6 +144,20 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
             unit_key,
             ids["event"],
         )
+        await conn.execute(
+            "INSERT INTO item_derivations (tenant_id, item_id, normalizer_version, derived, derived_hash)"
+            " VALUES ($1, $2, '0.0.0-test', '{}', $3)",
+            t,
+            ids["item"],
+            HEX,
+        )
+        await conn.execute(
+            "INSERT INTO token_refresh_journal (id, tenant_id, connection_id, based_on_version,"
+            " encrypted_access_token, token_key_id, token_key_version) VALUES ($1, $2, $3, 0, 'x', 'k', '1')",
+            new_id(),
+            t,
+            ids["conn"],
+        )
     return Seeded(
         t,
         ids["matter"],
@@ -179,5 +193,7 @@ TENANT_TABLES = [
     "job_items",
     "custody_events",
     "custody_chain_heads",
+    "item_derivations",
+    "token_refresh_journal",
 ]
 ALL_TABLES = ["tenants", *TENANT_TABLES]

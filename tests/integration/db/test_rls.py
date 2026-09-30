@@ -17,6 +17,7 @@ COPY_OVERRIDES = {
     "work_units": "'unit_key', 'X/' || gen_random_uuid()",
     "job_items": "'item_id', gen_random_uuid()",
     "custody_chain_heads": "'stream_id', gen_random_uuid()",
+    "item_derivations": "'normalizer_version', gen_random_uuid()::text",
 }
 UPDATABLE = {
     "matters": "name",
@@ -26,6 +27,7 @@ UPDATABLE = {
     "collection_jobs": "status",
     "work_units": "cursor",
     "custody_chain_heads": "last_hash",
+    "token_refresh_journal": "state",
 }
 
 

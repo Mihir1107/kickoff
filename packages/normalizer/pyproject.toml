@@ -5,10 +5,12 @@ description = "Raw -> canonical message mapping, dedup, custodian resolution."
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "edisc-core",
+    "edisc-db",
 ]
 
 [tool.uv.sources]
 edisc-core = { workspace = true }
+edisc-db = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

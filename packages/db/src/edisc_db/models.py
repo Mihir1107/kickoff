@@ -266,6 +266,8 @@ class CustodyChainHead(Base):
 class Item(Base):
     __tablename__ = "items"
     __table_args__ = (
+        Index(None, "tenant_id", "source", "sent_at"),
+        Index(None, "tenant_id", "source", "source_item_id"),
         UniqueConstraint("tenant_id", "id"),
         UniqueConstraint("tenant_id", "idempotency_key"),
         UniqueConstraint("tenant_id", "source", "source_item_id", "version"),
@@ -322,6 +324,20 @@ class TokenRefreshJournal(Base):
     state: Mapped[str] = mapped_column(Text, server_default=text("'received'"))
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     resolved_at: Mapped[datetime | None] = mapped_column(TZ)
+
+
+class ItemDerivation(Base):
+    __tablename__ = "item_derivations"
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id", "item_id"], ["items.tenant_id", "items.id"]),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    item_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    normalizer_version: Mapped[str] = mapped_column(Text, primary_key=True)
+    derived: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    derived_hash: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
 
 
 class JobItem(Base):

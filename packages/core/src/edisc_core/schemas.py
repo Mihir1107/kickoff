@@ -39,6 +39,8 @@ class EventKind(StrEnum):
     REACTION_SNAPSHOT = "reaction_snapshot"
     IDENTITY_SNAPSHOT = "identity_snapshot"
     CHANGE_OBSERVATION = "change_observation"
+    NO_LONGER_OBSERVED = "no_longer_observed"  # absence is never deletion
+    OBSERVED_AGAIN = "observed_again"
 
 
 class ScopeType(StrEnum):
