@@ -17,6 +17,7 @@ Verify path
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from collections.abc import Sequence
@@ -220,19 +221,28 @@ async def anchor_if_due(
             return None
         retain_until, job_id = await _anchor_retain_until(session, settings, stream_id)
         key = anchor_key(str(tenant_id), str(stream_id), head.last_seq)
+        body = anchor_document(
+            tenant_id=str(tenant_id),
+            stream_id=str(stream_id),
+            seq=head.last_seq,
+            event_hash=head.last_hash,
+        )
+        # the anchor's hash is known before the object exists: persisted with the row (provenance)
         await session.execute(
             text(
-                "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind, retain_until)"
-                " VALUES (:id, :t, :j, :k, 'anchor', :r) ON CONFLICT (storage_key) DO NOTHING"
+                "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind, retain_until,"
+                " source_sha256, source_hash_origin)"
+                " VALUES (:id, :t, :j, :k, 'anchor', :r, :h, 'collection') ON CONFLICT (storage_key) DO NOTHING"
             ),
-            {"id": new_id(), "t": tenant_id, "j": job_id, "k": key, "r": retain_until},
+            {
+                "id": new_id(),
+                "t": tenant_id,
+                "j": job_id,
+                "k": key,
+                "r": retain_until,
+                "h": hashlib.sha256(body).hexdigest(),
+            },
         )
-    body = anchor_document(
-        tenant_id=str(tenant_id),
-        stream_id=str(stream_id),
-        seq=head.last_seq,
-        event_hash=head.last_hash,
-    )
     stored = await put_immutable(
         s3, bucket=settings.s3_evidence_bucket, key=key, body=body, retain_until=retain_until
     )
@@ -240,9 +250,9 @@ async def anchor_if_due(
         await session.execute(
             text(
                 "UPDATE evidence_objects SET state = 'complete', sha256 = :h, size_bytes = :n,"
-                " completed_at = now() WHERE storage_key = :k AND state = 'pending'"
+                " version_id = :v, completed_at = now() WHERE storage_key = :k AND state = 'pending'"
             ),
-            {"h": stored.sha256, "n": stored.size, "k": key},
+            {"h": stored.sha256, "n": stored.size, "v": stored.version_id, "k": key},
         )
         await session.execute(
             text(

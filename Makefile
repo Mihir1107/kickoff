@@ -7,13 +7,17 @@ CI_SERVICES := postgres redis minio temporal
 INIT_JOBS := minio-init temporal-namespace
 
 .DEFAULT_GOAL := help
-.PHONY: help sync up up-ci down nuke ps logs migrate lint fmt typecheck test test-integration test-all worker api check
+.PHONY: help hooks sync up up-ci down nuke ps logs migrate lint fmt typecheck test test-integration test-all worker api check
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
 
 .env:
 	cp .env.example .env
+
+hooks: ## Install git hooks (pre-commit: ruff lint/format + mypy on staged Python files)
+	git config core.hooksPath scripts/git-hooks
+	@echo "git hooks installed from scripts/git-hooks"
 
 sync: ## Install/refresh the uv workspace
 	uv sync --all-packages

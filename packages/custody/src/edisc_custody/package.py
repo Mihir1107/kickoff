@@ -106,6 +106,19 @@ def verify_package(root: Path) -> PackageReport:
     objects_dir = root / "objects"
     for rec in _lines(root / "evidence.jsonl"):
         evidence[rec["id"]] = rec
+        if rec.get("state") == "complete" and not rec.get("version_id"):
+            report.errors.append(
+                f"evidence {rec['storage_key']}: complete but no pinned version_id"
+            )
+        if rec.get("state") == "complete" and rec.get("sha256") != rec.get("source_sha256"):
+            report.errors.append(
+                f"evidence {rec['storage_key']}: stored hash differs from the source hash"
+            )
+        if rec.get("shadow_versions"):
+            report.errors.append(
+                f"storage incident: {rec['storage_key']} has version(s) {rec['shadow_versions']} besides the"
+                f" pinned {rec.get('version_id')}; the pinned version is what was exported and verified"
+            )
         if (
             manifest.get("objects_included")
             and rec.get("state") == "complete"

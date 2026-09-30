@@ -131,7 +131,8 @@ async def export_package(
             text(
                 # the job's own objects, plus content-addressed files first stored by another job and
                 # shared by dedup: those are found through this job's items, not by job_id
-                "SELECT id, storage_key, kind, state, sha256, size_bytes FROM evidence_objects"
+                "SELECT id, storage_key, kind, state, sha256, size_bytes, version_id, source_sha256,"
+                " source_hash_origin FROM evidence_objects"
                 " WHERE job_id = :j OR id IN (SELECT i.evidence_object_id FROM job_items ji"
                 " JOIN items i ON i.tenant_id = ji.tenant_id AND i.id = ji.item_id WHERE ji.job_id = :j)"
                 " ORDER BY storage_key"
@@ -141,11 +142,24 @@ async def export_package(
         evidence_rows = [dict(r._mapping) for r in evidence]
 
     for ev_row in evidence_rows:
-        writers["evidence.jsonl"].write({k: _str(v) for k, v in ev_row.items()})
+        # Record every OTHER version at the key: shadows are storage incidents the expert must see.
+        shadows = sorted(
+            [
+                v.version_id
+                async for v in list_versions(s3, bucket=bucket, prefix=ev_row["storage_key"])
+                if v.key == ev_row["storage_key"] and v.version_id != ev_row["version_id"]
+            ]
+        )
+        writers["evidence.jsonl"].write(
+            {**{k: _str(v) for k, v in ev_row.items()}, "shadow_versions": shadows}
+        )
         if include_objects and ev_row["state"] == "complete" and ev_row["kind"] in ("page", "file"):
             target = objects_dir / ev_row["sha256"]
             if not await asyncio.to_thread(target.exists):
-                data = await get_bytes(s3, bucket=bucket, key=ev_row["storage_key"])
+                # always the PINNED version, never "latest" (which may be a shadow)
+                data = await get_bytes(
+                    s3, bucket=bucket, key=ev_row["storage_key"], version_id=ev_row["version_id"]
+                )
                 await asyncio.to_thread(target.write_bytes, data)
 
     manifest = {

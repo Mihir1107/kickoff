@@ -16,11 +16,13 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
 
+from edisc_core.ids import new_id
 from edisc_core.settings import Settings
-from edisc_core.time import format_utc
+from edisc_core.time import format_utc, utc_now
+from edisc_custody.recovery import complete_by_refetch, recover_job_evidence
 from edisc_db.session import tenant_tx
 from edisc_evidence.upload import rehash_object
-from edisc_evidence.writer import EvidenceWriter, file_key
+from edisc_evidence.writer import EvidenceIntegrityError, EvidenceWriter, file_key
 
 from .conftest import PART, Ctx, one_shot, rand
 
@@ -67,8 +69,8 @@ async def test_sigkill_mid_page_upload_leaves_no_object_and_is_recoverable(
     )
     assert len(parts.get("Parts", [])) >= 2  # the upload really was mid-flight
 
-    counts = await writer.recover_pending(tenant_id=ctx.tenant_id, job_id=ctx.job_id)
-    assert counts == {"completed": 0, "missing": 1, "left_pending": 0}
+    report = await writer.recover_pending(tenant_id=ctx.tenant_id, job_id=ctx.job_id)
+    assert (report.missing, report.completed, report.needs_refetch) == ([row.id], [], [])
     with pytest.raises(ClientError) as exc:
         await s3.list_parts(
             Bucket=ev_settings.s3_evidence_bucket, Key=row.storage_key, UploadId=row.upload_id
@@ -81,7 +83,7 @@ async def test_sigkill_mid_page_upload_leaves_no_object_and_is_recoverable(
         matter_retention_until=ctx.matter_retention_until,
         stream=one_shot(b'{"messages": []}'),
     )
-    assert await writer.verify(tenant_id=ctx.tenant_id, evidence_id=retry.evidence_id)
+    assert (await writer.verify(tenant_id=ctx.tenant_id, evidence_id=retry.evidence_id)).clean
 
 
 async def test_sigkill_mid_file_staging_leaves_no_worm_object_and_retry_succeeds(
@@ -104,38 +106,154 @@ async def test_sigkill_mid_file_staging_leaves_no_worm_object_and_retry_succeeds
     assert ok.storage_key == file_key(ctx.tenant_id, hashlib.sha256(data).hexdigest())
 
 
-async def test_recover_completes_an_object_whose_writer_died_after_upload(
-    writer: EvidenceWriter, app_sessions: Sessions, s3: S3Client, ev_settings: Settings, ctx: Ctx
-) -> None:
-    """Crash between CompleteMultipartUpload/PutObject and the registry update: object exists, row pending."""
-    body = b'{"messages": [1, 2, 3]}'
-    key = f"t/{ctx.tenant_id}/jobs/{ctx.job_id}/pages/orphan.json"
+async def _orphan(
+    app_sessions: Sessions,
+    s3: S3Client,
+    settings: Settings,
+    ctx: Ctx,
+    body: bytes,
+    *,
+    source_hash: str | None,
+) -> tuple[object, str]:
+    """A writer that died after the object was stored but before the registry recorded completion."""
+    evidence_id = new_id()
+    key = f"t/{ctx.tenant_id}/jobs/{ctx.job_id}/pages/{evidence_id}.json"
     async with tenant_tx(app_sessions, ctx.tenant_id) as s:
         await s.execute(
             text(
-                "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind, retain_until)"
-                " VALUES (gen_random_uuid(), :t, :j, :k, 'page', now() + interval '1 day')"
+                "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind, retain_until, source_sha256,"
+                " source_hash_origin) VALUES (:id, :t, :j, :k, 'page', now() + interval '1 day', :h,"
+                " CASE WHEN CAST(:h AS text) IS NULL THEN NULL ELSE 'collection' END)"
             ),
-            {"t": ctx.tenant_id, "j": ctx.job_id, "k": key},
+            {"id": evidence_id, "t": ctx.tenant_id, "j": ctx.job_id, "k": key, "h": source_hash},
         )
     await s3.put_object(
-        Bucket=ev_settings.s3_evidence_bucket,
+        Bucket=settings.s3_evidence_bucket,
         Key=key,
         Body=body,
         ObjectLockMode="COMPLIANCE",
-        ObjectLockRetainUntilDate=ctx.matter_retention_until - timedelta(days=29, hours=23),
-        ChecksumSHA256=__import__("base64").b64encode(hashlib.sha256(body).digest()).decode(),
+        ObjectLockRetainUntilDate=utc_now() + timedelta(hours=1),
     )
-    counts = await writer.recover_pending(tenant_id=ctx.tenant_id, job_id=ctx.job_id)
-    assert counts["completed"] == 1
+    return evidence_id, key
+
+
+async def test_recovery_completes_against_the_persisted_source_hash(
+    writer: EvidenceWriter, app_sessions: Sessions, s3: S3Client, ev_settings: Settings, ctx: Ctx
+) -> None:
+    body = b'{"messages": [1, 2, 3]}'
+    evidence_id, _key = await _orphan(
+        app_sessions, s3, ev_settings, ctx, body, source_hash=hashlib.sha256(body).hexdigest()
+    )
+    report = await recover_job_evidence(
+        writer,
+        app_sessions,
+        s3,
+        ev_settings,
+        tenant_id=ctx.tenant_id,
+        job_id=ctx.job_id,
+        actor="finalizer",
+    )
+    assert report.completed == [evidence_id]
+    result = await writer.verify(tenant_id=ctx.tenant_id, evidence_id=evidence_id)  # type: ignore[arg-type]
+    assert result.clean
+    assert await _custody_payloads(app_sessions, ctx) == [
+        ("persisted_source_hash", [str(evidence_id)])
+    ]
+
+
+async def test_recovery_refuses_a_mismatch_with_the_persisted_source_hash(
+    writer: EvidenceWriter, app_sessions: Sessions, s3: S3Client, ev_settings: Settings, ctx: Ctx
+) -> None:
+    await _orphan(
+        app_sessions,
+        s3,
+        ev_settings,
+        ctx,
+        b"what storage holds",
+        source_hash=hashlib.sha256(b"what the source sent").hexdigest(),
+    )
+    with pytest.raises(
+        EvidenceIntegrityError, match="no stored version matches the persisted source hash"
+    ):
+        await writer.recover_pending(tenant_id=ctx.tenant_id, job_id=ctx.job_id)
+
+
+async def test_no_persisted_source_hash_requires_refetch_from_the_source(
+    writer: EvidenceWriter, app_sessions: Sessions, s3: S3Client, ev_settings: Settings, ctx: Ctx
+) -> None:
+    body = b'{"messages": ["refetch me"]}'
+    evidence_id, _ = await _orphan(app_sessions, s3, ev_settings, ctx, body, source_hash=None)
+    report = await recover_job_evidence(
+        writer,
+        app_sessions,
+        s3,
+        ev_settings,
+        tenant_id=ctx.tenant_id,
+        job_id=ctx.job_id,
+        actor="finalizer",
+    )
+    assert (report.needs_refetch, report.completed) == (
+        [evidence_id],
+        [],
+    )  # never completed from storage bytes
+    async with tenant_tx(app_sessions, ctx.tenant_id) as s:
+        assert (
+            await s.execute(
+                text("SELECT state FROM evidence_objects WHERE id = :i"), {"i": evidence_id}
+            )
+        ).scalar_one() == "pending"
+    # a refetch that disagrees with storage is an incident
+    with pytest.raises(EvidenceIntegrityError):
+        await complete_by_refetch(
+            writer,
+            app_sessions,
+            s3,
+            ev_settings,
+            tenant_id=ctx.tenant_id,
+            job_id=ctx.job_id,
+            evidence_id=evidence_id,
+            source=one_shot(b"different"),
+            actor="finalizer",
+        )  # type: ignore[arg-type]
+    written = await complete_by_refetch(
+        writer,
+        app_sessions,
+        s3,
+        ev_settings,
+        tenant_id=ctx.tenant_id,
+        job_id=ctx.job_id,
+        evidence_id=evidence_id,
+        source=one_shot(body),
+        actor="finalizer",
+    )  # type: ignore[arg-type]
+    assert written.sha256 == hashlib.sha256(body).hexdigest()
     async with tenant_tx(app_sessions, ctx.tenant_id) as s:
         row = (
             await s.execute(
-                text("SELECT state, sha256 FROM evidence_objects WHERE storage_key = :k"),
-                {"k": key},
+                text("SELECT state, source_hash_origin FROM evidence_objects WHERE id = :i"),
+                {"i": evidence_id},
             )
         ).one()
-    assert (row.state, row.sha256) == ("complete", hashlib.sha256(body).hexdigest())
+    assert (row.state, row.source_hash_origin) == ("complete", "refetch")
+    paths = [p for p, _ in await _custody_payloads(app_sessions, ctx)]
+    assert paths == ["persisted_source_hash", "refetch_from_source"]
+
+
+async def _custody_payloads(app_sessions: Sessions, ctx: Ctx) -> list[tuple[str, list[str]]]:
+    async with tenant_tx(app_sessions, ctx.tenant_id) as s:
+        rows = (
+            (
+                await s.execute(
+                    text(
+                        "SELECT payload FROM custody_events WHERE stream_id = :j AND event_type = 'evidence_recovered' ORDER BY seq"
+                    ),
+                    {"j": ctx.job_id},
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return [(p["recovery_path"], p.get("completed", [p.get("evidence_id")])) for p in rows]
 
 
 async def test_worm_version_cannot_be_deleted_shortened_or_overwritten(
@@ -205,4 +323,4 @@ async def test_worm_version_cannot_be_deleted_shortened_or_overwritten(
         await s3.get_object_retention(Bucket=bucket, Key=written.storage_key, VersionId=version)
     )["Retention"]
     assert after == retention_before
-    assert await writer.verify(tenant_id=ctx.tenant_id, evidence_id=written.evidence_id)
+    assert (await writer.verify(tenant_id=ctx.tenant_id, evidence_id=written.evidence_id)).clean

@@ -213,6 +213,9 @@ class EvidenceObject(Base):
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     completed_at: Mapped[datetime | None] = mapped_column(TZ)
     upload_id: Mapped[str | None] = mapped_column(Text)
+    version_id: Mapped[str | None] = mapped_column(Text)
+    source_sha256: Mapped[str | None] = mapped_column(Text)
+    source_hash_origin: Mapped[str | None] = mapped_column(Text)
 
 
 class CustodyEvent(Base):

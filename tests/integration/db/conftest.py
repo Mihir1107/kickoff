@@ -96,15 +96,17 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
             unit_key,
         )
         await conn.execute(
-            "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind, retain_until)"
-            " VALUES ($1, $2, $3, $4, 'page', now() + interval '1 day')",
+            "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind, retain_until, source_sha256,"
+            " source_hash_origin) VALUES ($1, $2, $3, $4, 'page', now() + interval '1 day', $5, 'collection')",
             ids["ev"],
             t,
             ids["job"],
             f"test/{ids['ev']}",
+            HEX,
         )
         await conn.execute(
-            "UPDATE evidence_objects SET state = 'complete', sha256 = $2, size_bytes = 10, completed_at = now() WHERE id = $1",
+            "UPDATE evidence_objects SET state = 'complete', sha256 = $2, size_bytes = 10, version_id = 'v-test',"
+            " completed_at = now() WHERE id = $1",
             ids["ev"],
             HEX,
         )

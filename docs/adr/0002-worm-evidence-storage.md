@@ -37,6 +37,20 @@ evidence when a matter closes, and COMPLIANCE-mode retention can never be shorte
   So file promotion holds a Postgres advisory lock on the key, re-reads the registry and HEADs the
   destination before copying. At most one copy per key is ever made; tested with concurrent writers
   (exactly one version).
+- **Version pinning:** the registry stores the S3 `VersionId` we wrote. **Every read goes by that
+  VersionId, never "latest":** `EvidenceWriter.open` (review), `verify`, export, re-hash checks and
+  anchors. A version written at the same key outside our control (a bug, another service, an operator)
+  is never served. `verify` and export report it (`shadow_versions`), and `edisc-verify` fails the
+  package with a "storage incident" while still verifying the pinned original.
+- **Source-hash provenance:** `source_sha256` (origin `collection`) is the hash of the bytes as streamed
+  **from the source**. It is persisted on the pending row **before the object can exist in WORM**:
+  - pages: before PutObject / CompleteMultipartUpload;
+  - files: before the staging→WORM copy;
+  - anchors: at insert.
+
+  A DB trigger lets a row complete only with `sha256 = source_sha256` and a pinned `version_id`. So a
+  hash computed from storage can never stand in for the collection-time hash; staging is the
+  unprotected window this guards.
 - **Write-ahead registry** (`evidence_objects`): the row is inserted `pending` before upload, and
   records the multipart `upload_id` as soon as the upload starts. It becomes `complete` (hash, size)
   or `missing` (no object). Completed rows are final, except that `retain_until` may be extended.
@@ -88,12 +102,16 @@ server-side copy and short-lived staging objects.
   (shielded from cancellation). If the abort itself fails, that is attached to the original error,
   never swallowed.
 - Hard kills (SIGKILL) leave an open upload and a `pending` row with its `upload_id`. The job's
-  finalizer runs `recover_pending()`:
-  - if the object exists, re-hash it and mark it complete;
-  - otherwise abort the upload and mark the row missing.
-
-  File rows stay pending (their content key must remain writable) and are completed by the next
-  writer of that content.
+  finalizer runs `edisc_custody.recovery.recover_job_evidence()`, which records an
+  `evidence_recovered` custody event:
+  - A stored version matches the **persisted source hash**: complete, pinned to that version.
+  - Versions exist but none matches: integrity incident, raised.
+  - No object: abort the upload. Page rows become missing; file rows stay pending (their content key
+    must stay writable).
+  - An object exists but **no source hash was persisted** (legacy/unknown): it is **never completed
+    from storage bytes**. It is listed as `needs_refetch`. The caller re-reads the source, and
+    `complete_by_refetch` requires a stored version with exactly those bytes. It records origin
+    `refetch` and a custody event with `recovery_path = refetch_from_source`.
 - Bucket-level backstop:
   - AWS: lifecycle `AbortIncompleteMultipartUpload` after 1 day (`infra/aws/*.json`), and expiration
     after 1 day on staging.

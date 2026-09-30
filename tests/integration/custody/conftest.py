@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 import uuid
@@ -122,10 +123,17 @@ async def collect_batch(
         retain = effective_retain_until(settings, retention)
         await s.execute(
             text(
-                "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind, retain_until)"
-                " VALUES (:id, :t, :j, :k, 'page', :r)"
+                "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind, retain_until,"
+                " source_sha256, source_hash_origin) VALUES (:id, :t, :j, :k, 'page', :r, :h, 'collection')"
             ),
-            {"id": ev_id, "t": job.tenant_id, "j": job.job_id, "k": key, "r": retain},
+            {
+                "id": ev_id,
+                "t": job.tenant_id,
+                "j": job.job_id,
+                "k": key,
+                "r": retain,
+                "h": hashlib.sha256(body).hexdigest(),
+            },
         )
     stored = await put_immutable(
         s3, bucket=settings.s3_evidence_bucket, key=key, body=body, retain_until=retain
@@ -134,10 +142,10 @@ async def collect_batch(
     async with tenant_tx(sessions, job.tenant_id) as s:
         await s.execute(
             text(
-                "UPDATE evidence_objects SET state = 'complete', sha256 = :h, size_bytes = :n, completed_at = now()"
-                " WHERE id = :id"
+                "UPDATE evidence_objects SET state = 'complete', sha256 = :h, size_bytes = :n,"
+                " version_id = :v, completed_at = now() WHERE id = :id"
             ),
-            {"h": stored.sha256, "n": stored.size, "id": ev_id},
+            {"h": stored.sha256, "n": stored.size, "v": stored.version_id, "id": ev_id},
         )
         await s.execute(
             text(

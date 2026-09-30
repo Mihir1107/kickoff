@@ -36,6 +36,7 @@ LIFECYCLE_EVENTS = frozenset(
         "activity_retried",
         "report_generated",
         "evidence_verified",
+        "evidence_recovered",
         "connection_created",
         "connection_validated",
         "connection_revoked",

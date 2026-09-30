@@ -1,0 +1,31 @@
+#!/bin/sh
+# Pre-commit: ruff lint, ruff format --check and mypy on STAGED Python files.
+# Install with `make hooks`. Full test suites (incl. integration) run in CI, not here.
+#
+# The hook checks files as they are in the working tree, so it refuses partially staged Python files
+# (staged content could differ from what is checked). Stage the whole file or stash the rest.
+set -eu
+
+files=$(git diff --cached --name-only --diff-filter=ACMR -- '*.py')
+[ -z "$files" ] && exit 0
+
+partial=""
+for f in $files; do
+  if ! git diff --quiet -- "$f"; then partial="$partial $f"; fi
+done
+if [ -n "$partial" ]; then
+  echo "pre-commit: these staged files also have unstaged changes:$partial" >&2
+  echo "pre-commit: stage them fully (git add) or stash the rest, then commit again." >&2
+  exit 1
+fi
+
+# shellcheck disable=SC2086
+uv run --quiet ruff check $files
+# shellcheck disable=SC2086
+uv run --quiet ruff format --check $files
+
+typed=$(printf '%s\n' $files | grep -E '^(packages|apps|workers)/' || true)
+if [ -n "$typed" ]; then
+  # whole typed tree: mypy needs the full import graph for correct results (incremental cache keeps it fast)
+  uv run --quiet mypy packages apps workers
+fi

@@ -30,6 +30,7 @@ The plan of record is in `docs/ARCHITECTURE.md` and `docs/adr/`. Read them befor
 ## Commands
 ```
 make sync               # uv sync --all-packages
+make hooks              # once per clone: pre-commit runs ruff lint, ruff format --check, mypy on staged .py
 make up / down          # infra up (waits for health, runs idempotent init jobs) / stop
 make up-ci              # subset CI uses (no UI, no Elasticsearch)
 make nuke               # down + delete volumes; refuses unless EDISC_ENV=local|ci
@@ -80,5 +81,7 @@ make worker / api       # run the Temporal worker / API
 
 ## Working agreement
 - One milestone at a time: implement → tests → run → commit (message ends with the attribution trailer).
+- Never chain `git commit` after checks with `;`: use `make check && git commit ...`. The pre-commit hook is a
+  backstop, not a replacement; never bypass it with `--no-verify`.
 - No scope creep: later-phase ideas go in `docs/BACKLOG.md`.
 - Ask before deviating from a principle. Keep this file, ARCHITECTURE.md and ADRs current when decisions change.

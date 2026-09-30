@@ -62,24 +62,25 @@ async def _count_all(conn: asyncpg.Connection, table: str, tenant: Seeded) -> in
         return int(await conn.fetchval(f"SELECT count(*) FROM {table}"))
 
 
-async def test_evidence_objects_only_pending_to_final(connect: Connect) -> None:
+async def test_evidence_objects_completion_requires_provenance_and_pinned_version(
+    connect: Connect,
+) -> None:
     app = await connect("app")
     try:
         s = await seed_tenant(app)
-        # the seeded object is already complete: it is final
+        ev = f"'{s.evidence_id}'"
+        # the seeded object is complete: final (only retain_until may be extended)
         await _expect_sqlstate(
-            app,
-            s,
-            f"UPDATE evidence_objects SET sha256 = '{'cd' * 32}' WHERE id = '{s.evidence_id}'",
-            "EA002",
+            app, s, f"UPDATE evidence_objects SET sha256 = '{'cd' * 32}' WHERE id = {ev}", "EA002"
         )
         await _expect_sqlstate(
-            app,
-            s,
-            f"UPDATE evidence_objects SET state = 'missing' WHERE id = '{s.evidence_id}'",
-            "EA002",
+            app, s, f"UPDATE evidence_objects SET version_id = 'other' WHERE id = {ev}", "EA002"
+        )
+        await _expect_sqlstate(
+            app, s, f"UPDATE evidence_objects SET state = 'missing' WHERE id = {ev}", "EA002"
         )
         pending = new_id()
+        pid = f"'{pending}'"
         async with tenant_ctx(app, s.tenant_id):
             await app.execute(
                 "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind, retain_until)"
@@ -89,26 +90,53 @@ async def test_evidence_objects_only_pending_to_final(connect: Connect) -> None:
                 s.job_id,
                 f"test/{pending}",
             )
-        # immutable columns stay immutable while pending
+        done = f"state = 'complete', sha256 = '{HEX}', size_bytes = 1, completed_at = now(), version_id = 'v1'"
+        # no persisted source hash: completion refused (storage hashes never stand in for source hashes)
         await _expect_sqlstate(
-            app,
-            s,
-            f"UPDATE evidence_objects SET storage_key = 'x', state = 'complete', sha256 = '{HEX}', size_bytes = 1, completed_at = now() WHERE id = '{pending}'",
-            "EA002",
-        )
-        # complete requires hash + size + completed_at (check constraint)
-        await _expect_sqlstate(
-            app,
-            s,
-            f"UPDATE evidence_objects SET state = 'complete' WHERE id = '{pending}'",
-            "23514",
+            app, s, f"UPDATE evidence_objects SET {done} WHERE id = {pid}", "EA002"
         )
         async with tenant_ctx(app, s.tenant_id):
             await app.execute(
-                "UPDATE evidence_objects SET state = 'complete', sha256 = $2, size_bytes = 5, completed_at = now() WHERE id = $1",
+                "UPDATE evidence_objects SET source_sha256 = $2, source_hash_origin = 'collection' WHERE id = $1",
                 pending,
                 HEX,
             )
+        # the source hash is write-once
+        await _expect_sqlstate(
+            app,
+            s,
+            f"UPDATE evidence_objects SET source_sha256 = '{'cd' * 32}' WHERE id = {pid}",
+            "EA002",
+        )
+        # completing with a different hash, or without a pinned version, is refused
+        wrong_hash = done.replace(HEX, "cd" * 32)
+        unpinned = done.replace(", version_id = 'v1'", "")
+        await _expect_sqlstate(
+            app, s, f"UPDATE evidence_objects SET {wrong_hash} WHERE id = {pid}", "EA002"
+        )
+        await _expect_sqlstate(
+            app, s, f"UPDATE evidence_objects SET {unpinned} WHERE id = {pid}", "EA002"
+        )
+        # immutable identity while pending
+        await _expect_sqlstate(
+            app, s, f"UPDATE evidence_objects SET storage_key = 'x' WHERE id = {pid}", "EA002"
+        )
+        async with tenant_ctx(app, s.tenant_id):
+            assert (
+                await app.execute(f"UPDATE evidence_objects SET {done} WHERE id = $1", pending)
+                == "UPDATE 1"
+            )
+            # retention may be extended afterwards, never shortened
+            await app.execute(
+                "UPDATE evidence_objects SET retain_until = retain_until + interval '1 hour' WHERE id = $1",
+                pending,
+            )
+        await _expect_sqlstate(
+            app,
+            s,
+            f"UPDATE evidence_objects SET retain_until = retain_until - interval '2 hours' WHERE id = {pid}",
+            "EA002",
+        )
     finally:
         await app.close()
 

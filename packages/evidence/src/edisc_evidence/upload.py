@@ -70,8 +70,13 @@ async def stream_upload(
     lock: Lock | None,
     if_none_match: bool,
     on_multipart_started: Callable[[str], Awaitable[None]] | None = None,
+    before_commit: Callable[[str, int], Awaitable[None]] | None = None,
 ) -> UploadResult:
-    """Upload ``stream`` to ``bucket/key`` while hashing. Never overwrites when ``if_none_match``."""
+    """Upload ``stream`` to ``bucket/key`` while hashing. Never overwrites when ``if_none_match``.
+
+    ``before_commit(sha256_hex, size)`` runs after every byte has been hashed but before the object can
+    exist (before PutObject, or before CompleteMultipartUpload): callers persist the source hash there.
+    """
     full = hashlib.sha256()
     size = 0
     parts_iter = _parts(stream, part_size)
@@ -86,6 +91,8 @@ async def stream_upload(
 
     if second is None:  # fits in one part: single atomic PUT
         full.update(first)
+        if before_commit is not None:
+            await before_commit(full.hexdigest(), len(first))
         put_resp = await client.put_object(
             Bucket=bucket,
             Key=key,
@@ -136,6 +143,8 @@ async def stream_upload(
                     "ChecksumSHA256": part_resp["ChecksumSHA256"],
                 }
             )
+        if before_commit is not None:
+            await before_commit(full.hexdigest(), size)
         done = await client.complete_multipart_upload(
             Bucket=bucket,
             Key=key,

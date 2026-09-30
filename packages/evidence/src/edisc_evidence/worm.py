@@ -85,7 +85,7 @@ class ObjectVersion:
 async def list_versions(
     client: S3Client, *, bucket: str, prefix: str
 ) -> AsyncIterator[ObjectVersion]:
-    """Every version and delete marker under ``prefix``.
+    """Every version and delete marker under ``prefix``, oldest first per key.
 
     Verifiers must use this, not ``list_objects_v2``: on a versioned bucket a delete marker hides an
     object from plain listings, and a newer PUT without ``If-None-Match`` shadows the original. Locked
@@ -93,7 +93,12 @@ async def list_versions(
     """
     paginator = client.get_paginator("list_object_versions")
     async for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for v in page.get("Versions", []):
-            yield ObjectVersion(v["Key"], v["VersionId"], is_delete_marker=False)
-        for m in page.get("DeleteMarkers", []):
-            yield ObjectVersion(m["Key"], m["VersionId"], is_delete_marker=True)
+        entries = [
+            (v["Key"], v["LastModified"], v["VersionId"], False) for v in page.get("Versions", [])
+        ]
+        entries += [
+            (m["Key"], m["LastModified"], m["VersionId"], True)
+            for m in page.get("DeleteMarkers", [])
+        ]
+        for key, _, version_id, marker in sorted(entries, key=lambda e: (e[0], e[1])):
+            yield ObjectVersion(key, version_id, is_delete_marker=marker)

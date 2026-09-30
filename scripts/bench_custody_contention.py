@@ -83,7 +83,8 @@ async def prepare(sessions, job, writers: int):  # type: ignore[no-untyped-def]
         await s.execute(
             text(
                 "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind, retain_until, state, sha256,"
-                " size_bytes, completed_at) VALUES (:id, :t, :j, :k, 'page', now() + interval '1 day', 'complete', :h, 1, now())"
+                " size_bytes, completed_at, version_id, source_sha256, source_hash_origin) VALUES (:id, :t, :j, :k,"
+                " 'page', now() + interval '1 day', 'complete', :h, 1, now(), 'bench', :h, 'collection')"
             ),
             {
                 "id": ev_id,

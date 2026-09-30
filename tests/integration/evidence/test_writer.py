@@ -77,7 +77,7 @@ async def test_page_sizes_and_part_boundaries(
     assert (
         await rehash_object(s3, bucket=ev_settings.s3_evidence_bucket, key=written.storage_key)
     ) == (written.sha256, size)
-    assert await writer.verify(tenant_id=ctx.tenant_id, evidence_id=written.evidence_id)
+    assert (await writer.verify(tenant_id=ctx.tenant_id, evidence_id=written.evidence_id)).clean
 
 
 # ------------------------------------------------------------------ files: staging -> content-addressed WORM
