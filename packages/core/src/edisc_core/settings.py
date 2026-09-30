@@ -49,6 +49,18 @@ class Settings(BaseSettings):
     pg_sweeper_user: str = "edisc_sweeper"  # anchor sweeper's cross-tenant lookup only
     pg_sweeper_password: SecretStr = SecretStr("")
     pg_schema: str = "edisc"
+    pg_lock_timeout_ms: int = Field(
+        default=30_000,
+        ge=0,
+        description="lock_timeout for app/worker sessions: a lock wait longer than this raises a retryable "
+        "error instead of hanging (e.g. a deadlock through the application, which Postgres cannot see).",
+    )
+    pg_idle_in_transaction_timeout_ms: int = Field(
+        default=60_000,
+        ge=0,
+        description="idle_in_transaction_session_timeout for app/worker sessions: a transaction left open "
+        "and idle (stuck caller) is terminated, releasing its locks.",
+    )
 
     redis_url: str = "redis://localhost:6379/0"
 

@@ -17,17 +17,19 @@ served. Shadows are reported as storage incidents.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import uuid
 from collections.abc import AsyncIterable, AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 from botocore.exceptions import ClientError
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
 from types_aiobotocore_s3.type_defs import CompletedPartTypeDef, CopySourceTypeDef
 
@@ -182,80 +184,109 @@ class EvidenceWriter:
     ) -> WrittenEvidence:
         key = file_key(tenant_id, staged.sha256)
         retain = effective_retain_until(self._settings, matter_retention_until)
-        candidate = new_id()
         # Serialize writers of the same content: MinIO ignores If-None-Match on CopyObject, so the DB
-        # advisory lock (held on one pooled connection for the whole promotion) prevents a second copy.
-        async with self._sessions() as lock_session:
-            await lock_session.execute(
-                text("SELECT pg_advisory_lock(hashtextextended(:k, 0))"), {"k": key}
-            )
-            try:
-                async with tenant_tx(self._sessions, tenant_id) as s:
-                    # the source hash is persisted with the row, BEFORE any copy into WORM
-                    await s.execute(
-                        text(
-                            "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind,"
-                            " retain_until, source_sha256, source_hash_origin)"
-                            " VALUES (:id, :t, :j, :k, 'file', :r, :h, 'collection')"
-                            " ON CONFLICT (storage_key) DO NOTHING"
-                        ),
-                        {
-                            "id": candidate,
-                            "t": tenant_id,
-                            "j": job_id,
-                            "k": key,
-                            "r": retain,
-                            "h": staged.sha256,
-                        },
-                    )
-                    row = (
-                        await s.execute(
-                            text(
-                                "SELECT id, state, sha256, source_sha256, retain_until, version_id"
-                                " FROM evidence_objects WHERE storage_key = :k"
-                            ),
-                            {"k": key},
-                        )
-                    ).one()
-                if row.state == "complete":
-                    if row.sha256 != staged.sha256:
-                        raise EvidenceIntegrityError(f"{key}: registry sha256 != {staged.sha256}")
-                    await self._extend_retention(
-                        tenant_id, row.id, key, row.version_id, row.retain_until, retain
-                    )
-                    return WrittenEvidence(
-                        row.id, key, staged.sha256, staged.size, row.version_id, deduplicated=True
-                    )
-                if row.state != "pending":
-                    raise EvidenceIntegrityError(f"{key}: unexpected registry state {row.state}")
-                if row.source_sha256 is None:  # left by an older writer: persist before the copy
-                    await self._persist_source_hash(tenant_id, row.id, staged.sha256, "collection")
-                elif row.source_sha256 != staged.sha256:
-                    raise EvidenceIntegrityError(
-                        f"{key}: persisted source hash differs from stream"
-                    )
+        # advisory lock (dedicated autocommit connection, held for the whole promotion) prevents a second copy.
+        async with self._content_lock(key):
+            return await self._promote_locked(tenant_id, job_id, staging_key, staged, key, retain)
 
-                version = await self._find_version(key, staged.sha256, staged.size)
-                if version is None:
-                    version = await self._copy_into_worm(staging_key, key, staged, row.retain_until)
-                    if not await self._version_matches(key, version, staged.sha256, staged.size):
-                        raise EvidenceIntegrityError(
-                            f"{key}: copied version {version} != source hash"
-                        )
-                await self._complete(tenant_id, row.id, staged.sha256, staged.size, version)
-                return WrittenEvidence(
-                    row.id,
-                    key,
-                    staged.sha256,
-                    staged.size,
-                    version,
-                    deduplicated=row.id != candidate,
+    async def _promote_locked(
+        self,
+        tenant_id: uuid.UUID,
+        job_id: uuid.UUID,
+        staging_key: str,
+        staged: UploadResult,
+        key: str,
+        retain: datetime,
+    ) -> WrittenEvidence:
+        """Runs while the per-key advisory lock is held."""
+        candidate = new_id()
+        async with tenant_tx(self._sessions, tenant_id) as s:
+            # the source hash is persisted with the row, BEFORE any copy into WORM
+            await s.execute(
+                text(
+                    "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind,"
+                    " retain_until, source_sha256, source_hash_origin)"
+                    " VALUES (:id, :t, :j, :k, 'file', :r, :h, 'collection')"
+                    " ON CONFLICT (storage_key) DO NOTHING"
+                ),
+                {
+                    "id": candidate,
+                    "t": tenant_id,
+                    "j": job_id,
+                    "k": key,
+                    "r": retain,
+                    "h": staged.sha256,
+                },
+            )
+            row = (
+                await s.execute(
+                    text(
+                        "SELECT id, state, sha256, source_sha256, retain_until, version_id"
+                        " FROM evidence_objects WHERE storage_key = :k"
+                    ),
+                    {"k": key},
                 )
+            ).one()
+        if row.state == "complete":
+            if row.sha256 != staged.sha256:
+                raise EvidenceIntegrityError(f"{key}: registry sha256 != {staged.sha256}")
+            await self._extend_retention(
+                tenant_id, row.id, key, row.version_id, row.retain_until, retain
+            )
+            return WrittenEvidence(
+                row.id, key, staged.sha256, staged.size, row.version_id, deduplicated=True
+            )
+        if row.state != "pending":
+            raise EvidenceIntegrityError(f"{key}: unexpected registry state {row.state}")
+        if row.source_sha256 is None:  # left by an older writer: persist before the copy
+            await self._persist_source_hash(tenant_id, row.id, staged.sha256, "collection")
+        elif row.source_sha256 != staged.sha256:
+            raise EvidenceIntegrityError(f"{key}: persisted source hash differs from stream")
+
+        version = await self._find_version(key, staged.sha256, staged.size)
+        if version is None:
+            version = await self._copy_into_worm(staging_key, key, staged, row.retain_until)
+            if not await self._version_matches(key, version, staged.sha256, staged.size):
+                raise EvidenceIntegrityError(f"{key}: copied version {version} != source hash")
+        await self._complete(tenant_id, row.id, staged.sha256, staged.size, version)
+        return WrittenEvidence(
+            row.id,
+            key,
+            staged.sha256,
+            staged.size,
+            version,
+            deduplicated=row.id != candidate,
+        )
+
+    @asynccontextmanager
+    async def _content_lock(self, key: str) -> AsyncIterator[None]:
+        """Session-level advisory lock on a content key, held on a dedicated AUTOCOMMIT connection.
+
+        - Not inside a transaction, so a long copy is not "idle in transaction" and is not killed by
+          idle_in_transaction_session_timeout.
+        - Waiters POLL with pg_try_advisory_lock (no blocking lock wait), so lock_timeout never fires
+          while another worker legitimately copies a large file.
+        - If this process dies, the connection closes and Postgres releases the lock.
+        """
+        engine: AsyncEngine = self._sessions.kw["bind"]
+        async with engine.connect() as raw:
+            conn = await raw.execution_options(isolation_level="AUTOCOMMIT")
+            delay = 0.05
+            while True:
+                result = await conn.execute(
+                    text("SELECT pg_try_advisory_lock(hashtextextended(:k, 0))"), {"k": key}
+                )
+                acquired: bool = bool(result.scalar_one())
+                if acquired:
+                    break
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 1.0)
+            try:
+                yield
             finally:
-                await lock_session.execute(
+                await conn.execute(
                     text("SELECT pg_advisory_unlock(hashtextextended(:k, 0))"), {"k": key}
                 )
-                await lock_session.commit()
 
     async def _copy_into_worm(
         self, staging_key: str, key: str, staged: UploadResult, retain_until: datetime

@@ -87,6 +87,10 @@ make worker / api       # run the Temporal worker / API
   Refresh responses are journaled in their own transaction before being applied; run `reconcile_token_refreshes`
   at worker startup. Prefer designs without refresh tokens (client credentials + certificate; Slack rotation off).
 - Row locks that must coexist with FK inserts referencing the row: use `FOR NO KEY UPDATE`, not `FOR UPDATE`.
+- App/worker DB sessions set `lock_timeout` and `idle_in_transaction_session_timeout` (`EDISC_PG_*_TIMEOUT_MS`).
+  A lock wait or abandoned transaction raises; `edisc_db.session.is_retryable_db_error` says whether to retry the
+  whole unit of work. Never hold a transaction open across long I/O; long-held locks use a dedicated AUTOCOMMIT
+  connection and waiters poll with `pg_try_advisory_lock` (see `EvidenceWriter._content_lock`).
 - Tests have a 120 s timeout (pytest-timeout): a hang is a failure.
 
 ## Working agreement

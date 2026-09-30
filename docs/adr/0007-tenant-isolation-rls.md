@@ -27,6 +27,11 @@ Status: Accepted (2026-09-30), implemented in migration 0001
   `create_tenant` is executable by `edisc_app`, and `due_anchor_streams` only by its owner, the
   `edisc_sweeper` login. The sweeper login can read nothing else in the schema. A test enumerates
   every definer function and asserts both properties.
+- **Sessions never hang:** app and sweeper sessions set `lock_timeout` (default 30 s) and
+  `idle_in_transaction_session_timeout` (default 60 s). A lock wait, including a deadlock that runs
+  through the application (which Postgres cannot detect), or an abandoned open transaction raises an
+  error that `is_retryable_db_error` classifies as retryable. Owner and superuser sessions
+  (migrations) are exempt.
 - **Downgrades** are refused outside `EDISC_ENV` local/ci and always need an explicit target
   revision (fix-forward only in shared environments).
 - **Tests** (`tests/integration/db`): through `edisc_app`, tenant A cannot read B's rows in any table or
