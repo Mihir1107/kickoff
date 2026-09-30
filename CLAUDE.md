@@ -78,6 +78,9 @@ make worker / api       # run the Temporal worker / API
 - Keep `edisc_custody.package`/`cli`/`chain`/`merkle` free of DB and cloud imports (a test enforces it).
 - `completed_unverified` is never presented as a clean completion (ADR 0005).
 - Secrets: `.env.example` has placeholders only. Never commit `.env`. Wrap secrets in `SecretStr`.
+- Rate limits (ADR 0010): every source request goes through `edisc_connectors_base.ratelimit.call_with_limits`
+  with a `BucketKey(tenant, source, workspace, method)`; limits only from `EDISC_RATE_LIMITS`; raise
+  `SourceThrottledError(retry_after)` on 429 so the whole bucket pauses. Never bypass the limiter.
 - Connection tokens (ADR 0009): only via `edisc_db.connection_tokens` (store/load/refresh_tokens/rewrap_tenant_tokens)
   with a `SecretBox` over a `KmsClient`. Context = tenant + connection + purpose. Never pass tokens to Temporal,
   never log them, never add a new secret column without envelope encryption + context binding.

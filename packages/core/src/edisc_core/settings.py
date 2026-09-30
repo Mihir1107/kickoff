@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +21,13 @@ class Environment(StrEnum):
     def is_disposable(self) -> bool:
         """True where data may be thrown away (short retention, volume wipes)."""
         return self in (Environment.LOCAL, Environment.CI)
+
+
+class RateLimitConfig(BaseModel):
+    """Token bucket for one ``source.method``: sustained ``rate_per_second`` with bursts up to ``burst``."""
+
+    rate_per_second: float = Field(gt=0)
+    burst: int = Field(ge=1)
 
 
 class Settings(BaseSettings):
@@ -79,6 +86,13 @@ class Settings(BaseSettings):
         ge=0,
         description="The sweeper also anchors streams whose unanchored tail has been idle this long.",
     )
+
+    rate_limits: dict[str, RateLimitConfig] = Field(
+        default_factory=dict,
+        description='Per "source.method" limits, e.g. {"slack.conversations.history": {...}}. JSON in env. '
+        "An unconfigured method is an error, never unlimited.",
+    )
+    rate_limit_unavailable_backoff_max_seconds: float = Field(default=10.0, gt=0)
 
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "edisc"

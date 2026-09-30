@@ -23,3 +23,4 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - **[required before production]** Microsoft Graph app authentication with a certificate (not a client secret), stored in the secret manager, with a rotation runbook (ADR 0009).
 - Slack connector: document and enforce "token rotation disabled" for the internal-app tier (validate_connection checks the token type and non-expiry).
 - Periodic mutation-testing CI job (e.g. mutmut) on `packages/custody`, `packages/evidence` and `edisc_core.kms`/`envelope`/`canonical`, publishing a surviving-mutants report; this automates the manual "teeth" checks done per milestone.
+- Rate-limit fairness across concurrent jobs within one tenant (e.g. per-job sub-buckets or weighted round-robin over a shared bucket) so one large job cannot starve another (ADR 0010).

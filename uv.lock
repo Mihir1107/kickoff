@@ -391,10 +391,14 @@ version = "0.1.0"
 source = { editable = "packages/connectors/base" }
 dependencies = [
     { name = "edisc-core" },
+    { name = "redis" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "edisc-core", editable = "packages/core" }]
+requires-dist = [
+    { name = "edisc-core", editable = "packages/core" },
+    { name = "redis", specifier = ">=8.1.0" },
+]
 
 [[package]]
 name = "edisc-core"
