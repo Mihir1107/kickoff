@@ -17,17 +17,28 @@ fetches (reply counters, presigned URLs, profile embeds), so hashing raw bytes w
 
 | item_type | Version-defining fields (in fingerprint) | Explicitly excluded |
 |---|---|---|
-| message | author external user id (not name); body text; rich body (blocks/HTML) as delivered; message type/subtype; thread root id; parent id; deleted flag; sorted list of attached file source ids with each file's content_hash | reactions; reply counts/reply users/latest reply; read receipts; pins/stars/bookmarks; presigned/expiring URLs; **author display name, avatar, profile embeds**; **link unfurls/previews**; **source change markers (etag, `edited.ts`, `lastModifiedDateTime`, deletion ts)** |
+| message | author external user id (not name); body text; rich body (blocks/HTML) as delivered; message type/subtype; thread root id; parent id; **deleted state**; sorted list of attached file source ids with each file's content_hash | reactions; reply counts/reply users/latest reply; read receipts; pins/stars/bookmarks; presigned/expiring URLs; **author display name, avatar, profile embeds**; **link unfurls/previews**; **source change markers (etag, `edited.ts`, `lastModifiedDateTime`, deletion ts)** |
 | file | SHA-256 of file bytes; file name; mime type | download URLs, thumbnails, preview renditions, etag/lastModified |
 | event: reaction snapshot | parent message source id; sorted list of `(reaction name, sorted user ids)` | counts (derived) |
+| event: change observation | parent message source id; hint name; old hint value; new hint value | observation time (metadata) |
 | event: identity snapshot | external user id; display name; real name; email; avatar image hash; title; deactivated flag | presence, status emoji/text, timezone |
 
 ### Rules that apply to every fingerprint
 - **Source change markers are hints, never identity.** etag, `lastModifiedDateTime`, Slack `edited.ts`
   and similar are used only to decide *whether to look closer* (e.g. delta queries, skip-unchanged
   optimizations). They are never part of `content_hash` or the idempotency key. They are still recorded
-  on the item as metadata (`edited_at_utc`, raw page), so nothing is lost. Consequence: an "edit" that
-  leaves every version-defining field identical does not mint a new version.
+  on every item as metadata (`change_hints` JSONB, `edited_at_utc`, raw page).
+- **A hint change without a content change is still visible at item level.** When any hint (Slack
+  `edited.ts`, Teams `lastEditedDateTime`/`lastModifiedDateTime`, etag) differs from the latest recorded
+  value for that message but the `content_hash` is unchanged, the normalizer emits a **change
+  observation** event item: `source_item_id = <message id>#change`, `parent_item_id` = the current
+  message version, fingerprint = `{parent, hint, old, new}`. Each distinct transition is a new event
+  version; re-observing the same transition dedups. The first-ever sighting of a message has no "old"
+  value and emits no observation. If the content also changed, the new message version carries the
+  new hints and no separate observation is needed.
+- **Deletion is version-defining; its timestamp is a hint.** A message going from not-deleted to
+  deleted (or tombstoned) always creates a new message version. The deletion timestamp is recorded as a
+  hint/metadata (`deleted_at_utc`) and never enters the fingerprint.
 - **Text is hashed exactly as delivered.** No Unicode normalization (NFC/NFKC), no whitespace
   trimming/collapsing, no case folding, no entity decoding. RFC 8785 canonical JSON does not normalize
   strings either, so the bytes hashed are the source's code points, re-encoded as UTF-8.

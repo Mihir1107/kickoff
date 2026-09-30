@@ -45,6 +45,8 @@ make worker / api       # run the Temporal worker / API
 - mypy `--strict` on all source (packages/apps/workers). ruff is the formatter and linter.
 - All timestamps are timezone-aware UTC (`edisc_core.time`). Naive datetimes and nonexistent (DST-gap) local times
   raise; nothing is ever assumed to be UTC. Use `UtcDatetime` for Pydantic fields. ruff DTZ enforces the rest.
+  Exception: day *boundaries* in a timezone use `local_day_bounds`/`resolve_wall_time`, which resolve DST gaps to the
+  earliest valid instant at/after local midnight (never raise). Day slicing defaults to UTC (`day_bounds`).
 - Logging: `edisc_core.logs.configure_logging()` at process start; register decrypted secrets with
   `edisc_core.redaction.register_secret()`. Redaction covers nested fields, exception text and tracebacks.
 - IDs are UUIDv7 (`edisc_core.ids`).

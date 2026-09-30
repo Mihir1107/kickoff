@@ -38,6 +38,7 @@ class EventKind(StrEnum):
 
     REACTION_SNAPSHOT = "reaction_snapshot"
     IDENTITY_SNAPSHOT = "identity_snapshot"
+    CHANGE_OBSERVATION = "change_observation"
 
 
 class ScopeType(StrEnum):
