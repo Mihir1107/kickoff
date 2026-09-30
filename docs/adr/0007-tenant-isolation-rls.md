@@ -1,19 +1,36 @@
 # ADR 0007: Tenant isolation with Postgres row-level security
 
-Status: Accepted (2026-09-30)
+Status: Accepted (2026-09-30), implemented in migration 0001
 
 ## Decision
-- Every tenant-scoped table has `tenant_id` and `ENABLE` + **`FORCE ROW LEVEL SECURITY`**, with policies
-  `USING (tenant_id = current_setting('app.tenant_id')::uuid)` and the same `WITH CHECK`.
-- Tables are owned by a migration role `edisc_owner`. The application and workers connect as
-  **`edisc_app`**, which is neither owner nor superuser and has no `BYPASSRLS`.
-- Tenant context is set with `SET LOCAL app.tenant_id = …` **per transaction**, including inside every
-  Temporal activity. Unset context ⇒ `current_setting(..., true)` is NULL ⇒ zero rows visible/writable.
-- Test: through `edisc_app`, tenant A can neither read nor write tenant B's rows (select, insert with
-  B's id, update, and custody append all fail or see nothing).
-- `tenants` itself is readable only for the current tenant; tenant creation goes through a narrow
-  SECURITY DEFINER function.
+- Every tenant-scoped table (tenants, matters, connections, custodians, custodian_identities,
+  collection_jobs, collection_scopes, work_units, evidence_objects, items, job_items, custody_events,
+  custody_chain_heads) has `ENABLE` + **`FORCE ROW LEVEL SECURITY`** and one policy
+  `tenant_isolation`: `USING (tenant_id = current_tenant_id()) WITH CHECK (same)` (`id` on tenants).
+  The `checkpoints` and `reconciliation` views are `security_invoker`, so the same policies apply.
+- `current_tenant_id()` = `NULLIF(current_setting('app.tenant_id', true), '')::uuid`. No context means
+  NULL, which means zero rows visible and every insert rejected.
+- **Roles** (created by `edisc_db.bootstrap` as superuser; everything else by Alembic as owner):
+  - `edisc_owner`: owns the schema and all objects; runs migrations only (break-glass in production).
+    Not superuser, no BYPASSRLS; FORCE RLS applies to it too.
+  - `edisc_app`: API and workers. NOSUPERUSER, NOBYPASSRLS, NOCREATEDB, NOCREATEROLE, NOINHERIT,
+    not a member of the owner role, owns nothing, cannot create objects. Grants: SELECT/INSERT on
+    append-only tables, SELECT/INSERT/UPDATE on mutable ones, SELECT on tenants and views. No DELETE and
+    no TRUNCATE anywhere. Tenants are created only via the `create_tenant()` SECURITY DEFINER function.
+- **Tenant context is transaction-local**: `edisc_db.session.tenant_tx()` runs
+  `set_config('app.tenant_id', $1, true)`, the parameterizable form of `SET LOCAL`. Every API handler
+  and every Temporal activity uses it; pooled connections cannot leak context.
+- **Composite foreign keys** `(tenant_id, x_id) -> parent(tenant_id, id)` make cross-tenant references
+  impossible even for code that sets the right context.
+- **Tests** (`tests/integration/db`): through `edisc_app`, tenant A cannot read B's rows in any table or
+  view, insert rows carrying B's id, update B's rows, or move its own rows to B. With no context it sees
+  nothing. The app role cannot ALTER/DROP tables, disable or un-force RLS, drop or create policies,
+  drop or disable triggers, replace security functions, set `session_replication_role`, turn off
+  `row_security`, `SET ROLE` to the owner, create objects, TRUNCATE or DELETE.
 
-## Consequences
-- + Isolation holds even if application code forgets a `WHERE tenant_id`.
-- − Every DB session helper must set context; enforced by a single `tenant_tx()` helper.
+## Residual risk
+- A compromised app process can set any tenant id. RLS protects against *bugs* (missing WHERE clauses,
+  wrong joins), not a hostile app server. Stronger options (per-tenant roles, signed context) are
+  backlog items.
+- The owner and superuser can disable triggers and RLS. That tampering is what the custody chain,
+  Merkle roots and WORM seals detect (ADR 0003).

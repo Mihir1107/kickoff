@@ -26,4 +26,4 @@ def test_env_prefix_and_secret_not_in_repr(monkeypatch: pytest.MonkeyPatch) -> N
     s = Settings(_env_file=None)  # type: ignore[call-arg]
     assert s.env is Environment.CI
     assert "pg-password-canary-123" not in repr(s)
-    assert "pg-password-canary-123" in s.pg_dsn()
+    assert "pg-password-canary-123" in s.pg_dsn("app")

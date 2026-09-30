@@ -1,0 +1,21 @@
+[project]
+name = "edisc-db"
+version = "0.1.0"
+description = "Postgres schema (Alembic), SQLAlchemy models, roles bootstrap, tenant-scoped sessions."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "alembic>=1.20.0",
+    "asyncpg>=0.31.0",
+    "edisc-core",
+    "sqlalchemy[asyncio]>=2.0",
+]
+
+[tool.uv.sources]
+edisc-core = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/edisc_db"]

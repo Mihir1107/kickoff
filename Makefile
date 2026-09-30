@@ -42,8 +42,9 @@ ps: ## Show infra status
 logs: ## Tail infra logs
 	$(COMPOSE) logs -f --tail=100
 
-migrate: ## Apply database migrations
-	uv run alembic -c packages/core/alembic.ini upgrade head
+migrate: .env ## Bootstrap roles/schema (superuser, idempotent) then alembic upgrade head (owner role)
+	uv run python -m edisc_db.bootstrap
+	uv run python -m edisc_db.migrate upgrade
 
 lint: ## ruff lint + format check
 	uv run ruff check .

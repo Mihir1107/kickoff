@@ -23,8 +23,9 @@ heavy lock contention.
   evidence_verified, connection_*, custodian_merged/split.
 - **Concurrency:** `custody_chain_heads` row per stream locked `SELECT … FOR UPDATE` in the same
   transaction as the append; `UNIQUE(stream_id, seq)`. Gapless, safe with many writers.
-- **Append-only:** triggers reject UPDATE, DELETE and TRUNCATE on `custody_events`; the app role has
-  INSERT/SELECT only.
+- **Append-only:** row triggers reject UPDATE and DELETE and a statement trigger rejects TRUNCATE on
+  `custody_events`, `items` and `job_items` (they fire for the owner too). The app role has
+  INSERT/SELECT only on these tables and TRUNCATE nowhere.
 - **Seal:** on job finalize, `{stream_id, last_seq, last_hash}` is written as a WORM object and its key
   recorded on the job. This detects tail truncation, which a chain alone cannot.
 - **`verify_chain(stream_id)`** checks: seq gapless from 1; each prev_hash links; each event_hash

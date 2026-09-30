@@ -5,6 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -34,8 +35,11 @@ class Settings(BaseSettings):
     pg_db: str = "edisc"
     pg_superuser: str = "postgres"
     pg_superuser_password: SecretStr = SecretStr("")
-    pg_app_user: str = "edisc_app"
+    pg_owner_user: str = "edisc_owner"  # owns the schema; runs migrations only
+    pg_owner_password: SecretStr = SecretStr("")
+    pg_app_user: str = "edisc_app"  # API + workers: not owner, not superuser, no BYPASSRLS
     pg_app_password: SecretStr = SecretStr("")
+    pg_schema: str = "edisc"
 
     redis_url: str = "redis://localhost:6379/0"
 
@@ -65,10 +69,15 @@ class Settings(BaseSettings):
             )
         return self
 
-    def pg_dsn(self, *, superuser: bool = False) -> str:
-        user = self.pg_superuser if superuser else self.pg_app_user
-        pwd = (self.pg_superuser_password if superuser else self.pg_app_password).get_secret_value()
-        return f"postgresql://{user}:{pwd}@{self.pg_host}:{self.pg_port}/{self.pg_db}"
+    def pg_dsn(
+        self, role: Literal["app", "owner", "superuser"] = "app", *, db: str | None = None
+    ) -> str:
+        user, pwd = {
+            "app": (self.pg_app_user, self.pg_app_password),
+            "owner": (self.pg_owner_user, self.pg_owner_password),
+            "superuser": (self.pg_superuser, self.pg_superuser_password),
+        }[role]
+        return f"postgresql://{user}:{pwd.get_secret_value()}@{self.pg_host}:{self.pg_port}/{db or self.pg_db}"
 
 
 @lru_cache(maxsize=1)

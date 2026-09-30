@@ -23,7 +23,8 @@ Hierarchy follows Relativity: tenant (client) > matter > workspace.
                                                         │     └──────────────────────────┼┘
    packages (pure libraries, no service of their own)   │                                │
    ─────────────────────────────────────────────────    │                                ▼
-   core        settings, canonical schemas, ids, time,  │   connectors/<source>  (auth, enumerate, fetch raw)
+   core        settings, canonical schemas, ids, time,  │
+   db          schema (Alembic), models, roles, tenant_tx│   connectors/<source>  (auth, enumerate, fetch raw)
                canonical JSON, logging+redaction        │        │  rate-limit hook ──▶ Redis token bucket
    connectors  base protocol + dummy (+ stubs)          │        ▼
    normalizer  raw → canonical, version fingerprint,    │   normalizer (raw page → canonical items)
@@ -54,11 +55,15 @@ Hierarchy follows Relativity: tenant (client) > matter > workspace.
 | `collection_jobs` | + `status` ∈ pending, running, completed, completed_with_gaps, completed_unverified, failed, cancelled; connector_version; chain seal key |
 | `collection_scopes` | scope_type ∈ custodian, channel, chat; external_id; date_from/date_to |
 | `work_units` | replaces `checkpoints` + `reconciliation`: (job_id, unit_key) PK, conversation_id, day, status, cursor, expected_count NULL, collected_count, recon_status. Views `checkpoints` and `reconciliation` expose the spec'd shapes |
-| `evidence_objects` | write-ahead registry of every WORM object: storage_key, kind (page, file, seal), sha256, size, state (pending, complete, orphaned), retain_until |
-| `items` | + `raw_hash`, `content_hash`, `evidence_object_id`, `json_path`, `item_type` ∈ message, file, event; `idempotency_key` UNIQUE; immutable columns guarded by trigger |
-| `job_items` | (job_id, item_id) PK, unit_key, custody_event_id: what *this* job observed, even when the item already existed |
+| `evidence_objects` | write-ahead registry of every WORM object: storage_key, kind (page, file, seal, report), sha256, size, state (pending, then complete or missing; final after that, enforced by trigger), retain_until. *Orphan* = complete but referenced by no item (derived, reported) |
+| `items` | **append-only** (UPDATE/DELETE/TRUNCATE rejected by trigger). `raw_hash`, `content_hash`, `evidence_object_id` + `storage_key` + `json_path`, `item_type` ∈ message, file, event (+ `event_kind`), `change_hints`, `UNIQUE (tenant_id, idempotency_key)` |
+| `job_items` | append-only. (job_id, item_id) PK, unit_key, custody_event_id: what *this* job observed, even when the item already existed |
 | `custody_events` | id, tenant_id, stream_id, job_id NULL, seq, event_type, actor, item_id NULL, payload JSONB, prev_hash, event_hash, created_at. Append-only by trigger (UPDATE/DELETE/TRUNCATE rejected) |
-| `custody_chain_heads` | stream_id PK, last_seq, last_hash, locked `FOR UPDATE` on append |
+| `custody_chain_heads` | stream_id PK, last_seq, last_hash, locked `FOR UPDATE` on append; trigger allows only `last_seq + 1` |
+
+Mutable by design: `collection_jobs`, `work_units` (checkpoints/counters), `connections`, `custodians`,
+`custodian_identities`. `matters.retention_until` may only be extended. No table grants DELETE or
+TRUNCATE to the app role; see ADR 0007 for roles.
 
 ## 5. Temporal topology (ADR 0001)
 - Task queue per source: `collect-dummy`, later `collect-slack`, `collect-teams`.

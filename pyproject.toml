@@ -5,6 +5,7 @@ description = "eDiscovery collaboration data collection module (workspace root)"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "edisc-core",
+    "edisc-db",
     "edisc-evidence",
     "edisc-custody",
     "edisc-connectors-base",
@@ -29,6 +30,7 @@ dev = [
     "boto3>=1.43.104",
     "temporalio>=1.33.0",
     "httpx>=0.28.1",
+    "asyncpg-stubs>=0.31.3",
 ]
 
 [tool.uv]
@@ -37,6 +39,7 @@ package = false
 [tool.uv.workspace]
 members = [
     "packages/core",
+    "packages/db",
     "packages/evidence",
     "packages/custody",
     "packages/connectors/base",
@@ -51,6 +54,7 @@ members = [
 
 [tool.uv.sources]
 edisc-core = { workspace = true }
+edisc-db = { workspace = true }
 edisc-evidence = { workspace = true }
 edisc-custody = { workspace = true }
 edisc-connectors-base = { workspace = true }
@@ -79,7 +83,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S105", "S106", "S311", "S603", "S607", "T20", "BLE001", "TRY301"]
+"tests/**" = ["S101", "S105", "S106", "S311", "S603", "S607", "S608", "T20", "BLE001", "TRY301"]
+# migrations interpolate only module-level constants and fixed identifiers into DDL
+"packages/db/migrations/**" = ["S608"]
 
 # ---------------------------------------------------------------- mypy
 [tool.mypy]
@@ -88,6 +94,7 @@ strict = true
 warn_unreachable = true
 mypy_path = [
     "packages/core/src",
+    "packages/db/src",
     "packages/evidence/src",
     "packages/custody/src",
     "packages/connectors/base/src",

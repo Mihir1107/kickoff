@@ -65,6 +65,7 @@ jobs:
         run: |
           sed 's/^EDISC_ENV=.*/EDISC_ENV=ci/' .env.example > .env
           make up-ci
+      - run: make migrate
       - run: uv run pytest tests/integration -m "not elasticsearch"
       - name: Dump service logs on failure
         if: failure()

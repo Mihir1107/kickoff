@@ -20,7 +20,7 @@ The plan of record is in `docs/ARCHITECTURE.md` and `docs/adr/`. Read them befor
 8. **Streaming, never loading.** Bounded chunks. Hash while uploading. Never hold a whole conversation/collection in memory.
 
 ## Layout
-- `packages/*`: libraries (`edisc_core`, `edisc_evidence`, `edisc_custody`, `edisc_connectors_base`,
+- `packages/*`: libraries (`edisc_core`, `edisc_db`, `edisc_evidence`, `edisc_custody`, `edisc_connectors_base`,
   `edisc_connector_*`, `edisc_normalizer`, `edisc_renderers`). src layout, one uv workspace member each.
 - `apps/api` (`edisc_api`): FastAPI. `workers/collection` (`edisc_worker`): Temporal workers, one task queue per source.
 - `infra/docker-compose.yml`: Postgres, Redis, MinIO (object lock), Temporal + UI, Elasticsearch. Pinned by tag + digest.
@@ -33,7 +33,7 @@ make sync               # uv sync --all-packages
 make up / down          # infra up (waits for health, runs idempotent init jobs) / stop
 make up-ci              # subset CI uses (no UI, no Elasticsearch)
 make nuke               # down + delete volumes; refuses unless EDISC_ENV=local|ci
-make migrate            # alembic upgrade head
+make migrate            # bootstrap roles/schema as superuser (idempotent), then alembic upgrade head as owner
 make lint fmt typecheck # ruff, ruff format, mypy --strict
 make test               # unit tests
 make test-integration   # integration tests (needs `make up`)
@@ -55,6 +55,8 @@ make worker / api       # run the Temporal worker / API
 - Workflows carry IDs and small cursors only. Raw data, tokens and large payloads never enter Temporal history.
 - The DB checkpoint is the source of truth for resume, not Temporal heartbeat details.
 - Per-batch writes (items + job_items + custody event + checkpoint + counts) happen in ONE transaction.
+- Schema changes: new Alembic revision in `packages/db/migrations/versions/` (hand-written SQL, run via `split_sql`),
+  update `edisc_db.models` to match (drift test fails otherwise), add RLS + grants for any new tenant table.
 - Tenant isolation: FORCE RLS on every tenant table. The app connects as `edisc_app` (not owner, not superuser,
   no BYPASSRLS) and sets `SET LOCAL app.tenant_id` per transaction via the single `tenant_tx()` helper, in activities too.
   Superuser is only for migrations and tamper tests.
