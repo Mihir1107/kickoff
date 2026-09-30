@@ -12,5 +12,6 @@
 | 0008 | Custody package format and offline verifier (`edisc-verify`) |
 | 0009 | Envelope encryption for connection tokens |
 | 0010 | Distributed rate limiting (Redis token buckets) |
+| 0011 | Thread replies in range whose parent is out of range (**proposed**) |
 
 New ADRs: copy the structure (Status / Context / Decision / Consequences). Superseded ADRs are kept and marked.

@@ -20,6 +20,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from typing import Protocol
 from urllib.parse import quote
 
 import redis.asyncio as aioredis
@@ -212,6 +213,12 @@ class RateLimiter:
             return int(until_us)
 
 
+class _LimiterLike(Protocol):
+    async def acquire(self, key: BucketKey, *, on_wait: WaitCallback | None = None) -> Grant: ...
+
+    async def pause(self, key: BucketKey, retry_after_seconds: float) -> int | None: ...
+
+
 class SourceThrottledError(Exception):
     """Raised by connectors when the source answers 429 / Retry-After (or an equivalent signal)."""
 
@@ -221,7 +228,7 @@ class SourceThrottledError(Exception):
 
 
 async def call_with_limits[T](
-    limiter: RateLimiter,
+    limiter: _LimiterLike,
     key: BucketKey,
     request: Callable[[], Awaitable[T]],
     *,

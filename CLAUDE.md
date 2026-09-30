@@ -78,6 +78,10 @@ make worker / api       # run the Temporal worker / API
 - Keep `edisc_custody.package`/`cli`/`chain`/`merkle` free of DB and cloud imports (a test enforces it).
 - `completed_unverified` is never presented as a clean completion (ADR 0005).
 - Secrets: `.env.example` has placeholders only. Never commit `.env`. Wrap secrets in `SecretStr`.
+- Dummy connector (`edisc_connector_dummy`): the golden dataset and its own oracle. Expected values in tests come
+  from `Dataset`, never from collected data. Output is byte-identical per (spec, epoch); changing it requires a
+  `DummyConnector.version` bump and regenerating `tests/golden/dummy/small.json`.
+- Thread-parent policy (ADR 0011, PROPOSED): default `include_parent_and_thread`; do not change without sign-off.
 - Rate limits (ADR 0010): every source request goes through `edisc_connectors_base.ratelimit.call_with_limits`
   with a `BucketKey(tenant, source, workspace, method)`; limits only from `EDISC_RATE_LIMITS`; raise
   `SourceThrottledError(retry_after)` on 429 so the whole bucket pauses. Never bypass the limiter.

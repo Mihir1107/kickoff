@@ -1,0 +1,33 @@
+{
+  "_about": "SHA-256 over every byte the dummy source returns for a full collection (all pages, the directory, all files). Changing it means the generator's output changed: bump DummyConnector.version and regenerate deliberately.",
+  "connector_version": "0.1.0",
+  "spec": {
+    "seed": 20260930,
+    "conversations": 3,
+    "days": 2,
+    "messages_per_unit": 24,
+    "page_size": 10
+  },
+  "epochs": [
+    {
+      "epoch": 0,
+      "sha256": "c8fc6fbc6d7de553b549df5c760aa1622c5e16e68c542633a7cf73f93333452c",
+      "counts": {
+        "batches": 24,
+        "raw_messages": 150,
+        "files": 6
+      },
+      "total_messages": 144
+    },
+    {
+      "epoch": 1,
+      "sha256": "abafd5f1c340ae7a2126e6f82c85b94781e6820a2f6c68346abbb334b343cd39",
+      "counts": {
+        "batches": 36,
+        "raw_messages": 228,
+        "files": 8
+      },
+      "total_messages": 216
+    }
+  ]
+}
