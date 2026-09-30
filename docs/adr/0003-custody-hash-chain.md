@@ -54,6 +54,15 @@ See `docs/runs/2026-09-30-custody-contention.md` for measurements.
     `collection_jobs.seal_storage_key`).
 - **How:** the append transaction sets `anchor_due` on the head. After commit, `anchor_if_due` writes
   the anchor. The flag survives crashes, so a missed anchor is written by the next caller.
+- **Sweeper** (`edisc_custody.sweeper.sweep_anchors`, migration 0003): terminated or abandoned jobs have
+  no next caller. A periodic sweeper anchors every stream that is `anchor_due`, or whose unanchored
+  tail has been idle longer than `EDISC_CUSTODY_ANCHOR_SWEEP_IDLE_SECONDS` (default 600).
+  - It finds them across tenants through `due_anchor_streams()`, a SECURITY DEFINER function owned by
+    the NOLOGIN `edisc_sweeper` role. Its row policy exposes only overdue heads, and it returns ids
+    only.
+  - Anchoring itself goes through the normal tenant-scoped path.
+  - Every stream is attempted, and failures are raised together (never swallowed).
+  - It runs as a Temporal schedule (wired in M12) and must exist before Phase 3.
 - **Object:** key `custody-anchors/<tenant>/<stream>/<seq:016d>.json`. The body is the deterministic
   canonical JSON `{format: "edisc-anchor/1", tenant_id, stream_id, seq, event_hash}`, so retries write
   byte-identical objects.
@@ -89,5 +98,6 @@ violated:
   rewritten seq. This is tested at DB level and on exported packages.
 - + ~5k events per 1M messages. Per-item provability is kept via Merkle roots.
 - − **Exposure window:** events after the latest anchor are protected only by the DB until the next
-  anchor (at most N−1 batch events, never past a lifecycle event or finalize).
+  anchor: at most N−1 batch events, and never past a lifecycle event or finalize. For abandoned
+  streams, the window is bounded by the sweeper's idle window plus its schedule interval.
 - − Anchor time is attested only by S3 metadata. RFC 3161 trusted timestamps are in the backlog.

@@ -5,6 +5,8 @@ grants) is created by Alembic running as the owner role. In production this step
 provisioning; locally/CI ``make migrate`` runs it.
 
 - ``edisc_owner``: owns the schema and all objects; used only by migrations.
+- ``edisc_sweeper``: NOLOGIN; owns SECURITY DEFINER maintenance functions with row policies limited to
+  what they need (anchor sweeper: ids of streams with overdue anchors).
 - ``edisc_app``: API and workers. NOSUPERUSER, NOBYPASSRLS, NOCREATEDB, NOCREATEROLE, not a member
   of the owner role, cannot create objects in the schema.
 """
@@ -17,6 +19,8 @@ import sys
 import asyncpg
 
 from edisc_core.settings import Settings, get_settings
+
+SWEEPER_ROLE = "edisc_sweeper"
 
 
 async def _ensure_role(conn: asyncpg.Connection, name: str, password: str) -> None:
@@ -39,6 +43,19 @@ async def bootstrap(settings: Settings, *, db: str | None = None) -> None:
     try:
         await _ensure_role(conn, owner, settings.pg_owner_password.get_secret_value())
         await _ensure_role(conn, app, settings.pg_app_password.get_secret_value())
+        # NOLOGIN role that owns narrow cross-tenant maintenance functions (e.g. the anchor sweeper).
+        # The owner is a member only so migrations can hand function ownership to it.
+        if not await conn.fetchval("SELECT 1 FROM pg_roles WHERE rolname = $1", SWEEPER_ROLE):
+            await conn.execute(
+                await conn.fetchval(
+                    "SELECT format('CREATE ROLE %I NOLOGIN NOINHERIT', $1::text)", SWEEPER_ROLE
+                )
+            )
+        await conn.execute(
+            await conn.fetchval(
+                "SELECT format('GRANT %I TO %I', $1::text, $2::text)", SWEEPER_ROLE, owner
+            )
+        )
         if not await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", database):
             await conn.execute(
                 await conn.fetchval("SELECT format('CREATE DATABASE %I', $1::text)", database)

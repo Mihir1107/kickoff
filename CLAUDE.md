@@ -34,6 +34,7 @@ make up / down          # infra up (waits for health, runs idempotent init jobs)
 make up-ci              # subset CI uses (no UI, no Elasticsearch)
 make nuke               # down + delete volumes; refuses unless EDISC_ENV=local|ci
 make migrate            # bootstrap roles/schema as superuser (idempotent), then alembic upgrade head as owner
+uv run python -m edisc_db.migrate downgrade <rev>   # explicit target only; never 'base' outside scratch DBs
 make lint fmt typecheck # ruff, ruff format, mypy --strict
 make test               # unit tests
 make test-integration   # integration tests (needs `make up`)
@@ -67,7 +68,7 @@ make worker / api       # run the Temporal worker / API
   create message versions; they are `item_type=event` reaction-snapshot items linked to the message.
 - Custody (`edisc_custody`): call `append`/`append_batch` INSIDE the tenant transaction; after commit call
   `anchor_if_due` (WORM anchor of the head). Lifecycle events and every N events are anchored; `seal_job_chain` at
-  finalize. `verify_chain` (DB) and `edisc-verify` (offline package, ADR 0008) share `ChainVerifier`. Anchors are always
+  finalize; `sweep_anchors` (periodic) seals overdue/abandoned streams. `verify_chain` (DB) and `edisc-verify` (offline package, ADR 0008) share `ChainVerifier`. Anchors are always
   listed from S3 versions, never from the DB. Merkle = RFC 6962, leaves ordered by idempotency_key.
 - Keep `edisc_custody.package`/`cli`/`chain`/`merkle` free of DB and cloud imports (a test enforces it).
 - `completed_unverified` is never presented as a clean completion (ADR 0005).

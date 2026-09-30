@@ -22,13 +22,19 @@ def upgrade(database: str | None = None, revision: str = "head") -> None:
     command.upgrade(alembic_config(database), revision)
 
 
-def downgrade(database: str | None = None, revision: str = "base") -> None:
+def downgrade(database: str | None = None, *, revision: str) -> None:
+    """Downgrade to an explicit revision. There is deliberately no default: "base" drops everything."""
     command.downgrade(alembic_config(database), revision)
 
 
 def main() -> None:
-    action = sys.argv[1] if len(sys.argv) > 1 else "upgrade"
-    {"upgrade": upgrade, "downgrade": downgrade}[action]()
+    args = sys.argv[1:] or ["upgrade"]
+    if args[0] == "upgrade":
+        upgrade()
+    elif args[0] == "downgrade" and len(args) == 2:
+        downgrade(revision=args[1])
+    else:
+        raise SystemExit("usage: python -m edisc_db.migrate upgrade | downgrade <revision>")
 
 
 if __name__ == "__main__":

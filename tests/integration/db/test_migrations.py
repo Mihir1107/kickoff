@@ -46,7 +46,7 @@ async def test_roundtrip_and_no_model_drift(connect: Connect, settings: Settings
     await asyncio.to_thread(upgrade, SCRATCH_DB)
     assert await _schema_diff(settings, SCRATCH_DB) == []
 
-    await asyncio.to_thread(downgrade, SCRATCH_DB)
+    await asyncio.to_thread(lambda: downgrade(SCRATCH_DB, revision="base"))
     owner = await connect("owner", db=SCRATCH_DB)
     try:
         leftover = await owner.fetchval(

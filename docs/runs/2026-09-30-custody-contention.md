@@ -27,12 +27,20 @@ process drove it with `scripts/bench_custody_contention.py --writers 1 4 16 32 -
   `append_batch` until commit: the 100 `job_items` inserts plus the commit fsync.
 - **Separate chains scale further.** About 300 batches/s here, where the single-process benchmark
   client is itself the limit.
-- **It is not a hotspot for live sources.** One job's ceiling is about 18k messages/s. Slack and Graph
-  rate limits allow roughly 10² messages/s per token, two orders of magnitude less. The cap only
-  matters for offline ingestion (Phase 2 Slack export zips) or the dummy connector (1M messages in
-  about 1 minute of DB time, which is acceptable).
+- **It is not a hotspot for live sources.** One job's ceiling is about 18k messages/s.
+  - *Correction (review, 2026-09-30):* Slack internal apps get 50+ requests/min on
+    `conversations.history` at up to 1000 messages/request, so roughly **830 messages/s per token**.
+    Graph is in the same order of magnitude.
+  - That is still about 20× below the shared-chain ceiling, so the conclusion is unchanged.
+  - The cap only matters for offline ingestion (Phase 2 Slack export zips) or the dummy connector
+    (1M messages in about 1 minute of DB time, which is acceptable).
 
-## Proposals (not implemented; need approval per the M5 brief)
+## Decisions (review, 2026-09-30)
+- Proposal 1 (lock-narrowing reorder) **will be implemented when Phase 2 bulk export ingestion lands**,
+  followed by a re-measurement.
+- Proposal 2 (per-unit chains) stays deferred.
+
+## Proposals
 1. **Cheap, no model change:** shorten the lock hold. Make `fk_job_items_…_custody_events`
    `DEFERRABLE INITIALLY DEFERRED`, pre-allocate the event id, insert `job_items` first, and call
    `append_batch` last, just before commit. The lock then covers one insert, one update and the

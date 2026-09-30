@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     custody_anchor_every_n_batches: int = Field(
         default=8, ge=1, description="Seal the chain head to WORM at least every N batch events."
     )
+    custody_anchor_sweep_idle_seconds: int = Field(
+        default=600,
+        ge=0,
+        description="The sweeper also anchors streams whose unanchored tail has been idle this long.",
+    )
     custody_tenant_anchor_retention_days: int = Field(
         default=3650, ge=1, description="Retention for anchors of tenant-level streams (no matter)."
     )
