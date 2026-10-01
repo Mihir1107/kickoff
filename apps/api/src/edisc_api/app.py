@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -18,6 +18,8 @@ from types_aiobotocore_s3 import S3Client
 
 from edisc_api.auth import Authenticator, AuthError, Caller, JwksCache
 from edisc_api.errors import ApiError
+from edisc_connector_dummy.connector import DummyConnector
+from edisc_connectors_base.protocol import Connector
 from edisc_connectors_base.ratelimit import RateLimiter
 from edisc_core.envelope import SecretBox
 from edisc_core.kms import LocalKmsClient
@@ -38,6 +40,7 @@ class Resources:
     limiter: RateLimiter
     box: SecretBox
     authenticator: Authenticator
+    connectors: Mapping[str, Connector]
 
 
 @contextlib.asynccontextmanager
@@ -51,15 +54,17 @@ async def build_resources(settings: Settings) -> AsyncIterator[Resources]:
         temporal = await Client.connect(
             settings.temporal_address, namespace=settings.temporal_namespace
         )
+        limiter = RateLimiter(redis, settings.rate_limits)
         async with s3_client(settings) as s3:
             yield Resources(
                 settings,
                 sessions,
                 s3,
                 temporal,
-                RateLimiter(redis, settings.rate_limits),
+                limiter,
                 SecretBox(LocalKmsClient(settings)),
                 Authenticator(settings, sessions, JwksCache(settings, http)),
+                {"dummy": DummyConnector(limiter)},
             )
     finally:
         await http.aclose()

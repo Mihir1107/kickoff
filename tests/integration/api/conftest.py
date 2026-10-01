@@ -20,6 +20,7 @@ from types_aiobotocore_s3 import S3Client
 from edisc_api.admin import onboard_tenant
 from edisc_api.app import Resources, create_app
 from edisc_api.auth import DEV_ISSUER, DEV_JWKS, Authenticator, JwksCache, dev_token
+from edisc_connector_dummy.connector import DummyConnector
 from edisc_connectors_base.ratelimit import RateLimiter
 from edisc_core.envelope import SecretBox
 from edisc_core.ids import new_id
@@ -29,6 +30,22 @@ from edisc_db.session import tenant_tx
 
 Sessions = async_sessionmaker[AsyncSession]
 AUDIENCE = "edisc-api"
+
+# Every credential a test hands to the API. Every response of every API test is scanned for them
+# (ADR 0013 section 5): a hit fails the test that made the request.
+SECRETS: set[str] = set()
+
+
+def secret(prefix: str = "xoxb") -> str:
+    value = f"{prefix}-canary-{secrets.token_hex(12)}"
+    SECRETS.add(value)
+    return value
+
+
+async def _scan_response(response: httpx.Response) -> None:
+    body = (await response.aread()).decode(errors="replace")
+    leaked = [s for s in SECRETS if s in body or s in str(response.headers)]
+    assert not leaked, f"{response.request.method} {response.request.url} leaked a credential"
 
 
 @pytest.fixture(scope="session")
@@ -61,6 +78,7 @@ class Api:
             transport=httpx.ASGITransport(app=create_app(self.settings, self.resources)),
             base_url=f"http://{subdomain}.{self.settings.api_base_domain}",
             headers=headers,
+            event_hooks={"response": [_scan_response]},
         )
 
 
@@ -82,6 +100,7 @@ async def api(
         limiter,
         SecretBox(kms),
         Authenticator(api_settings, app_sessions, JwksCache(api_settings, http)),
+        {"dummy": DummyConnector(limiter)},
     )
     yield Api(api_settings, app_sessions, s3, temporal, resources, http)
     await http.aclose()
