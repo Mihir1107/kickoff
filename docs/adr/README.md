@@ -14,6 +14,6 @@
 | 0010 | Distributed rate limiting (Redis token buckets) |
 | 0011 | Thread replies in range whose parent is out of range (**proposed**) |
 | 0012 | Temporal workflow design: fan-out, continue-as-new, errors, cancellation, versioning |
-| 0013 | API authentication and authorization: tenant > client > matter > workspace, scoped roles (**proposed**) |
+| 0013 | API authentication and authorization: tenant > client > matter > workspace, scoped roles |
 
 New ADRs: copy the structure (Status / Context / Decision / Consequences). Superseded ADRs are kept and marked.

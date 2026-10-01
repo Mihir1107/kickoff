@@ -1,6 +1,7 @@
 # ADR 0013: API authentication and authorization (tenant > client > matter > workspace)
 
-Status: **Proposed** (2026-10-01). Not implemented. M13 builds on it once it is accepted.
+Status: **Accepted** (2026-10-01) with the decisions below. Decisions (a) and (c) are *decided, pending
+product-owner confirmation*: implemented as stated, and revisited if the product owner disagrees.
 
 ## Context
 - **What M13 exposes:** the collection module over HTTP. Callers connect sources, start, cancel, resume and
@@ -107,12 +108,20 @@ Existing matters migrate to one default client per tenant, so no data is lost.
 - Minus: authorization below the tenant is application code, so every route needs a declared permission.
   A test enumerates the routes and fails on any route without one.
 
-## Open questions for review
-1. **Connections at client level.** Is reusing one Slack/Teams org across a client's matters right, or
-   must a connection be granted per matter? (Proposed: client-owned, with a matter-level `connection.use`
-   permission.)
-2. **Role list.** Is it enough for Phase 1, or should we start with tenant-defined custom roles?
-   (Proposed: fixed roles now; custom roles go in the backlog.)
-3. **Workspaces in M13.** Model them now and leave them unused by jobs, or defer the table to the
-   export/RSMF phase? (Proposed: model now, so permissions and URLs are stable.)
-4. **Audit of reads** (who viewed which custody or report): Phase 1 or backlog? (Proposed: backlog.)
+## Decisions on the review questions (2026-10-01)
+- **(a) Connections are owned by the client and shared across its matters** (*pending product-owner
+  confirmation*).
+  - Only client-admin roles (`client_admin`, `tenant_admin`) create, re-authorize or disable them
+    (`connection.manage`).
+  - Matters reference a connection when starting a job; `job.start` on the matter is enough to use the
+    client's connections.
+  - Every job records its `connection_id` (already the case), and the `job_started` custody event names it.
+- **(b) Fixed roles are enough for v1.** Custom roles go in the backlog.
+- **(c) Workspaces are modelled now in the schema and in role scoping** (client > matter > workspace),
+  with no workspace features yet (*pending product-owner confirmation*).
+- **(d) Every read that returns evidence content is audited now:** preview, download, export and RSMF
+  retrieval each append an audit event naming the principal, the evidence/item ids and the purpose.
+  - Metadata reads (job status, lists, reconciliation, custody verification results) are not audited
+    yet (backlog).
+  - In M13 the only content-returning endpoint is evidence download (`GET .../evidence/{id}/content`).
+    Export and RSMF arrive with their phases and must use the same audited path.

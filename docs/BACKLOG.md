@@ -37,3 +37,5 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - Evidence retention extension hysteresis: a dedup hit extends retention only if the rolling target exceeds the
   current retain-until by more than a slack (today every hit calls PutObjectRetention; docs/runs breakdown).
 - Page-object compression (option 3), once real Slack exports are available to measure the ratio.
+- Tenant-defined custom roles (ADR 0013 decision b: fixed roles for v1).
+- Audit of metadata reads (job status, lists, reconciliation, custody results); content reads are audited (ADR 0013 d).
