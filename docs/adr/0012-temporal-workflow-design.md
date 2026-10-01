@@ -1,6 +1,6 @@
 # ADR 0012: Temporal workflow design: fan-out, continue-as-new, errors, cancellation, versioning
 
-Status: **Proposed** (2026-10-01), for review before M12 is implemented. Builds on ADR 0001 and
+Status: **Accepted** (2026-10-01) with review changes (sections marked **R1–R6**). Builds on ADR 0001 and
 ADR 0006; the activity bodies already exist (`edisc_worker.pipeline`).
 
 ## 1. Shape
@@ -54,6 +54,18 @@ Why not await child handles: a handle belongs to the run that started the child.
 continue-as-new the new run cannot await it, and "re-attaching" would mean restarting it.
 DB + deterministic IDs + signals is the documented pattern for long fan-outs that outlive a run.
 
+## 2a. Sealed jobs are closed (R1)
+- Before **every** batch, outside any transaction, children check the job state: cancel requested,
+  failing, paused, terminal or sealed. A job that is not running produces no more batches.
+- A **DB trigger** on `items`, `job_items` and `custody_events` rejects any insert for a job whose
+  status is terminal or whose `sealed_at` is set. The trigger takes `FOR SHARE` on the job row, so a
+  batch transaction racing the finalize transaction either commits before the job's terminal status
+  or is rejected and rolled back. Nothing can land after `job_finished` / the seal.
+- Finalize order: recover evidence (custody events allowed) → `job_finished` event and terminal
+  status in one transaction → seal anchor → `sealed_at`.
+- Tested: a job-scoped integrity failure in one unit fails the job while other children are
+  mid-run. Zero events land after the seal, and `verify_chain` passes.
+
 ## 3. Error classification (requirement 2)
 
 Activities translate exceptions into Temporal `ApplicationError` types. Workflows never see raw
@@ -61,9 +73,10 @@ exceptions.
 
 | Class | Examples | Activity retry | Outcome |
 |---|---|---|---|
-| **Integrity** (non-retryable) | `EvidenceIntegrityError`, chain/Merkle verification failure, `NormalizationError`, invalid cursor, `MultiScopeNotSupportedError` | none | Child runs `fail_unit`: the unit is `failed` with the error, plus a custody `unit_failed` lifecycle event. The job ends `failed`. Loud, never retried away |
-| **Auth** (non-retryable) | `AuthenticationError` (new in connectors/base: token revoked or invalid, `invalid_auth`, `token_revoked`, `invalid_grant`) | none | Child ends `paused`. Parent: job `paused_awaiting_reauth` (new status), custody `job_paused` event, no new units. Waits for a `reauthorized` signal (sent by the API after reconnecting), then resumes the paused units. No infinite retries |
-| **Transient** (retryable) | `TimeoutError`, `ConnectionError`, source 5xx, `is_retryable_db_error`, `ContentLockTimeoutError`, `EvidenceCopyTimeoutError`, S3 5xx/throttling | exponential 1 s → 60 s, at most 25 attempts | When exhausted: treated as integrity, so the unit is `failed` loudly |
+| **Integrity, unit-scoped** (non-retryable) (R4) | `NormalizationError`, invalid cursor, a single `EvidenceIntegrityError` | none | Child runs `fail_unit`: the unit is `failed` with the error and a custody `unit_failed` event. **Other units finish.** The job ends **`completed_with_failed_units`**, which is never shown as clean. Failed units are re-runnable after a fix as a **rerun job** (`rerun_of`, explicit unit list); the sealed original stays closed |
+| **Integrity, job-scoped** (non-retryable) (R4) | custody chain/Merkle verification failure, WORM anchor conflict/mismatch | none | The parent fails the **job**. Every unit stops at its next batch boundary, then custody `job_failed`, seal, status `failed` |
+| **Auth** (non-retryable) (R6) | `AuthenticationError` (new in connectors/base: token revoked or invalid, `invalid_auth`, `token_revoked`, `invalid_grant`) | none | The connection becomes `reauth_required`, and **every running job on that connection** becomes `paused_awaiting_reauth`. Each gets a custody `job_paused` event and a `job_pauses` row, and one **alert record** is created per connection. Children stop at their next batch boundary, and parents start no units. When re-authorized (API, M13): pauses close, jobs resume (signal plus DB poll as backstop). The paused duration is in the job status and the report. No infinite retries |
+| **Transient** (retryable) (R3) | `TimeoutError`, `ConnectionError`, source 5xx, `is_retryable_db_error`, `ContentLockTimeoutError`, `EvidenceCopyTimeoutError`, S3 5xx/throttling | exponential 1 s → 60 s, at most 25 attempts | When exhausted: the unit goes to **`retry_later`** with a cool-down (`EDISC_UNIT_RETRY_COOLDOWN_SECONDS`, default 15 min). The parent re-schedules it while other units continue. Only after `EDISC_UNIT_RETRY_HORIZON_SECONDS` (default 24 h) since its first failure is it `failed`, with the last error recorded |
 | **Throttle** | source 429 / Retry-After | handled inside the limiter (shared pause), never an activity failure | |
 | **Unclassified** | anything else | at most 3 attempts | then `failed` with the exception type in the unit's `last_error` |
 
@@ -73,7 +86,22 @@ exceptions.
   (default 3) with backoff, then recorded. The unit is a gap.
 - Later jobs retry naturally. `file_became_available` records success.
 
-## 4. Heartbeats (requirement 3)
+## 4. Heartbeats and activity duration (requirement 3, R2)
+
+**Choice: time-boxed activities.** A unit can take hours: at Slack's non-Marketplace rate of
+15 messages/min, 500 messages take about 33 minutes. So `collect_pages` processes batches only until
+`max_pages` or `EDISC_ACTIVITY_TIME_BOX_SECONDS` (default 600 s), whichever comes first, then returns.
+The child workflow loops, and each call resumes from the DB checkpoint. `start_to_close` = 30 min
+(time box plus one batch plus margin). `heartbeat_timeout` = 60 s.
+
+The limiter's `on_wait` callback heartbeats, and it also checks:
+- the time box;
+- the job's cancel, fail and pause state, read from the DB and cached for at most 5 s.
+
+If either says stop, the activity ends cleanly *before* the request. Waits are never inside a
+transaction. So a long Retry-After or a Redis outage can neither exceed `start_to_close` nor delay a
+cancel.
+
 
 - `collect_pages` heartbeats after every batch with details `{unit_key, cursor, pages}`. The details
   are informational: on retry the activity resumes from the **DB checkpoint** (ADR 0001).
@@ -106,10 +134,13 @@ Cancellation is cooperative and stops at a batch boundary, never mid-transaction
 - **Policy for changing workflow code while multi-day jobs run:**
   1. Every change to workflow code that alters the command sequence goes behind
      `workflow.patched("<change-id>")`.
-  2. The new history is recorded. The old histories stay in the replay suite for as long as a run
-     started on the old code could exist (the longest job plus the continue-as-new horizon; 30 days
-     by default).
-  3. After that, `workflow.deprecate_patch`, and later remove the old branch with its golden history.
+  2. The new history is recorded. **The old histories stay in the replay suite until Temporal
+     visibility shows no open workflow that started before the patch shipped** (R5; no fixed time
+     rule). `scripts/temporal_patch_check.py` runs that query:
+     `WorkflowType=… AND ExecutionStatus="Running" AND StartTime < <patch deploy time>`.
+     Continue-as-new runs count as started at their own start time, so the query covers chains.
+  3. Only when that query returns nothing: `workflow.deprecate_patch`, then remove the old branch with
+     its golden histories.
   - Activity code may change freely within its contract.
   - Worker build IDs / Worker Deployments are the route for large incompatible rewrites (backlog).
   - Tested: one patched change replays an in-flight history recorded before the change. The same
