@@ -189,3 +189,23 @@ async def test_tenant_tx_helper_isolates(
             assert (await s.execute(select(Matter))).first() is None
     finally:
         await engine.dispose()
+
+
+async def test_every_tenant_scoped_table_forces_rls_and_is_covered_here(connect: Connect) -> None:
+    """Catalog check: a new table with a tenant_id must FORCE RLS with a tenant policy and be seeded
+    by these tests (TENANT_TABLES), so no future table can silently skip isolation."""
+    conn = await connect("superuser")
+    try:
+        rows = await conn.fetch(
+            "SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity,"
+            " EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid AND p.polname = 'tenant_isolation') AS policy"
+            " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+            " JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped"
+            " WHERE n.nspname = 'edisc' AND c.relkind = 'r'"
+        )
+    finally:
+        await conn.close()
+    tables = {r["relname"] for r in rows}
+    assert tables == set(TENANT_TABLES), tables ^ set(TENANT_TABLES)
+    for r in rows:
+        assert r["relrowsecurity"] and r["relforcerowsecurity"] and r["policy"], r["relname"]

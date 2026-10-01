@@ -158,6 +158,60 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
             t,
             ids["conn"],
         )
+        await conn.execute(
+            "INSERT INTO job_pauses (id, tenant_id, job_id, connection_id, reason) VALUES ($1, $2, $3, $4, 'r')",
+            new_id(),
+            t,
+            ids["job"],
+            ids["conn"],
+        )
+        await conn.execute(
+            "INSERT INTO alerts (id, tenant_id, kind, message) VALUES ($1, $2, 'k', 'm')",
+            new_id(),
+            t,
+        )
+        # M13 hierarchy and principals (migration 0015); the default client was created by the trigger
+        await conn.execute(
+            "INSERT INTO workspaces (id, tenant_id, matter_id, name) VALUES ($1, $2, $3, 'W')",
+            new_id(),
+            t,
+            ids["matter"],
+        )
+        await conn.execute(
+            "INSERT INTO tenant_idps (id, tenant_id, issuer, audience, jwks_url) VALUES ($1, $2, 'https://idp', 'edisc', 'https://idp/jwks')",
+            new_id(),
+            t,
+        )
+        principal, group = new_id(), new_id()
+        await conn.execute(
+            "INSERT INTO principals (id, tenant_id, kind, issuer, subject, display_name) VALUES ($1, $2, 'user', 'https://idp', $3, 'U')",
+            principal,
+            t,
+            f"sub-{principal}",
+        )
+        await conn.execute(
+            "INSERT INTO groups (id, tenant_id, name) VALUES ($1, $2, 'G')", group, t
+        )
+        await conn.execute(
+            "INSERT INTO group_members (id, tenant_id, group_id, principal_id) VALUES ($1, $2, $3, $4)",
+            new_id(),
+            t,
+            group,
+            principal,
+        )
+        await conn.execute(
+            "INSERT INTO role_assignments (id, tenant_id, principal_id, role, scope_type, created_by)"
+            " VALUES ($1, $2, $3, 'tenant_admin', 'tenant', 'seed')",
+            new_id(),
+            t,
+            principal,
+        )
+        await conn.execute(
+            "INSERT INTO api_idempotency (tenant_id, key, principal_id, request_hash, job_id) VALUES ($1, 'k1', $2, 'h', $3)",
+            t,
+            principal,
+            ids["job"],
+        )
     return Seeded(
         t,
         ids["matter"],
@@ -195,5 +249,15 @@ TENANT_TABLES = [
     "custody_chain_heads",
     "item_derivations",
     "token_refresh_journal",
+    "job_pauses",
+    "alerts",
+    "clients",
+    "workspaces",
+    "tenant_idps",
+    "principals",
+    "groups",
+    "group_members",
+    "role_assignments",
+    "api_idempotency",
 ]
 ALL_TABLES = ["tenants", *TENANT_TABLES]

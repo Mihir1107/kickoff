@@ -1,4 +1,4 @@
-"""SQLAlchemy 2.0 models mirroring migration 0001.
+"""SQLAlchemy 2.0 models mirroring the migrations.
 
 The migrations are the source of truth (hand-written SQL for RLS, triggers and grants). These models
 exist for typed queries; ``tests/integration/db/test_migrations.py`` fails if they drift from the
@@ -56,15 +56,34 @@ class Tenant(Base):
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
 
 
+class Client(Base):
+    __tablename__ = "clients"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),
+        Index(
+            "uq_clients_one_default", "tenant_id", unique=True, postgresql_where=text("is_default")
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    name: Mapped[str] = mapped_column(Text)
+    is_default: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+
+
 class Matter(Base):
     __tablename__ = "matters"
     __table_args__ = (
         UniqueConstraint("tenant_id", "id"),
         ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),
+        ForeignKeyConstraint(["tenant_id", "client_id"], ["clients.tenant_id", "clients.id"]),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    client_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     name: Mapped[str] = mapped_column(Text)
     retention_until: Mapped[datetime] = mapped_column(TZ)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
@@ -75,10 +94,12 @@ class Connection(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "id"),
         ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),
+        ForeignKeyConstraint(["tenant_id", "client_id"], ["clients.tenant_id", "clients.id"]),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    client_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     source: Mapped[str] = mapped_column(Text)
     external_org_id: Mapped[str] = mapped_column(Text)
     plan_tier: Mapped[str | None] = mapped_column(Text)
@@ -141,6 +162,9 @@ class CollectionJob(Base):
         ForeignKeyConstraint(
             ["tenant_id", "rerun_of"], ["collection_jobs.tenant_id", "collection_jobs.id"]
         ),
+        ForeignKeyConstraint(
+            ["tenant_id", "workspace_id"], ["workspaces.tenant_id", "workspaces.id"]
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
@@ -157,6 +181,7 @@ class CollectionJob(Base):
     stop_reason: Mapped[str | None] = mapped_column(Text)
     sealed_at: Mapped[datetime | None] = mapped_column(TZ)
     rerun_of: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     explicit_units: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     started_at: Mapped[datetime | None] = mapped_column(TZ)
@@ -412,3 +437,132 @@ class JobItem(Base):
     custody_event_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     in_scope: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+
+
+class Workspace(Base):
+    __tablename__ = "workspaces"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        ForeignKeyConstraint(["tenant_id", "matter_id"], ["matters.tenant_id", "matters.id"]),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    matter_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    name: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+
+
+class TenantIdp(Base):
+    __tablename__ = "tenant_idps"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "issuer"),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    issuer: Mapped[str] = mapped_column(Text)
+    audience: Mapped[str] = mapped_column(Text)
+    jwks_url: Mapped[str] = mapped_column(Text)
+    groups_claim: Mapped[str] = mapped_column(Text, server_default=text("'groups'"))
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+
+
+class Principal(Base):
+    __tablename__ = "principals"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        UniqueConstraint("tenant_id", "issuer", "subject"),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    kind: Mapped[str] = mapped_column(Text)
+    issuer: Mapped[str] = mapped_column(Text)
+    subject: Mapped[str] = mapped_column(Text)
+    display_name: Mapped[str] = mapped_column(Text)
+    email: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+
+
+class Group(Base):
+    __tablename__ = "groups"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        UniqueConstraint("tenant_id", "name"),
+        UniqueConstraint("tenant_id", "external_id"),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    name: Mapped[str] = mapped_column(Text)
+    external_id: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+
+
+class GroupMember(Base):
+    __tablename__ = "group_members"
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id", "group_id"], ["groups.tenant_id", "groups.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "principal_id"], ["principals.tenant_id", "principals.id"]
+        ),
+        Index(
+            "uq_group_members_active",
+            "group_id",
+            "principal_id",
+            unique=True,
+            postgresql_where=text("removed_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    group_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    principal_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    added_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    removed_at: Mapped[datetime | None] = mapped_column(TZ)
+
+
+class RoleAssignment(Base):
+    __tablename__ = "role_assignments"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "principal_id"], ["principals.tenant_id", "principals.id"]
+        ),
+        ForeignKeyConstraint(["tenant_id", "group_id"], ["groups.tenant_id", "groups.id"]),
+        Index(None, "tenant_id", "principal_id"),
+        Index(None, "tenant_id", "group_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    principal_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    group_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    role: Mapped[str] = mapped_column(Text)
+    scope_type: Mapped[str] = mapped_column(Text)
+    scope_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    created_by: Mapped[str] = mapped_column(Text)
+    revoked_at: Mapped[datetime | None] = mapped_column(TZ)
+    revoked_by: Mapped[str | None] = mapped_column(Text)
+
+
+class ApiIdempotency(Base):
+    __tablename__ = "api_idempotency"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "job_id"], ["collection_jobs.tenant_id", "collection_jobs.id"]
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    principal_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    request_hash: Mapped[str] = mapped_column(Text)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
