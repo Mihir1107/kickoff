@@ -125,3 +125,11 @@ Existing matters migrate to one default client per tenant, so no data is lost.
     yet (backlog).
   - In M13 the only content-returning endpoint is evidence download (`GET .../evidence/{id}/content`).
     Export and RSMF arrive with their phases and must use the same audited path.
+
+## Amendment (2026-10-01): client address behind proxies
+- Auth-failure throttling keys on (host, client address).
+- The client address is the socket peer, unless that peer is in `EDISC_API_TRUSTED_PROXIES` (CIDRs).
+  Then `X-Forwarded-For` is read from the right, skipping our own proxies, and the first untrusted hop is
+  the client.
+- A direct caller's `X-Forwarded-For` is ignored, so it cannot pick its identity. Clients behind one
+  load-balancer IP are throttled separately. Both cases are tested.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from enum import StrEnum
 from functools import lru_cache
@@ -187,6 +188,11 @@ class Settings(BaseSettings):
     api_jwt_leeway_seconds: int = Field(default=60, ge=0, le=300)
     api_jwks_cache_seconds: int = Field(default=600, ge=10)
     api_page_size_max: int = Field(default=200, ge=1)
+    api_trusted_proxies: list[str] = Field(
+        default_factory=list,
+        description="CIDRs of reverse proxies / load balancers whose X-Forwarded-For is believed. Empty: "
+        "the socket peer is the client.",
+    )
     api_auth_failures_per_minute: int = Field(
         default=30,
         ge=1,
@@ -201,6 +207,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _guard_disposable_only_settings(self) -> Settings:
+        for cidr in self.api_trusted_proxies:
+            ipaddress.ip_network(cidr, strict=False)  # raises on a malformed entry
         if self.api_dev_idp and not self.env.is_disposable:
             raise ValueError(
                 "EDISC_API_DEV_IDP is only permitted when EDISC_ENV is local, test or ci"

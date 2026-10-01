@@ -17,6 +17,7 @@ from temporalio.client import Client
 from types_aiobotocore_s3 import S3Client
 
 from edisc_api.auth import Authenticator, AuthError, Caller, JwksCache
+from edisc_api.client_ip import client_ip
 from edisc_api.errors import ApiError
 from edisc_connector_dummy.connector import DummyConnector
 from edisc_connectors_base.protocol import Connector
@@ -129,7 +130,12 @@ def resources(request: Request) -> Resources:
 
 
 def _failure_key(request: Request) -> str:
-    client = request.client.host if request.client else "unknown"
+    res: Resources = request.app.state.resources
+    client = client_ip(
+        request.client.host if request.client else None,
+        request.headers.get("x-forwarded-for"),
+        res.settings.api_trusted_proxies,
+    )
     return f"edisc:authfail:{request.headers.get('host', '')}:{client}"
 
 

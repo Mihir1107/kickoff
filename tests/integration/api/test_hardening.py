@@ -82,3 +82,62 @@ async def test_repeated_auth_failures_are_throttled_per_address_and_host(
             "/v1/me", headers={"authorization": f"Bearer {tenant.token(api.settings)}"}
         )
     assert ok.status_code == 200
+
+
+def _client(api: Api, tenant: TenantCtx, peer: str) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(
+            app=create_app(api.settings, api.resources), client=(peer, 4321)
+        ),
+        base_url=f"http://{tenant.subdomain}.{api.settings.api_base_domain}",
+    )
+
+
+async def test_a_direct_caller_cannot_escape_throttling_by_spoofing_x_forwarded_for(
+    api: Api, tenant: TenantCtx
+) -> None:
+    api.settings = api.resources.settings = api.settings.model_copy(
+        update={"api_auth_failures_per_minute": 3, "api_trusted_proxies": ["10.0.0.0/24"]}
+    )
+    peer = f"203.0.113.{uuid.uuid4().int % 250}"
+    async with _client(api, tenant, peer) as c:
+        for i in range(3):
+            r = await c.get(
+                "/v1/me",
+                headers={"authorization": "Bearer x", "x-forwarded-for": f"198.51.100.{i}"},
+            )
+            assert r.status_code == 401
+        spoofed = await c.get(
+            "/v1/me",
+            headers={
+                "authorization": f"Bearer {tenant.token(api.settings)}",
+                "x-forwarded-for": "198.51.100.99",
+            },
+        )
+    assert spoofed.status_code == 429  # the header was ignored: the socket peer is throttled
+
+
+async def test_behind_one_load_balancer_clients_are_throttled_separately(
+    api: Api, tenant: TenantCtx
+) -> None:
+    api.settings = api.resources.settings = api.settings.model_copy(
+        update={"api_auth_failures_per_minute": 3, "api_trusted_proxies": ["10.0.0.0/24"]}
+    )
+    lb = "10.0.0.5"
+    attacker, user = f"198.51.100.{uuid.uuid4().int % 250}", "192.0.2.44"
+    good = tenant.token(api.settings)
+    async with _client(api, tenant, lb) as c:
+        for _ in range(3):
+            assert (
+                await c.get(
+                    "/v1/me", headers={"authorization": "Bearer x", "x-forwarded-for": attacker}
+                )
+            ).status_code == 401
+        blocked = await c.get(
+            "/v1/me", headers={"authorization": f"Bearer {good}", "x-forwarded-for": attacker}
+        )
+        other = await c.get(
+            "/v1/me", headers={"authorization": f"Bearer {good}", "x-forwarded-for": user}
+        )
+    assert blocked.status_code == 429
+    assert other.status_code == 200  # everyone else behind the same LB IP is unaffected
