@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 import pytest
+import redis.asyncio as aioredis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
@@ -53,6 +54,9 @@ def api_settings(settings: Settings, tmp_path_factory: pytest.TempPathFactory) -
     return settings.model_copy(
         update={
             "api_dev_idp": True,
+            # the auth tests produce many 401s from the test client's one address; the throttling test
+            # lowers this itself
+            "api_auth_failures_per_minute": 10_000,
             # jobs started through the API take their RunConfig from settings. The poll stays at the
             # production 120 s on purpose: every job test then fails (times out) if a finished child's
             # signal is lost and the parent waits for the poll ("keep-early-wake" patch regression)
@@ -100,6 +104,7 @@ async def api(
     kms: LocalKmsClient,
 ) -> AsyncIterator[Api]:
     http = httpx.AsyncClient()
+    redis = aioredis.from_url(api_settings.redis_url)
     resources = Resources(
         api_settings,
         app_sessions,
@@ -109,9 +114,11 @@ async def api(
         SecretBox(kms),
         Authenticator(api_settings, app_sessions, JwksCache(api_settings, http)),
         {"dummy": DummyConnector(limiter)},
+        redis,
     )
     yield Api(api_settings, app_sessions, s3, temporal, resources, http)
     await http.aclose()
+    await redis.aclose()
 
 
 @dataclass

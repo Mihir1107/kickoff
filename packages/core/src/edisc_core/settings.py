@@ -181,6 +181,11 @@ class Settings(BaseSettings):
     api_jwt_leeway_seconds: int = Field(default=60, ge=0, le=300)
     api_jwks_cache_seconds: int = Field(default=600, ge=10)
     api_page_size_max: int = Field(default=200, ge=1)
+    api_auth_failures_per_minute: int = Field(
+        default=30,
+        ge=1,
+        description="per client address and host; then 429 until the minute passes",
+    )
 
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "edisc"

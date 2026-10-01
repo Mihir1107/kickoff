@@ -1,6 +1,7 @@
 # M13 plan: collection API (FastAPI)
 
-Depends on ADR 0013 (proposed: authn/authz). Nothing here is implemented yet. Milestones run in order;
+Status (2026-10-01): implemented, M13.1 to M13.7, with ADR 0013 accepted (decisions a and c pending
+product-owner confirmation). The commits are listed by milestone in `git log`. Milestones run in order;
 each one is implement → tests → run → commit.
 
 ## Requirements carried into every milestone

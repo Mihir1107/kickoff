@@ -45,6 +45,21 @@ make test-env-up / test-integration-only / test-env-down   # keep the test stack
 make worker / api       # Temporal worker (+ maintenance queue and sweeper schedules) / API
 ```
 
+## API (M13, ADR 0013)
+- `apps/api` (`edisc_api`): tenant from the Host subdomain (`tenant_id_for_subdomain`) + the token's IdP
+  (`tenant_idps`) + an active principal. NEVER read a tenant id from a body, query or header. Unknown
+  tenants and all auth failures get the same 401.
+- Every `/v1` route declares `openapi_extra=perm(...)` and calls `authorize(s, caller, P.X, Scope(...))`
+  inside its `tenant_tx` (404 if the caller cannot see the target, 403 if it can but lacks the permission).
+  Request models `extra="forbid"`; response models only (no ORM rows or dicts); cursor pagination
+  (`edisc_api.pagination`) on every list.
+- State changes: job actions are custody events in the job stream; everything else is
+  `edisc_api.audit.record` (custody stream = tenant id) with `caller.actor` and the request id. Evidence
+  content reads are audited BEFORE bytes are returned.
+- Credentials only through `edisc_db.connection_tokens`; the API test suite scans every response for
+  every credential it handed in.
+- Nothing is deleted: memberships and role assignments are ended (`removed_at` / `revoked_at`).
+
 ## Conventions
 - Python 3.12, `uv` only (no pip). Add deps with `uv add --package <member> <dep>`.
 - mypy `--strict` on all source (packages/apps/workers). ruff is the formatter and linter.

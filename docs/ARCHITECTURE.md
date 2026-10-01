@@ -87,3 +87,17 @@ TRUNCATE to the app role; see ADR 0007 for roles.
 ## 7. Environments
 `EDISC_ENV` ∈ local, ci, staging, production. Local/ci only: short evidence retention override,
 `make nuke`. Everything else behaves identically across environments.
+
+## API (M13)
+`apps/api` serves `https://{tenant}.{EDISC_API_BASE_DOMAIN}/v1/...` (ADR 0013).
+
+1. **Authenticate the caller.** The tenant comes from the Host subdomain. The OIDC token must come from one
+   of that tenant's IdPs, and its subject must be an active principal.
+2. **Authorize the request.** Scoped roles cover tenant > client > matter > workspace and inherit
+   downward.
+3. **Do the work in one tenant transaction.** Postgres RLS is the second wall.
+4. **Record what happened, under the acting principal.** Job actions are custody events in the job's
+   chain. Everything else goes to the tenant's audit chain. Evidence content reads are audited before any
+   bytes are returned.
+5. **Start the job workflow.** Job creation is idempotent per `Idempotency-Key` and starts
+   `CollectionJobWorkflow` (id = job id) on `collect-{source}`.
