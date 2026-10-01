@@ -16,6 +16,7 @@ directory; tenant IdPs registered with ``jwks_url = "dev:"`` use it. Refused els
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import time
 import uuid
@@ -93,7 +94,14 @@ def dev_private_key(settings: Settings) -> rsa.RSAPrivateKey:
         tmp.write_bytes(pem)
         tmp.chmod(0o600)
         tmp.replace(path)
-    loaded = serialization.load_pem_private_key(path.read_bytes(), password=None)
+    return _load_dev_key(str(path), path.stat().st_mtime_ns)
+
+
+@functools.lru_cache(maxsize=4)
+def _load_dev_key(path: str, _mtime_ns: int) -> rsa.RSAPrivateKey:
+    """Parsed once per file version: loading an RSA key costs ~75 ms of CPU on the event loop, which
+    dominated a 50-request burst before this cache (docs/runs/2026-10-01-audit-burst.md)."""
+    loaded = serialization.load_pem_private_key(Path(path).read_bytes(), password=None)
     if not isinstance(loaded, rsa.RSAPrivateKey):
         raise AuthError("dev IdP key is not RSA")
     return loaded
