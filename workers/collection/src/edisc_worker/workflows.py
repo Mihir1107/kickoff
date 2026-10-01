@@ -333,3 +333,19 @@ class CollectionJobWorkflow:
                 id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
                 parent_close_policy=ParentClosePolicy.ABANDON,
             )
+
+
+@workflow.defn(name="MaintenanceWorkflow")
+class MaintenanceWorkflow:
+    """One sweeper run, started by a Temporal Schedule (overlap SKIP). A failure fails this run
+    (visible in the UI); the next scheduled run tries again."""
+
+    @workflow.run
+    async def run(self, task: str) -> dict[str, Any]:
+        result: dict[str, Any] = await workflow.execute_activity(
+            task,
+            result_type=dict[str, Any],
+            start_to_close_timeout=timedelta(minutes=30),
+            retry_policy=RetryPolicy(maximum_attempts=3, maximum_interval=timedelta(minutes=1)),
+        )
+        return result

@@ -41,7 +41,7 @@ make test               # unit tests
 make test-integration   # FRESH ephemeral stack (-p edisc-test, .env.test, other ports), tests, then down -v
 make test-env-up / test-integration-only / test-env-down   # keep the test stack up while iterating
                         # up/up-ci/test targets refuse below MIN_FREE_GB (15) free disk
-make worker / api       # run the Temporal worker / API
+make worker / api       # Temporal worker (+ maintenance queue and sweeper schedules) / API
 ```
 
 ## Conventions

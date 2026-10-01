@@ -108,7 +108,7 @@ test-integration-only: ## Run integration tests on an ALREADY RUNNING test stack
 check: lint typecheck test ## Everything CI runs without services
 
 worker: ## Run the collection worker
-	uv run python -m edisc_worker
+	uv run python -m edisc_worker --maintenance
 
 api: ## Run the API with autoreload
 	uv run uvicorn edisc_api.main:app --reload --port 8000

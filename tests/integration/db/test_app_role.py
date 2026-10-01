@@ -145,6 +145,7 @@ async def test_security_definer_functions_are_hardened(connect: Connect) -> None
         "create_tenant",
         "due_anchor_streams",
         "pending_token_refreshes",
+        "stale_pending_evidence",
     }
     for r in rows:
         assert "search_path=pg_catalog, edisc, pg_temp" in (r["proconfig"] or []), r["fn"]

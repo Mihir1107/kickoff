@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterable
+from dataclasses import dataclass
+from datetime import timedelta
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
 
@@ -112,3 +115,65 @@ async def complete_by_refetch(
         },
     )
     return written
+
+
+@dataclass(frozen=True)
+class StaleSweepResult:
+    jobs: list[str]  # "tenant/job" swept
+
+
+class StaleSweepError(ExceptionGroup[Exception]):
+    pass
+
+
+async def sweep_stale_uploads(
+    sweeper_sessions: async_sessionmaker[AsyncSession],
+    sessions: async_sessionmaker[AsyncSession],
+    s3: S3Client,
+    settings: Settings,
+    *,
+    min_age: timedelta | None = None,
+    limit: int = 200,
+    actor: str = "stale-upload-sweeper",
+    tenant_id: uuid.UUID | None = None,
+) -> StaleSweepResult:
+    """Recover pending evidence that no writer will come back for (a worker died mid-upload and the job
+    has not been finalized yet). ``min_age`` defaults to the copy timeout plus one hour, so a live
+    upload is never touched. Ids are listed by the sweeper login; recovery runs per tenant as the app
+    role. Every job is attempted; failures are raised together, never swallowed."""
+    age = (
+        min_age
+        if min_age is not None
+        else timedelta(seconds=settings.evidence_copy_timeout_seconds + 3600)
+    )
+    async with sweeper_sessions() as session, session.begin():
+        rows = (
+            await session.execute(
+                text("SELECT tenant_id, job_id FROM stale_pending_evidence(:age, :limit, :tenant)"),
+                {"age": age, "limit": limit, "tenant": tenant_id},
+            )
+        ).all()
+    writer = EvidenceWriter(sessions, s3, settings)
+    swept: list[str] = []
+    failures: list[Exception] = []
+    for row in rows:
+        try:
+            await recover_job_evidence(
+                writer,
+                sessions,
+                s3,
+                settings,
+                tenant_id=row.tenant_id,
+                job_id=row.job_id,
+                actor=actor,
+            )
+        except Exception as exc:  # noqa: BLE001 - collected and re-raised below, never swallowed
+            exc.add_note(f"recovering stale uploads of job {row.job_id} (tenant {row.tenant_id})")
+            failures.append(exc)
+            continue
+        swept.append(f"{row.tenant_id}/{row.job_id}")
+    if failures:
+        raise StaleSweepError(
+            f"{len(failures)} of {len(rows)} stale-upload recoveries failed", failures
+        )
+    return StaleSweepResult(swept)

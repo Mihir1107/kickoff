@@ -198,3 +198,14 @@ Each sweeper is a Temporal Schedule with `overlap=SKIP`, running a one-activity 
 - Transient file refusals (`expired_url`) are retried in the batch `EDISC_FILE_RETRY_ATTEMPTS` times with
   backoff `EDISC_FILE_RETRY_BACKOFF_SECONDS`; permanent refusals are recorded at once.
 - Tuning travels in the workflow input (`RunConfig.from_settings`), never read inside workflows.
+
+## Implementation notes (M12 commit 2: schedules)
+- `edisc_worker.maintenance`: `ensure_schedules` creates or updates `sweep-anchors` (5 min),
+  `reconcile-token-refreshes` (10 min) and `sweep-stale-uploads` (1 h), each starting
+  `MaintenanceWorkflow(<activity>)` on the `maintenance` queue with overlap SKIP. `make worker` runs
+  `python -m edisc_worker --maintenance`, which also ensures the schedules at start (idempotent).
+- Stale uploads: migration 0013 adds `stale_pending_evidence(min_age, limit, tenant)` (SECURITY
+  DEFINER, owned and executable only by the sweeper login, ids only; it sees only pending evidence rows
+  and unfinished jobs). `edisc_custody.recovery.sweep_stale_uploads` recovers each job as the app role
+  with an `evidence_recovered` custody event; default age = copy timeout + 1 h. Finished jobs are
+  skipped (finalize already recovered them; a sealed job is closed).
