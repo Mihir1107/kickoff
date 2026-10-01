@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
@@ -13,6 +14,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Environment(StrEnum):
     LOCAL = "local"
+    TEST = "test"  # the ephemeral integration-test stack (destroyed after every run)
     CI = "ci"
     STAGING = "staging"
     PRODUCTION = "production"
@@ -20,7 +22,12 @@ class Environment(StrEnum):
     @property
     def is_disposable(self) -> bool:
         """True where data may be thrown away (short retention, volume wipes)."""
-        return self in (Environment.LOCAL, Environment.CI)
+        return self in (Environment.LOCAL, Environment.TEST, Environment.CI)
+
+    @property
+    def is_ephemeral_test(self) -> bool:
+        """Test stacks whose volumes are destroyed after the run: only these may lock for seconds."""
+        return self in (Environment.TEST, Environment.CI)
 
 
 class RateLimitConfig(BaseModel):
@@ -32,7 +39,11 @@ class RateLimitConfig(BaseModel):
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="EDISC_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+        # EDISC_ENV_FILE selects the env file (e.g. .env.test for the ephemeral test stack)
+        env_prefix="EDISC_",
+        env_file=os.environ.get("EDISC_ENV_FILE", ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
     )
 
     env: Environment = Environment.LOCAL
@@ -92,7 +103,12 @@ class Settings(BaseSettings):
     evidence_retention_override_days: int | None = Field(
         default=None,
         ge=1,
-        description="Caps per-object retention. Only allowed when env is local/ci (ADR 0002).",
+        description="Caps per-object retention. Only allowed when env is local/test/ci (ADR 0002).",
+    )
+    evidence_retention_override_seconds: int | None = Field(
+        default=None,
+        ge=1,
+        description="Seconds-level cap for EPHEMERAL TEST stacks only (env test/ci); refused anywhere else.",
     )
 
     custody_anchor_every_n_batches: int = Field(
@@ -135,7 +151,11 @@ class Settings(BaseSettings):
     def _guard_disposable_only_settings(self) -> Settings:
         if self.evidence_retention_override_days is not None and not self.env.is_disposable:
             raise ValueError(
-                "EDISC_EVIDENCE_RETENTION_OVERRIDE_DAYS is only permitted when EDISC_ENV is local or ci"
+                "EDISC_EVIDENCE_RETENTION_OVERRIDE_DAYS is only permitted when EDISC_ENV is local, test or ci"
+            )
+        if self.evidence_retention_override_seconds is not None and not self.env.is_ephemeral_test:
+            raise ValueError(
+                "EDISC_EVIDENCE_RETENTION_OVERRIDE_SECONDS is only permitted when EDISC_ENV is test or ci"
             )
         return self
 

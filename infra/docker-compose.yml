@@ -64,6 +64,7 @@ services:
       BUCKET: ${EDISC_S3_EVIDENCE_BUCKET}
       STAGING_BUCKET: ${EDISC_S3_STAGING_BUCKET}
       DEFAULT_RETENTION_DAYS: ${EDISC_S3_DEFAULT_RETENTION_DAYS}
+      EDISC_ENV: ${EDISC_ENV}
     volumes: [./minio/init.sh:/init.sh:ro]
     depends_on:
       minio: { condition: service_healthy }

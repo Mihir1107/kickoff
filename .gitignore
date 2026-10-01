@@ -16,3 +16,5 @@ build/
 .DS_Store
 .local-kms/
 node_modules/
+.env.test
+test-stack-logs.txt

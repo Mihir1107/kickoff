@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import bisect
 import json
+import os
 import subprocess
 import sys
 import uuid
@@ -16,13 +17,16 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 WORKERS = 10
 RATE, BURST = 40.0, 4
+# the stack under test: the ephemeral edisc-test project under `make test-integration`
 COMPOSE = [
     "docker",
     "compose",
+    "-p",
+    os.environ.get("EDISC_COMPOSE_PROJECT", "edisc"),
     "-f",
     str(ROOT / "infra/docker-compose.yml"),
     "--env-file",
-    str(ROOT / ".env"),
+    str(ROOT / os.environ.get("EDISC_ENV_FILE", ".env")),
 ]
 
 

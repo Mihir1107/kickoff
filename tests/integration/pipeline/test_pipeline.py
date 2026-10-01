@@ -297,7 +297,7 @@ async def test_two_concurrent_executors_of_the_same_unit_apply_each_batch_once(
     from edisc_connector_dummy.connector import DummyConnector, scope_for_days
     from edisc_connectors_base.types import Connection
     from edisc_core.ids import new_id
-    from edisc_worker.pipeline import Pipeline
+    from edisc_worker.pipeline import CollectOutcome, Pipeline
 
     from ...unit.dummy.conftest import RecordingLimiter
 
@@ -330,8 +330,11 @@ async def test_two_concurrent_executors_of_the_same_unit_apply_each_batch_once(
     await a.enumerate_units(tenant_id=race_t.tenant_id, job_id=job, conn=conn)
 
     async def drain(p: Pipeline, unit_key: str) -> None:
-        while not await p.collect_pages(
-            tenant_id=race_t.tenant_id, job_id=job, unit_key=unit_key, conn=conn, max_pages=1
+        while (
+            await p.collect_pages(
+                tenant_id=race_t.tenant_id, job_id=job, unit_key=unit_key, conn=conn, max_pages=1
+            )
+            is CollectOutcome.MORE
         ):
             pass
 

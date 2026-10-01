@@ -33,3 +33,18 @@ def test_local_override_caps_further() -> None:
 def test_ended_matter_refuses_collection() -> None:
     with pytest.raises(ValueError, match="retention ended"):
         effective_retain_until(_s(), utc_now() - timedelta(seconds=1))
+
+
+def test_seconds_override_caps_on_test_stack() -> None:
+    s = _s(env=Environment.TEST, evidence_retention_override_seconds=300)
+    until = effective_retain_until(s, utc_now() + timedelta(days=30))
+    assert timedelta(seconds=290) < until - utc_now() <= timedelta(seconds=300)
+
+
+def test_seconds_override_refused_at_use_time_outside_test_stack() -> None:
+    # defense in depth: even if validation were bypassed (model_construct), the writer refuses
+    s = _s(env=Environment.TEST, evidence_retention_override_seconds=300).model_copy(
+        update={"env": Environment.PRODUCTION}
+    )
+    with pytest.raises(RuntimeError, match="seconds-level retention"):
+        effective_retain_until(s, utc_now() + timedelta(days=30))

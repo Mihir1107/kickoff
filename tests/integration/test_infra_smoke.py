@@ -48,9 +48,19 @@ def test_evidence_bucket_has_compliance_object_lock(env: Mapping[str, str]) -> N
     bucket = env["EDISC_S3_EVIDENCE_BUCKET"]
     lock = s3.get_object_lock_configuration(Bucket=bucket)["ObjectLockConfiguration"]
     assert lock["ObjectLockEnabled"] == "Enabled"
-    retention = lock["Rule"]["DefaultRetention"]
-    assert retention["Mode"] == "COMPLIANCE"
-    assert retention["Days"] == int(env["EDISC_S3_DEFAULT_RETENTION_DAYS"])
+    days = int(env["EDISC_S3_DEFAULT_RETENTION_DAYS"])
+    if days > 0:
+        retention = lock["Rule"]["DefaultRetention"]
+        assert retention["Mode"] == "COMPLIANCE"
+        assert retention["Days"] == days
+    else:  # ephemeral test stack: only the explicit per-object (seconds-level) lock applies
+        assert "Rule" not in lock
+    if env["EDISC_ENV"] in ("local", "test", "ci"):  # disposable stacks expire evidence (ADR 0002)
+        rules = s3.get_bucket_lifecycle_configuration(Bucket=bucket)["Rules"]
+        assert any(r.get("Expiration", {}).get("Days") == 2 for r in rules), rules
+        assert any(
+            r.get("NoncurrentVersionExpiration", {}).get("NoncurrentDays") == 1 for r in rules
+        ), rules
     # Object Lock implies versioning; it must never be suspended.
     assert s3.get_bucket_versioning(Bucket=bucket)["Status"] == "Enabled"
 

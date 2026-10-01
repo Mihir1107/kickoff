@@ -10,11 +10,11 @@ def make(**env: str) -> Settings:
 
 @pytest.mark.parametrize("env", [Environment.STAGING, Environment.PRODUCTION])
 def test_retention_override_rejected_outside_local_ci(env: Environment) -> None:
-    with pytest.raises(ValidationError, match="only permitted when EDISC_ENV is local or ci"):
+    with pytest.raises(ValidationError, match="only permitted when EDISC_ENV is local, test or ci"):
         make(env=env, evidence_retention_override_days=1)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("env", [Environment.LOCAL, Environment.CI])
+@pytest.mark.parametrize("env", [Environment.LOCAL, Environment.TEST, Environment.CI])
 def test_retention_override_allowed_locally(env: Environment) -> None:
     s = make(env=env, evidence_retention_override_days=1)  # type: ignore[arg-type]
     assert s.evidence_retention_override_days == 1
@@ -27,3 +27,16 @@ def test_env_prefix_and_secret_not_in_repr(monkeypatch: pytest.MonkeyPatch) -> N
     assert s.env is Environment.CI
     assert "pg-password-canary-123" not in repr(s)
     assert "pg-password-canary-123" in s.pg_dsn("app")
+
+
+@pytest.mark.parametrize("env", [Environment.LOCAL, Environment.STAGING, Environment.PRODUCTION])
+def test_seconds_retention_only_on_ephemeral_test_stacks(env: Environment) -> None:
+    # local is refused too: the dev stack is long-lived, only test/ci stacks are destroyed per run
+    with pytest.raises(ValidationError, match="only permitted when EDISC_ENV is test or ci"):
+        make(env=env, evidence_retention_override_seconds=60)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("env", [Environment.TEST, Environment.CI])
+def test_seconds_retention_allowed_on_test_stacks(env: Environment) -> None:
+    s = make(env=env, evidence_retention_override_seconds=60)  # type: ignore[arg-type]
+    assert s.evidence_retention_override_seconds == 60

@@ -61,12 +61,13 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
       - run: uv sync --all-packages --locked
-      - name: Start compose services (placeholders from .env.example; EDISC_ENV=ci)
-        run: |
-          sed 's/^EDISC_ENV=.*/EDISC_ENV=ci/' .env.example > .env
-          make up-ci
-      - run: make migrate
-      - run: uv run pytest tests/integration -m "not elasticsearch"
-      - name: Dump service logs on failure
+      # fresh ephemeral stack (project edisc-test, EDISC_ENV=test), destroyed after the run;
+      # hosted runners have ~14 GB free, enough for the CI service subset
+      - run: make test-integration MIN_FREE_GB=8
+      - name: Upload test stack logs on failure
         if: failure()
-        run: docker compose -f infra/docker-compose.yml --env-file .env logs --no-color --tail=300
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-stack-logs
+          path: test-stack-logs.txt
+          if-no-files-found: ignore

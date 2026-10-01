@@ -33,12 +33,14 @@ make sync               # uv sync --all-packages
 make hooks              # once per clone: pre-commit runs ruff lint, ruff format --check, mypy on staged .py
 make up / down          # infra up (waits for health, runs idempotent init jobs) / stop
 make up-ci              # subset CI uses (no UI, no Elasticsearch)
-make nuke               # down + delete volumes; refuses unless EDISC_ENV=local|ci
+make nuke               # down + delete volumes; refuses unless EDISC_ENV=local|test|ci
 make migrate            # bootstrap roles/schema as superuser (idempotent), then alembic upgrade head as owner
 uv run python -m edisc_db.migrate downgrade <rev>   # explicit target only; never 'base' outside scratch DBs
 make lint fmt typecheck # ruff, ruff format, mypy --strict
 make test               # unit tests
-make test-integration   # integration tests (needs `make up`)
+make test-integration   # FRESH ephemeral stack (-p edisc-test, .env.test, other ports), tests, then down -v
+make test-env-up / test-integration-only / test-env-down   # keep the test stack up while iterating
+                        # up/up-ci/test targets refuse below MIN_FREE_GB (15) free disk
 make worker / api       # run the Temporal worker / API
 ```
 
@@ -72,7 +74,12 @@ make worker / api       # run the Temporal worker / API
   Lock set at create; abort multipart on any failure; `recover_pending` at job finalize. No evidence on local disk.
 - Retention: rolling window `min(matter.retention_until, now + EDISC_EVIDENCE_RETENTION_WINDOW_DAYS)`, extended while the
   matter is active (extension job: backlog, required before production). Never lock for the full matter upfront.
-  `EDISC_EVIDENCE_RETENTION_OVERRIDE_DAYS` caps it and is honoured only when `EDISC_ENV` is local/ci.
+  `EDISC_EVIDENCE_RETENTION_OVERRIDE_DAYS` caps it and is honoured only when `EDISC_ENV` is local/test/ci.
+  `EDISC_EVIDENCE_RETENTION_OVERRIDE_SECONDS` (test/ci only, never local) locks for seconds on the ephemeral test stack.
+  Local/test/ci evidence buckets get ILM expiry (2 days, noncurrent 1 day); staging bucket expires in 1 day everywhere.
+- Integration tests never run against the dev stack: test evidence is locked COMPLIANCE and can only be removed by
+  destroying the volume. `.env.test` is generated (`scripts/make_test_env.py`); large temp outputs go under
+  `--basetemp` in `$TMPDIR/edisc-tests`, wiped at start and end.
 - Versions: `content_hash` = hash of the version fingerprint defined in ADR 0004, not raw bytes. Reactions never
   create message versions; they are `item_type=event` reaction-snapshot items linked to the message.
 - Normalizer (`edisc_normalizer`): `slack.py` is PURE (bytes + prior state + file evidence -> `Derived`); all DB access

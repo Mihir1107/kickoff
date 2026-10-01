@@ -1189,7 +1189,9 @@ class Pipeline:
                     )
                 detail = {
                     "units": summary,
-                    "paused_seconds": round(float(paused), 3),
+                    "paused_ms": round(
+                        float(paused) * 1000
+                    ),  # integer: custody payloads never carry floats
                     "stop_reason": job.stop_reason,
                 }
                 await append(

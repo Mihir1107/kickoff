@@ -95,7 +95,16 @@ server-side copy and short-lived staging objects.
 - A dedup hit from another matter only ever **extends** retention (PutObjectRetention in COMPLIANCE can
   extend, never shorten), in S3 and in the registry.
 - Local/CI: `EDISC_EVIDENCE_RETENTION_OVERRIDE_DAYS` caps retention (1 day). It is rejected at startup
-  outside local/ci.
+  outside local/test/ci.
+- Ephemeral test stack (amended after a disk-full incident: locked test evidence accumulated on the dev
+  volume and could not be deleted): integration tests run on a separate compose project (`edisc-test`)
+  whose volumes are destroyed after every run. Only there (`EDISC_ENV=test|ci`) is
+  `EDISC_EVIDENCE_RETENTION_OVERRIDE_SECONDS` accepted (validated at startup and re-checked when computing
+  retain-until); the bucket default retention is disabled (`EDISC_S3_DEFAULT_RETENTION_DAYS=0`) so every
+  object carries only its explicit seconds-level lock. Local/test/ci evidence buckets also get lifecycle
+  expiration (current 2 days, noncurrent 1 day, expired delete markers) as a second line of defence;
+  staging/production buckets never get an expiry rule. `make up` and the test targets refuse to run below
+  `MIN_FREE_GB` (default 15) of free disk.
 
 ### Failures and cleanup
 - Any failure or cancellation during a multipart upload or copy **aborts the multipart upload**

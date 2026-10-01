@@ -120,6 +120,8 @@ asyncio_default_test_loop_scope = "session"
 addopts = "-ra --strict-markers"
 # hangs (e.g. a deadlock through the application) fail loudly instead of blocking CI
 timeout = 120
+# temporary test outputs are deleted after the run (large ones live under --basetemp, cleaned by make)
+tmp_path_retention_policy = "none"
 markers = [
     "integration: requires the docker compose services (make up)",
     "slow: long-running acceptance tests",

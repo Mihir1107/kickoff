@@ -22,13 +22,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def _load_env() -> dict[str, str]:
     values: dict[str, str] = {}
-    env_file = REPO_ROOT / ".env"
+    env_file = REPO_ROOT / os.environ.get("EDISC_ENV_FILE", ".env")
     if env_file.exists():
         for raw in env_file.read_text().splitlines():
             line = raw.strip()
             if line and not line.startswith("#") and "=" in line:
                 key, _, value = line.partition("=")
-                values[key.strip()] = value.strip()
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] == "'":
+                    value = value[1:-1].replace("'\\''", "'")
+                values[key.strip()] = value
     values.update({k: v for k, v in os.environ.items() if k.startswith(("EDISC_", "TEMPORAL_"))})
     return values
 

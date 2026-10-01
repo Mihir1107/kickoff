@@ -167,10 +167,18 @@ async def test_dedup_only_ever_extends_retention(
     app_sessions: Sessions, s3: S3Client, ev_settings: Settings, ctx: Ctx
 ) -> None:
     short = ev_settings.model_copy(
-        update={"evidence_retention_override_days": None, "evidence_retention_window_days": 1}
+        update={
+            "evidence_retention_override_days": None,
+            "evidence_retention_override_seconds": None,
+            "evidence_retention_window_days": 1,
+        }
     )
     longer = ev_settings.model_copy(
-        update={"evidence_retention_override_days": None, "evidence_retention_window_days": 2}
+        update={
+            "evidence_retention_override_days": None,
+            "evidence_retention_override_seconds": None,
+            "evidence_retention_window_days": 2,
+        }
     )
     data = rand(1024)
     first = await EvidenceWriter(app_sessions, s3, longer).write_file(
@@ -339,6 +347,12 @@ async def test_retention_is_the_rolling_window_capped_locally(
     )["Retention"]["RetainUntilDate"]
     from edisc_core.time import utc_now
 
-    assert until <= utc_now() + timedelta(
-        days=ev_settings.evidence_retention_override_days or 0, minutes=1
-    )
+    caps = [
+        timedelta(days=d) for d in [ev_settings.evidence_retention_override_days] if d is not None
+    ] + [
+        timedelta(seconds=s)
+        for s in [ev_settings.evidence_retention_override_seconds]
+        if s is not None
+    ]
+    assert caps, "integration tests must run with a retention override"
+    assert until <= utc_now() + min(caps) + timedelta(minutes=1)

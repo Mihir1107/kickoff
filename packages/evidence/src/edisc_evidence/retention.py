@@ -35,4 +35,9 @@ def effective_retain_until(
         ):  # settings validation already forbids this; defense in depth
             raise RuntimeError("retention override outside local/ci")
         target = min(target, now + timedelta(days=override))
+    seconds = settings.evidence_retention_override_seconds
+    if seconds is not None:
+        if not settings.env.is_ephemeral_test:  # settings validation already forbids this
+            raise RuntimeError("seconds-level retention outside an ephemeral test stack")
+        target = min(target, now + timedelta(seconds=seconds))
     return target
