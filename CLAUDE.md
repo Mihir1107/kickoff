@@ -95,6 +95,7 @@ make worker / api       # Temporal worker (+ maintenance queue and sweeper sched
   Lock set at create; abort multipart on any failure; `recover_pending` at job finalize. No evidence on local disk.
 - Retention: rolling window `min(matter.retention_until, now + EDISC_EVIDENCE_RETENTION_WINDOW_DAYS)`, extended while the
   matter is active (extension job: backlog, required before production). Never lock for the full matter upfront.
+  Dedup hits extend only below `EDISC_EVIDENCE_RETENTION_EXTEND_FLOOR_DAYS` (60), then to the target.
   `EDISC_EVIDENCE_RETENTION_OVERRIDE_DAYS` caps it and is honoured only when `EDISC_ENV` is local/test/ci.
   `EDISC_EVIDENCE_RETENTION_OVERRIDE_SECONDS` (test/ci only, never local) locks for seconds on the ephemeral test stack.
   Local/test/ci evidence buckets get ILM expiry (2 days, noncurrent 1 day); staging bucket expires in 1 day everywhere.

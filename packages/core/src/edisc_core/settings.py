@@ -90,6 +90,12 @@ class Settings(BaseSettings):
         description="Rolling COMPLIANCE window: objects are locked this far ahead and extended while the "
         "matter is active, so matter close + expiry can honour destruction requests (ADR 0002).",
     )
+    evidence_retention_extend_floor_days: float = Field(
+        default=60,
+        gt=0,
+        description="Extend an object's retention (to the rolling target) only once its remaining "
+        "retention drops below this floor; never extended above it (ADR 0002).",
+    )
     evidence_part_size_bytes: int = Field(default=8 * 1024 * 1024, ge=5 * 1024 * 1024)
     evidence_single_copy_max_bytes: int = Field(
         default=5 * 1024**3, ge=1, description="Above this, files are copied with UploadPartCopy."
@@ -198,6 +204,10 @@ class Settings(BaseSettings):
         if self.api_dev_idp and not self.env.is_disposable:
             raise ValueError(
                 "EDISC_API_DEV_IDP is only permitted when EDISC_ENV is local, test or ci"
+            )
+        if self.evidence_retention_extend_floor_days > self.evidence_retention_window_days:
+            raise ValueError(
+                "EDISC_EVIDENCE_RETENTION_EXTEND_FLOOR_DAYS must not exceed EDISC_EVIDENCE_RETENTION_WINDOW_DAYS"
             )
         if self.evidence_small_file_max_bytes > self.evidence_part_size_bytes:
             raise ValueError(

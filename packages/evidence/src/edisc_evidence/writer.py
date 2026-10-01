@@ -43,7 +43,7 @@ from edisc_core.logs import get_logger
 from edisc_core.settings import Settings
 from edisc_core.time import ensure_utc
 from edisc_db.session import tenant_tx
-from edisc_evidence.retention import effective_retain_until
+from edisc_evidence.retention import effective_retain_until, extension_needed
 from edisc_evidence.upload import Lock, UploadResult, rehash_object, stream_upload
 from edisc_evidence.worm import list_versions
 
@@ -555,7 +555,8 @@ class EvidenceWriter:
         current: datetime,
         wanted: datetime,
     ) -> None:
-        if wanted <= current:
+        """Extend-only, and only below the floor (``extension_needed``)."""
+        if wanted <= current or not extension_needed(self._settings, current, wanted):
             return
         try:
             await self._s3.put_object_retention(

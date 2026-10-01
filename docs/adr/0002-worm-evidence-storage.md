@@ -129,6 +129,11 @@ lock and a copy.
   **required before production**). When the matter closes, extension stops and objects expire on
   schedule. A client's destruction request at close can then be honoured once the window lapses;
   locking for years upfront would make it unfulfillable.
+- **Extension floor (amended 2026-10-01):** a dedup hit extends an object only when its remaining
+  retention has dropped below `EDISC_EVIDENCE_RETENTION_EXTEND_FLOOR_DAYS` (default 60 of the 90-day
+  window), and then to the rolling target. Invariant: retention never drops below
+  `min(now + floor, target)`. Above the floor, duplicates issue no `PutObjectRetention` (tested). Before
+  this, every hit extended by the seconds the rolling target had moved.
 - A dedup hit from another matter only ever **extends** retention (PutObjectRetention in COMPLIANCE can
   extend, never shorten), in S3 and in the registry.
 - Local/CI: `EDISC_EVIDENCE_RETENTION_OVERRIDE_DAYS` caps retention (1 day). It is rejected at startup

@@ -48,3 +48,24 @@ def test_seconds_override_refused_at_use_time_outside_test_stack() -> None:
     )
     with pytest.raises(RuntimeError, match="seconds-level retention"):
         effective_retain_until(s, utc_now() + timedelta(days=30))
+
+
+def test_extension_only_below_the_floor() -> None:
+    from edisc_evidence.retention import extension_needed
+
+    s = _s(env=Environment.PRODUCTION)  # window 90, floor 60
+    now = utc_now()
+    target = now + timedelta(days=90)
+    assert not extension_needed(s, now + timedelta(days=61), target)  # above the floor: nothing
+    assert extension_needed(s, now + timedelta(days=59), target)  # below: extend to the target
+    # a matter ending in 30 days caps everything: extend only up to its date
+    matter_end = now + timedelta(days=30)
+    assert extension_needed(s, now + timedelta(days=10), matter_end)
+    assert not extension_needed(s, matter_end, matter_end)
+
+
+def test_floor_cannot_exceed_the_window() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="FLOOR_DAYS must not exceed"):
+        _s(evidence_retention_window_days=30)  # default floor 60 > 30

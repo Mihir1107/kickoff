@@ -41,3 +41,17 @@ def effective_retain_until(
             raise RuntimeError("seconds-level retention outside an ephemeral test stack")
         target = min(target, now + timedelta(seconds=seconds))
     return target
+
+
+def extension_needed(settings: Settings, current: datetime, target: datetime) -> bool:
+    """Should a dedup hit extend ``current`` to ``target``? Only when the remaining retention has
+    dropped below the floor (default 60 days of a 90-day window): then it is extended to the target.
+
+    Invariant: retention never drops below ``min(now + floor, target)``. The cap by ``target`` covers
+    matters that end sooner and the local/test overrides. Above the floor nothing is called, so routine
+    duplicates cost no ``PutObjectRetention``."""
+    need = min(
+        utc_now() + timedelta(days=settings.evidence_retention_extend_floor_days),
+        ensure_utc(target),
+    )
+    return ensure_utc(current) < need

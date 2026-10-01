@@ -525,3 +525,60 @@ async def test_racing_retention_extensions_never_fail_or_shorten(
         VersionId=written.version_id,
     )
     assert stored["Retention"]["RetainUntilDate"] >= latest - timedelta(seconds=1)
+
+
+async def test_duplicates_above_the_floor_cost_no_retention_call_and_the_floor_holds(
+    app_sessions: Sessions,
+    s3: S3Client,
+    ev_settings: Settings,
+    ctx: Ctx,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import timedelta
+
+    from edisc_core.time import utc_now
+
+    base = {"evidence_retention_override_days": None, "evidence_retention_override_seconds": None}
+    calls: list[object] = []
+    original = s3.put_object_retention
+
+    async def spy(**kwargs: object) -> object:
+        calls.append(kwargs.get("RetainUntilDate"))
+        return await original(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(s3, "put_object_retention", spy)
+    data = rand(2048)
+    relaxed = ev_settings.model_copy(
+        update={
+            **base,
+            "evidence_retention_window_days": 3,
+            "evidence_retention_extend_floor_days": 1,
+        }
+    )
+    writer = EvidenceWriter(app_sessions, s3, relaxed)
+    first = await writer.write_file(
+        tenant_id=ctx.tenant_id, job_id=ctx.job_id, matter_retention_until=ctx.matter_retention_until,
+        stream=one_shot(data),
+    )  # fmt: skip
+    for _ in range(5):
+        dup = await writer.write_file(
+            tenant_id=ctx.tenant_id, job_id=ctx.job_id, matter_retention_until=ctx.matter_retention_until,
+            stream=one_shot(data),
+        )  # fmt: skip
+        assert dup.deduplicated
+    assert calls == []  # remaining ~3 days is above the 1-day floor
+    # the floor rises above the remaining retention: the next duplicate extends to the rolling target
+    strict = relaxed.model_copy(update={"evidence_retention_extend_floor_days": 3})
+    await EvidenceWriter(app_sessions, s3, strict).write_file(
+        tenant_id=ctx.tenant_id, job_id=ctx.job_id, matter_retention_until=ctx.matter_retention_until,
+        stream=one_shot(data),
+    )  # fmt: skip
+    assert len(calls) == 1
+    async with tenant_tx(app_sessions, ctx.tenant_id) as s:
+        until = (
+            await s.execute(
+                text("SELECT retain_until FROM evidence_objects WHERE id = :e"),
+                {"e": first.evidence_id},
+            )
+        ).scalar_one()
+    assert until >= utc_now() + timedelta(days=3) - timedelta(minutes=1)
