@@ -69,14 +69,14 @@ async def activities_for(
         await engine.dispose()
 
 
-async def run(sources: Sequence[str], *, maintenance: bool) -> None:
+async def run(sources: Sequence[str], *, maintenance: bool, queue: str | None = None) -> None:
     settings = Settings()
     client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
     async with activities_for(settings, sources, client) as (acts, sweeps):
         workers = [
             Worker(
                 client,
-                task_queue=task_queue(source),
+                task_queue=queue or task_queue(source),
                 workflows=WORKFLOWS,
                 activities=acts.all(),
                 max_concurrent_activities=settings.max_units_in_flight * 2,
@@ -101,9 +101,13 @@ def main() -> None:
     ap = argparse.ArgumentParser(prog="edisc_worker")
     ap.add_argument("--source", action="append", dest="sources", help="repeatable; default dummy")
     ap.add_argument("--maintenance", action="store_true", help="also run sweepers and schedules")
+    ap.add_argument("--queue", help="task queue override (one source only; tests and soak runs)")
     args = ap.parse_args()
+    sources = args.sources or ["dummy"]
+    if args.queue and len(sources) != 1:
+        ap.error("--queue needs exactly one --source")
     configure_logging()
-    asyncio.run(run(args.sources or ["dummy"], maintenance=args.maintenance))
+    asyncio.run(run(sources, maintenance=args.maintenance, queue=args.queue))
 
 
 if __name__ == "__main__":

@@ -39,7 +39,10 @@ async def test_schedules_are_idempotent_skip_overlaps_and_run(
             assert isinstance(action, ScheduleActionStartWorkflow)
             assert action.workflow == "MaintenanceWorkflow" and action.task_queue == queue
             assert [json.loads(a.data) for a in action.args] == [sweep.activity]  # type: ignore[union-attr]
-        acts = MaintenanceActivities(sweeper_sessions, app_sessions, s3, settings)
+        # scoped to an empty tenant: the shared test DB holds deliberately tampered chains
+        acts = MaintenanceActivities(
+            sweeper_sessions, app_sessions, s3, settings, tenant_id=uuid.uuid4()
+        )
         async with Worker(
             temporal, task_queue=queue, workflows=[MaintenanceWorkflow], activities=acts.all()
         ):

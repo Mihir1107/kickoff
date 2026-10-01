@@ -6,6 +6,7 @@ overlap SKIP: a sweep still running when the next one is due is never doubled.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -54,10 +55,15 @@ class MaintenanceActivities:
     sessions: async_sessionmaker[AsyncSession]
     s3: S3Client
     settings: Settings
+    tenant_id: uuid.UUID | None = (
+        None  # None (production): every tenant; set: one tenant (tests, ops)
+    )
 
     @activity.defn(name="sweep_anchors")
     async def sweep_anchors(self) -> dict[str, Any]:
-        result = await sweep_anchors(self.sweeper_sessions, self.sessions, self.s3, self.settings)
+        result = await sweep_anchors(
+            self.sweeper_sessions, self.sessions, self.s3, self.settings, tenant_id=self.tenant_id
+        )
         return {"anchored": len(result.anchored), "streams_seen": result.streams_seen}
 
     @activity.defn(name="reconcile_token_refreshes")
@@ -67,7 +73,7 @@ class MaintenanceActivities:
     @activity.defn(name="sweep_stale_uploads")
     async def sweep_stale_uploads(self) -> dict[str, Any]:
         result = await sweep_stale_uploads(
-            self.sweeper_sessions, self.sessions, self.s3, self.settings
+            self.sweeper_sessions, self.sessions, self.s3, self.settings, tenant_id=self.tenant_id
         )
         return {"jobs": result.jobs}
 

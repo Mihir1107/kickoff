@@ -10,6 +10,8 @@ Every activity:
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -66,6 +68,34 @@ def _classified[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[
     return wrapper
 
 
+def _ticking[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
+    """Heartbeat in the background while the activity runs, so a worker that dies (SIGKILL) is
+    detected within the heartbeat timeout instead of start-to-close. ``collect_pages`` does not use
+    this: it heartbeats per batch and per limiter wait, where it also checks cancel and the time box."""
+
+    @wraps(fn)
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        timeout = activity.info().heartbeat_timeout
+        if not timeout:
+            return await fn(*args, **kwargs)
+        interval = max(timeout.total_seconds() / 3, 0.1)
+
+        async def tick() -> None:
+            while True:
+                activity.heartbeat()
+                await asyncio.sleep(interval)
+
+        ticker = asyncio.create_task(tick())
+        try:
+            return await fn(*args, **kwargs)
+        finally:
+            ticker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ticker
+
+    return wrapper
+
+
 @dataclass
 class Activities:
     sessions: async_sessionmaker[AsyncSession]
@@ -106,6 +136,7 @@ class Activities:
     # ------------------------------------------------------------------ job level
     @activity.defn(name="enumerate_units")
     @_classified
+    @_ticking
     async def enumerate_units(self, ref: JobRef) -> int:
         tenant, job = self._ids(ref)
         pipeline, conn = await self._context(tenant, job)
@@ -113,6 +144,7 @@ class Activities:
 
     @activity.defn(name="job_overview")
     @_classified
+    @_ticking
     async def job_overview(self, req: OverviewRequest) -> JobOverview:
         tenant, job = self._ids(req.job)
         pipeline = self._pipeline()
@@ -129,6 +161,7 @@ class Activities:
 
     @activity.defn(name="closed_children")
     @_classified
+    @_ticking
     async def closed_children(self, req: ChildrenRequest) -> list[str]:
         """Backstop for a lost ``unit_finished`` signal: which of these units has no running child."""
         if self.temporal is None:
@@ -149,6 +182,7 @@ class Activities:
 
     @activity.defn(name="request_stop")
     @_classified
+    @_ticking
     async def request_stop(self, req: StopRequest) -> bool:
         tenant, job = self._ids(req.job)
         return await self._pipeline().request_stop(
@@ -157,6 +191,7 @@ class Activities:
 
     @activity.defn(name="pause_for_reauth")
     @_classified
+    @_ticking
     async def pause_for_reauth(self, req: PauseRequest) -> int:
         tenant, job = self._ids(req.job)
         _, conn = await self._context(tenant, job)
@@ -167,6 +202,7 @@ class Activities:
 
     @activity.defn(name="finalize_job")
     @_classified
+    @_ticking
     async def finalize_job(self, ref: JobRef) -> str:
         tenant, job = self._ids(ref)
         return (await self._pipeline().finalize_job(tenant_id=tenant, job_id=job)).value
@@ -189,6 +225,7 @@ class Activities:
 
     @activity.defn(name="finalize_unit")
     @_classified
+    @_ticking
     async def finalize_unit(self, ref: UnitRef) -> str:
         tenant, job = self._ids(ref)
         pipeline, conn = await self._context(tenant, job)
@@ -198,6 +235,7 @@ class Activities:
 
     @activity.defn(name="fail_unit")
     @_classified
+    @_ticking
     async def fail_unit(self, req: UnitFailure) -> None:
         tenant, job = self._ids(req.unit)
         await self._pipeline().fail_unit(
@@ -210,6 +248,7 @@ class Activities:
 
     @activity.defn(name="defer_unit")
     @_classified
+    @_ticking
     async def defer_unit(self, req: UnitFailure) -> str:
         tenant, job = self._ids(req.unit)
         return await self._pipeline().defer_unit(

@@ -610,26 +610,28 @@ class Pipeline:
         by_key: dict[str, Derived] = {}
         for d in items:
             by_key.setdefault(d.idempotency_key(ctx.tenant_id, ctx.source), d)
-        new_links: list[tuple[str, str]] = []
-        for key, d in sorted(by_key.items()):
-            inserted = (
+        ordered = sorted(by_key.items())
+        linked: set[uuid.UUID] = set(
+            (
                 await s.execute(
                     text(
                         "INSERT INTO job_items (tenant_id, job_id, item_id, unit_key, custody_event_id, in_scope)"
-                        " VALUES (:t, :j, :i, :u, :e, :in) ON CONFLICT DO NOTHING RETURNING item_id"
+                        " SELECT :t, :j, r.i, :u, :e, r.in_scope"
+                        " FROM unnest(CAST(:i AS uuid[]), CAST(:ins AS boolean[])) AS r(i, in_scope)"
+                        " ON CONFLICT DO NOTHING RETURNING item_id"
                     ),
                     {
                         "t": ctx.tenant_id,
                         "j": job_id,
-                        "i": stored.item_ids[key],
                         "u": unit_key,
                         "e": event_id,
-                        "in": d.in_scope,
+                        "i": [stored.item_ids[key] for key, _ in ordered],
+                        "ins": [d.in_scope for _, d in ordered],
                     },
                 )
-            ).first()
-            if inserted is not None:
-                new_links.append((key, d.content_hash))
+            ).scalars()
+        )
+        new_links = [(key, d.content_hash) for key, d in ordered if stored.item_ids[key] in linked]
         await self.hooks.hit("mid_transaction")
         await append_batch(
             s,

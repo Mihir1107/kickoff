@@ -8,9 +8,12 @@ from typing import Literal
 
 import asyncpg
 import pytest
+import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from temporalio.client import Client
 from types_aiobotocore_s3 import S3Client
 
+from edisc_connectors_base.ratelimit import RateLimiter
 from edisc_core.settings import Settings
 from edisc_db.bootstrap import bootstrap
 from edisc_db.migrate import upgrade
@@ -94,3 +97,16 @@ async def sweeper_sessions(
 async def s3(settings: Settings) -> AsyncIterator[S3Client]:
     async with s3_client(settings) as client:
         yield client
+
+
+@pytest.fixture(scope="session")
+async def temporal(settings: Settings) -> Client:
+    return await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+
+
+@pytest.fixture(scope="session")
+async def limiter(settings: Settings) -> AsyncIterator[RateLimiter]:
+    client = aioredis.from_url(settings.redis_url)
+    # short wait chunks so the heartbeat tests can use short heartbeat timeouts
+    yield RateLimiter(client, settings.rate_limits, wait_chunk_seconds=0.3)
+    await client.aclose()

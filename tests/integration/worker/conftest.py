@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import redis.asyncio as aioredis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client, WorkflowHandle
@@ -72,19 +71,6 @@ def spec(**overrides: Any) -> DatasetSpec:
             **overrides,
         }
     )
-
-
-@pytest.fixture(scope="session")
-async def temporal(settings: Settings) -> Client:
-    return await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
-
-
-@pytest.fixture(scope="session")
-async def limiter(settings: Settings) -> AsyncIterator[RateLimiter]:
-    client = aioredis.from_url(settings.redis_url)
-    # short wait chunks so the heartbeat tests can use short heartbeat timeouts
-    yield RateLimiter(client, settings.rate_limits, wait_chunk_seconds=0.3)
-    await client.aclose()
 
 
 @dataclass

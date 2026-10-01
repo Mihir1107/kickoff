@@ -209,3 +209,18 @@ Each sweeper is a Temporal Schedule with `overlap=SKIP`, running a one-activity 
   and unfinished jobs). `edisc_custody.recovery.sweep_stale_uploads` recovers each job as the app role
   with an `evidence_recovered` custody event; default age = copy timeout + 1 h. Finished jobs are
   skipped (finalize already recovered them; a sealed job is closed).
+
+## Implementation notes (M12 commit 3: performance and acceptance)
+- `persist` and the job-link insert are now a constant number of statements per batch (advisory locks in
+  one statement ordered by `COLLATE "C"`, one multi-row `INSERT ... SELECT FROM unnest(...)` each for items,
+  derivations and job links). Item ids are assigned in Python (UUIDv7) so children in the same batch can
+  reference their parents. Single-pipeline throughput (`scripts/bench_pipeline.py`, 5k messages, page 200,
+  M3 laptop): 182 -> 220 msg/s. The rest is evidence I/O (pages and files) and dataset generation; the
+  acceptance run scales out over worker processes instead.
+- Every activity except `collect_pages` heartbeats in the background (`_ticking`), and every activity has a
+  heartbeat timeout. Found by the acceptance run: a worker SIGKILLed inside `finalize_unit` (which had no
+  heartbeat timeout) left its unit waiting for the 30-minute start-to-close. Timeout changes are
+  replay-compatible (the golden histories still replay).
+- Acceptance: `tests/integration/acceptance/test_resume_50k.py` drives `scripts/resume_soak.py`: 50,000
+  messages (10 x 10 x 500, page 200), 3 `python -m edisc_worker` processes, 4 random SIGKILLs plus one
+  kill-all/restart, oracle-exact. The 1M manual run is recorded in `docs/runs/`.

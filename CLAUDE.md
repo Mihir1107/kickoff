@@ -115,7 +115,8 @@ make worker / api       # Temporal worker (+ maintenance queue and sweeper sched
   A lock wait or abandoned transaction raises; `edisc_db.session.is_retryable_db_error` says whether to retry the
   whole unit of work. Never hold a transaction open across long I/O; long-held locks use a dedicated AUTOCOMMIT
   connection and waiters poll with `pg_try_advisory_lock` (see `EvidenceWriter._content_lock`).
-- Tests have a 120 s timeout (pytest-timeout): a hang is a failure.
+- Tests have a 120 s timeout (pytest-timeout): a hang is a failure. Only the acceptance runs
+  (`tests/integration/acceptance`) carry an explicit, larger `@pytest.mark.timeout`.
 
 ## Working agreement
 - One milestone at a time: implement → tests → run → commit (message ends with the attribution trailer).

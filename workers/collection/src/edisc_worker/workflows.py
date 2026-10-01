@@ -83,6 +83,7 @@ async def _control[T](cfg: RunConfig, name: str, arg: Any, result_type: type[T])
         arg,
         result_type=result_type,
         start_to_close_timeout=timedelta(seconds=cfg.control_timeout_seconds),
+        heartbeat_timeout=timedelta(seconds=cfg.heartbeat_timeout_seconds),
         retry_policy=_retry(cfg, unlimited=True),
     )
     return result
@@ -133,6 +134,7 @@ class CollectUnitWorkflow:
                         ref,
                         result_type=str,
                         start_to_close_timeout=timedelta(seconds=cfg.start_to_close_seconds),
+                        heartbeat_timeout=timedelta(seconds=cfg.heartbeat_timeout_seconds),
                         retry_policy=_retry(cfg),
                     )
                     outcome = UnitOutcome.DONE
@@ -302,7 +304,7 @@ class CollectionJobWorkflow:
                 job,
                 result_type=int,
                 start_to_close_timeout=timedelta(seconds=cfg.start_to_close_seconds),
-                heartbeat_timeout=None,
+                heartbeat_timeout=timedelta(seconds=cfg.heartbeat_timeout_seconds),
                 retry_policy=_retry(cfg),
             )
         except ActivityError as err:
