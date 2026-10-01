@@ -576,20 +576,26 @@ def normalize_directory_page(
 
 
 # ------------------------------------------------------------------ unit completion: absence
+def messages_fragment_hash(page: bytes) -> str:
+    """Canonical hash of a page's message list (the ``$.messages`` fragment absence events point to)."""
+    return canonical_hash(_parse(page, "messages"))
+
+
 def finalize_unit(
     *,
     ctx: NormalizeContext,
     previously_observed: Iterable[str],
     observed: Iterable[str],
     prior: Mapping[str, PriorState],
-    last_page: bytes,
+    last_page_fragment_hash: str,
     last_page_ref: EvidenceRef,
 ) -> tuple[Derived, ...]:
     """After a unit's pages are ALL processed: messages recorded before for this conversation-day but
     not seen now -> ``no_longer_observed`` (never a deletion). Evidence: the unit's last page, whose
-    message list is where they were absent."""
+    message list is where they were absent (``messages_fragment_hash`` of that page, computed when the
+    page was processed, so finalize never has to read it back)."""
     seen = set(observed)
-    fragment_hash = canonical_hash(_parse(last_page, "messages"))
+    fragment_hash = last_page_fragment_hash
     out: list[Derived] = []
     for mid in sorted(set(previously_observed) - seen):
         obs_id = f"{mid}#observation"

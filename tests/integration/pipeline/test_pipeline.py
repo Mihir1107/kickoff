@@ -452,3 +452,55 @@ async def test_multi_scope_jobs_are_rejected_at_creation(
         assert (
             await s.execute(text("SELECT count(*) FROM collection_jobs WHERE id = :j"), {"j": job})
         ).scalar_one() == 0
+
+
+@pytest.mark.parametrize("mode", ["stored_fragment_hash", "pre_0014_fallback"])
+async def test_absence_detection_without_reading_the_last_page_back(
+    app_sessions: Sessions,
+    s3: S3Client,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """Finalize uses the fragment hash stored with the last history batch: no page download. Units
+    written before migration 0014 (NULL hash) fall back to reading the page; both give the oracle."""
+    from sqlalchemy import text
+
+    from edisc_db.session import tenant_tx
+    from edisc_evidence.writer import EvidenceWriter
+    from edisc_worker.pipeline import CrashHooks
+
+    sp = spec(dialect="slack_history")  # deleted messages are omitted: absence events fire
+    t = await new_tenant(app_sessions)
+    reads: list[object] = []
+    original_open = EvidenceWriter.open
+
+    def counting_open(self: EvidenceWriter, **kwargs: object) -> object:
+        reads.append(kwargs.get("evidence_id"))
+        return original_open(self, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(EvidenceWriter, "open", counting_open)
+
+    class ForgetHashes(CrashHooks):
+        async def hit(self, point: str) -> None:
+            if point == "during_finalize":
+                async with tenant_tx(app_sessions, t.tenant_id) as s:
+                    await s.execute(
+                        text(
+                            "UPDATE work_units SET last_page_fragment_hash = NULL WHERE tenant_id = :t"
+                        ),
+                        {"t": t.tenant_id},
+                    )
+
+    hooks = ForgetHashes() if mode == "pre_0014_fallback" else None
+    absent = 0
+    for epoch in (0, 1, 2):
+        run = await run_job(app_sessions, s3, settings, t, sp, epoch, hooks=hooks)
+        assert run.status is JobStatus.COMPLETED
+        absent += (await event_items(app_sessions, t, run.job_id)).get("no_longer_observed", 0)
+        await assert_invariants(app_sessions, s3, settings, t, sp, run, epoch)
+    assert absent > 0, "no absence detected: the test proves nothing"
+    if mode == "stored_fragment_hash":
+        assert reads == []
+    else:
+        assert reads

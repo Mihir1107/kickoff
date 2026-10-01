@@ -29,6 +29,7 @@ from edisc_normalizer.slack import (
     file_refs,
     finalize_unit,
     message_page_subjects,
+    messages_fragment_hash,
     normalize_directory_page,
     normalize_messages_page,
 )
@@ -227,7 +228,7 @@ async def collect_epoch(
                 previously_observed=before,
                 observed=observed,
                 prior=prior,
-                last_page=last[0],
+                last_page_fragment_hash=messages_fragment_hash(last[0]),
                 last_page_ref=last[1],
             )
             await persist(s, ctx=ctx, job_id=job, connector_version="0.1.0", items=absent)

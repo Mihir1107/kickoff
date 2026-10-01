@@ -9,6 +9,8 @@ import pytest
 import redis.asyncio as aioredis
 from temporalio.client import Client
 
+from .conftest import Connect
+
 
 async def test_postgres_is_16_with_temporal_databases(env: Mapping[str, str]) -> None:
     conn = await asyncpg.connect(
@@ -79,3 +81,11 @@ async def test_elasticsearch_healthy(env: Mapping[str, str]) -> None:
         resp = await http.get("/_cluster/health")
     assert resp.status_code == 200
     assert resp.json()["status"] in {"green", "yellow"}
+
+
+async def test_postgres_compresses_wal(connect: Connect) -> None:
+    conn = await connect("superuser")
+    try:
+        assert await conn.fetchval("SHOW wal_compression") == "lz4"
+    finally:
+        await conn.close()

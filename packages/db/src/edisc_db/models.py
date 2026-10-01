@@ -210,6 +210,7 @@ class WorkUnit(Base):
     file_gaps: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     access_lost_reason: Mapped[str | None] = mapped_column(Text)
     last_page_evidence_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    last_page_fragment_hash: Mapped[str | None] = mapped_column(Text)
     retry_after: Mapped[datetime | None] = mapped_column(TZ)
     first_failure_at: Mapped[datetime | None] = mapped_column(TZ)
     failures: Mapped[int] = mapped_column(Integer, server_default=text("0"))
@@ -286,7 +287,6 @@ class Item(Base):
     __tablename__ = "items"
     __table_args__ = (
         Index(None, "tenant_id", "source", "sent_at"),
-        Index(None, "tenant_id", "source", "source_item_id"),
         UniqueConstraint("tenant_id", "id"),
         UniqueConstraint("tenant_id", "idempotency_key"),
         UniqueConstraint("tenant_id", "source", "source_item_id", "version"),

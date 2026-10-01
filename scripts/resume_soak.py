@@ -52,10 +52,13 @@ from edisc_worker.pipeline import Pipeline
 from edisc_worker.workflows import CollectionJobWorkflow
 
 ROOT = Path(__file__).resolve().parents[1]
-# measured on the 2026-10-01 run: compose volumes grow ~26 KB per message (items, derivations, links,
-# page and file evidence); the guard asks for twice that plus the usual 15 GB floor (make disk-guard)
-BYTES_PER_MESSAGE = 26_000
-MIN_FREE_BYTES = 15 * 1024**3
+# measured (docs/runs/2026-10-01-storage-throughput-breakdown.md): ~6.9 KB per message at rest across
+# Postgres, MinIO and Temporal; budget 1.5x that, plus WAL headroom (max_wal_size 1 GB, peaks above it),
+# and require that much on top of a free-space floor that must remain AFTER the run
+BYTES_PER_MESSAGE = 7_000
+GROWTH_MARGIN = 1.5
+WAL_HEADROOM_BYTES = 2 * 1024**3
+FLOOR_AFTER_RUN_BYTES = 8 * 1024**3
 FAST_LIMITS = {
     k: {"rate_per_second": 2000, "burst": 200}
     for k in ("dummy.fetch", "dummy.expected_count", "dummy.directory", "dummy.file")
@@ -300,12 +303,14 @@ async def main() -> int:
 
     configure_logging()
     settings = Settings()
-    need = MIN_FREE_BYTES + 2 * BYTES_PER_MESSAGE * args.messages
+    projected = int(GROWTH_MARGIN * BYTES_PER_MESSAGE * args.messages) + WAL_HEADROOM_BYTES
+    need = max(15 * 1024**3, projected + FLOOR_AFTER_RUN_BYTES)
     free = shutil.disk_usage(ROOT).free
     if free < need:
         print(
-            f"refusing: {free / 1024**3:.0f} GB free, a {args.messages:,}-message soak needs about"
-            f" {need / 1024**3:.0f} GB (Docker volumes grow ~{BYTES_PER_MESSAGE // 1000} KB/message)",
+            f"refusing: {free / 1024**3:.1f} GB free; a {args.messages:,}-message soak is projected to use"
+            f" {projected / 1024**3:.1f} GB (~{BYTES_PER_MESSAGE // 1000} KB/message x {GROWTH_MARGIN} + WAL)"
+            f" and must leave {FLOOR_AFTER_RUN_BYTES / 1024**3:.0f} GB free: needs {need / 1024**3:.1f} GB",
             file=sys.stderr,
         )
         return 2

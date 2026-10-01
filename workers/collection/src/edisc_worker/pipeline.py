@@ -68,6 +68,7 @@ from edisc_normalizer.slack import (
     file_refs,
     finalize_unit,
     message_page_subjects,
+    messages_fragment_hash,
     normalize_directory_page,
     normalize_messages_page,
 )
@@ -574,6 +575,7 @@ class Pipeline:
                 text(
                     "UPDATE work_units SET cursor = :c, pages_done = pages_done + 1, file_gaps = file_gaps + :g,"
                     " last_page_evidence_id = CASE WHEN :hist THEN CAST(:ev AS uuid) ELSE last_page_evidence_id END,"
+                    " last_page_fragment_hash = CASE WHEN :hist THEN CAST(:frag AS text) ELSE last_page_fragment_hash END,"
                     " updated_at = now() WHERE job_id = :j AND unit_key = :k"
                 ),
                 {
@@ -581,6 +583,9 @@ class Pipeline:
                     "g": len(result.unavailable_files),
                     "hist": batch.kind is BatchKind.HISTORY,
                     "ev": page.evidence_id,
+                    "frag": messages_fragment_hash(batch.body)
+                    if batch.kind is BatchKind.HISTORY
+                    else None,
                     "j": job_id,
                     "k": unit_key,
                 },
@@ -736,16 +741,8 @@ class Pipeline:
             else:
                 recon = ReconStatus.MATCHED.value
         absent: tuple[Derived, ...] = ()
-        last_page: tuple[bytes, EvidenceRef] | None = None
+        last_page: tuple[str, EvidenceRef] | None = None  # (message-list fragment hash, page)
         if recon == ReconStatus.MATCHED.value and row.last_page_evidence_id is not None:
-            body = b"".join(
-                [
-                    c
-                    async for c in self.writer.open(
-                        tenant_id=tenant_id, evidence_id=row.last_page_evidence_id
-                    )
-                ]
-            )
             async with tenant_tx(self.sessions, tenant_id) as s:
                 key: str = (
                     await s.execute(
@@ -753,7 +750,18 @@ class Pipeline:
                         {"e": row.last_page_evidence_id},
                     )
                 ).scalar_one()
-            last_page = (body, EvidenceRef(row.last_page_evidence_id, key))
+            fragment = row.last_page_fragment_hash
+            if fragment is None:  # unit written before migration 0014: read the page back once
+                body = b"".join(
+                    [
+                        c
+                        async for c in self.writer.open(
+                            tenant_id=tenant_id, evidence_id=row.last_page_evidence_id
+                        )
+                    ]
+                )
+                fragment = messages_fragment_hash(body)
+            last_page = (fragment, EvidenceRef(row.last_page_evidence_id, key))
         async with tenant_tx(self.sessions, tenant_id) as s:
             locked = (
                 await s.execute(
@@ -792,7 +800,7 @@ class Pipeline:
                     previously_observed=before,
                     observed=observed,
                     prior=prior,
-                    last_page=last_page[0],
+                    last_page_fragment_hash=last_page[0],
                     last_page_ref=last_page[1],
                 )
                 if absent:
@@ -854,10 +862,13 @@ class Pipeline:
         return set(
             (
                 await s.execute(
+                    # LATERAL: always driven by the unit's links (selective), never by a scan of the
+                    # day's items; plain joins flipped to that plan when statistics were stale mid-load
                     text(
-                        "SELECT DISTINCT i.source_item_id FROM job_items ji JOIN items i ON i.tenant_id = ji.tenant_id"
-                        " AND i.id = ji.item_id WHERE ji.job_id = :j AND ji.unit_key = :u AND i.item_type = 'message'"
-                        " AND i.sent_at >= :a AND i.sent_at < :b"
+                        "SELECT DISTINCT i.source_item_id FROM job_items ji CROSS JOIN LATERAL"
+                        " (SELECT source_item_id FROM items WHERE tenant_id = ji.tenant_id AND id = ji.item_id"
+                        "  AND item_type = 'message' AND sent_at >= :a AND sent_at < :b) i"
+                        " WHERE ji.job_id = :j AND ji.unit_key = :u"
                     ),
                     {"j": job_id, "u": unit_key, "a": start, "b": end},
                 )
@@ -874,12 +885,12 @@ class Pipeline:
             (
                 await s.execute(
                     text(
-                        "SELECT DISTINCT i.source_item_id FROM job_items ji"
-                        " JOIN work_units wu ON wu.job_id = ji.job_id AND wu.unit_key = ji.unit_key"
-                        " JOIN items i ON i.tenant_id = ji.tenant_id AND i.id = ji.item_id"
-                        " WHERE ji.unit_key = :u AND ji.job_id <> :j AND wu.kind = 'conversation_day' AND wu.status = 'done'"
-                        " AND wu.recon_status = 'matched' AND wu.file_gaps = 0 AND i.item_type = 'message'"
-                        " AND i.sent_at >= :a AND i.sent_at < :b"
+                        "SELECT DISTINCT i.source_item_id FROM work_units wu"
+                        " JOIN job_items ji ON ji.job_id = wu.job_id AND ji.unit_key = wu.unit_key"
+                        " CROSS JOIN LATERAL (SELECT source_item_id FROM items WHERE tenant_id = ji.tenant_id"
+                        "  AND id = ji.item_id AND item_type = 'message' AND sent_at >= :a AND sent_at < :b) i"
+                        " WHERE wu.unit_key = :u AND wu.job_id <> :j AND wu.kind = 'conversation_day' AND wu.status = 'done'"
+                        " AND wu.recon_status = 'matched' AND wu.file_gaps = 0"
                     ),
                     {"u": unit_key, "j": job_id, "a": start, "b": end},
                 )

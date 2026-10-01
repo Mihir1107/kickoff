@@ -27,6 +27,7 @@ from edisc_normalizer.slack import (
     access_restored,
     finalize_unit,
     message_id,
+    messages_fragment_hash,
     normalize_directory_page,
     normalize_messages_page,
 )
@@ -230,7 +231,7 @@ def test_absence_is_never_deletion() -> None:
         previously_observed={mid},
         observed=set(),
         prior=prior,
-        last_page=empty_page,
+        last_page_fragment_hash=messages_fragment_hash(empty_page),
         last_page_ref=REF,
     )
     assert nlo.event_kind is EventKind.NO_LONGER_OBSERVED
@@ -249,7 +250,7 @@ def test_absence_is_never_deletion() -> None:
             previously_observed={mid},
             observed=set(),
             prior=reported,
-            last_page=empty_page,
+            last_page_fragment_hash=messages_fragment_hash(empty_page),
             last_page_ref=REF,
         )
         == ()
