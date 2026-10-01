@@ -120,6 +120,10 @@ messages, reaction snapshots and directory profiles.
 reactions no longer has them (Slack omits empty reaction lists). Tombstones say nothing about
 reactions.
 
+**In/out of range lives on the job link** (`job_items.in_scope`), never on the item. One item can be in
+range for one job (e.g. a full-range collection) and out of range for another (e.g. a later-day-only
+collection that pulled it in as thread context). Tested with exactly that pair of jobs.
+
 **Derived records** live in `item_derivations`: one row per (item, normalizer version), append-only.
 - Reprocessing stored raw pages with a newer normalizer adds derivation rows only.
 - Items (keyed by fingerprint) and evidence objects, including their retention, are untouched.

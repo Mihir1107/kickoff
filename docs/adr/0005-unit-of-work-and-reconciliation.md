@@ -16,9 +16,23 @@ sources paginate and how output is sliced (RSMF per conversation per 24h).
 - `collected_count` = distinct message `source_item_id`s linked to the unit in `job_items`.
 - Unit `recon_status`: `matched`, `gap` (collected < expected), `surplus` (collected > expected; reported,
   investigated, still not clean), `unverifiable` (expected is None), `failed` (unit could not complete).
+- Additional unit outcomes (M11): `access_lost` (the conversation became inaccessible: a gap) and
+  `not_applicable` (the directory unit). A unit with any **unavailable file** (`file_gaps > 0`) is a
+  `gap` even when message counts match.
+- Collected is counted from the job's links: distinct message items linked to the unit with `sent_at`
+  inside the unit's day. Thread context from other days never counts.
+- **Absence detection** (`no_longer_observed`) runs only:
+  - for a unit that reconciled **clean** (`matched`, no file gaps); never for `gap`, `surplus`,
+    `unverifiable`, `access_lost` or `failed` units;
+  - against **earlier clean collections of the same conversation-day unit**. Messages seen only as
+    thread context, or by jobs whose unit was not clean, are never the baseline. Scope differences
+    therefore cannot produce spurious absence.
+
+  A conversation that became inaccessible produces one `access_lost` observation and no per-message
+  absence.
 - Job final status:
   - `failed`: any unit `failed`, or the job could not finish.
-  - `completed_with_gaps`: any unit `gap` or `surplus`.
+  - `completed_with_gaps`: any unit `gap`, `surplus` or `access_lost`.
   - `completed_unverified`: otherwise, if any unit is `unverifiable`.
   - `completed`: every unit `matched`, zero orphan evidence left `pending`.
 - `completed_unverified` is shown **prominently** in the report and API (banner + per-unit list) and is

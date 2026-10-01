@@ -507,11 +507,23 @@ name = "edisc-worker"
 version = "0.1.0"
 source = { editable = "workers/collection" }
 dependencies = [
+    { name = "edisc-connectors-base" },
     { name = "edisc-core" },
+    { name = "edisc-custody" },
+    { name = "edisc-db" },
+    { name = "edisc-evidence" },
+    { name = "edisc-normalizer" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "edisc-core", editable = "packages/core" }]
+requires-dist = [
+    { name = "edisc-connectors-base", editable = "packages/connectors/base" },
+    { name = "edisc-core", editable = "packages/core" },
+    { name = "edisc-custody", editable = "packages/custody" },
+    { name = "edisc-db", editable = "packages/db" },
+    { name = "edisc-evidence", editable = "packages/evidence" },
+    { name = "edisc-normalizer", editable = "packages/normalizer" },
+]
 
 [[package]]
 name = "edisc-workspace"

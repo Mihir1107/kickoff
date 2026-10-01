@@ -73,6 +73,7 @@ async def append(
     item_id: uuid.UUID | None = None,
     anchor_every: int = 8,
     created_at: datetime | None = None,
+    event_id: uuid.UUID | None = None,
 ) -> AppendedEvent:
     """Append one event to ``stream_id`` inside the caller's (tenant-scoped) transaction."""
     created = ensure_utc(created_at) if created_at else utc_now()
@@ -105,7 +106,7 @@ async def append(
         created_at=created,
     )
     event_hash = compute_event_hash(head.last_hash, fields)
-    event_id = new_id()
+    event_id = event_id or new_id()
     await session.execute(
         text(
             "INSERT INTO custody_events (id, tenant_id, stream_id, job_id, seq, event_type, actor, item_id,"
@@ -153,11 +154,13 @@ async def append_batch(
     items: Sequence[tuple[str, str]],
     actor: str,
     anchor_every: int = 8,
+    event_id: uuid.UUID | None = None,
 ) -> AppendedEvent:
     """One ``items_collected`` event per committed batch, Merkle root over (idempotency_key, content_hash).
 
-    The caller must link every item of the batch in ``job_items`` with this event's id, in the same
-    transaction; ``verify_chain`` recomputes the root from exactly those links.
+    ``items`` must be exactly the job links created with this event's id in the same transaction;
+    ``verify_chain`` recomputes the root from those links. Pass the pre-allocated ``event_id`` when the
+    links were inserted first (the FK to custody_events is deferred).
     """
     return await append(
         session,
@@ -174,6 +177,7 @@ async def append_batch(
             "merkle_root": batch_root(items),
         },
         anchor_every=anchor_every,
+        event_id=event_id,
     )
 
 

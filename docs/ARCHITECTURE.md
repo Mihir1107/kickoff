@@ -36,7 +36,7 @@ Hierarchy follows Relativity: tenant (client) > matter > workspace.
    renderers   (Phase 2) RSMF / HTML / JSON                   + checkpoint + counts
 ```
 
-## 3. Data flow for one batch (the exactly-once boundary, ADR 0006)
+## 3. Data flow for one batch (the exactly-once boundary, ADR 0006; implemented in `edisc_worker.pipeline`)
 1. `collect_pages` activity loads the unit's checkpoint (cursor) from `work_units` under `SET LOCAL app.tenant_id`.
 2. It awaits the rate limiter, then connector `fetch` returns one raw page (exact bytes) + next cursor.
 3. Evidence (ADR 0002): write-ahead `evidence_objects` row → stream page bytes to WORM (`If-None-Match: *`, lock set at create, rolling retain-until) → mark complete with our streaming SHA-256. Attachments/files are **separate** objects: streamed to the staging bucket while hashing, then copied into the content-addressed WORM key (dedup per tenant) and verified.

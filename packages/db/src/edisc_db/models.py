@@ -169,6 +169,9 @@ class CollectionScope(Base):
     external_id: Mapped[str] = mapped_column(Text)
     date_from: Mapped[datetime] = mapped_column(TZ)
     date_to: Mapped[datetime] = mapped_column(TZ)
+    thread_parent_policy: Mapped[str] = mapped_column(
+        Text, server_default=text("'include_parent_and_thread'")
+    )
 
 
 class WorkUnit(Base):
@@ -194,6 +197,10 @@ class WorkUnit(Base):
     last_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     updated_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    kind: Mapped[str] = mapped_column(Text, server_default=text("'conversation_day'"))
+    file_gaps: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    access_lost_reason: Mapped[str | None] = mapped_column(Text)
+    last_page_evidence_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
 
 
 class EvidenceObject(Base):
@@ -346,7 +353,10 @@ class JobItem(Base):
         ForeignKeyConstraint(["job_id", "unit_key"], ["work_units.job_id", "work_units.unit_key"]),
         ForeignKeyConstraint(["tenant_id", "item_id"], ["items.tenant_id", "items.id"]),
         ForeignKeyConstraint(
-            ["tenant_id", "custody_event_id"], ["custody_events.tenant_id", "custody_events.id"]
+            ["tenant_id", "custody_event_id"],
+            ["custody_events.tenant_id", "custody_events.id"],
+            deferrable=True,
+            initially="DEFERRED",
         ),
         Index(None, "job_id", "unit_key"),
         Index(None, "custody_event_id"),
@@ -358,3 +368,4 @@ class JobItem(Base):
     unit_key: Mapped[str] = mapped_column(Text)
     custody_event_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    in_scope: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))

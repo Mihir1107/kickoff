@@ -86,6 +86,10 @@ class ReconStatus(StrEnum):
     SURPLUS = "surplus"
     UNVERIFIABLE = "unverifiable"
     FAILED = "failed"
+    ACCESS_LOST = (
+        "access_lost"  # the conversation became inaccessible: a gap, never per-message absence
+    )
+    NOT_APPLICABLE = "not_applicable"  # e.g. the directory unit
 
 
 class _Frozen(BaseModel):

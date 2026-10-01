@@ -56,7 +56,11 @@ make worker / api       # run the Temporal worker / API
   live in `tests/golden/jcs/`; keep non-ASCII in golden files as `\\u` escapes so editors cannot normalize them.
 - Workflows carry IDs and small cursors only. Raw data, tokens and large payloads never enter Temporal history.
 - The DB checkpoint is the source of truth for resume, not Temporal heartbeat details.
-- Per-batch writes (items + job_items + custody event + checkpoint + counts) happen in ONE transaction.
+- Per-batch writes (items + job_items + custody event + checkpoint + counts) happen in ONE transaction
+  (`edisc_worker.pipeline.Pipeline.process_batch`, ADR 0006): evidence and file downloads happen BEFORE it, the
+  transaction starts with the checkpoint guard (moved cursor = no-op), links are inserted before the custody event
+  (deferred FK) so the Merkle root covers exactly the new links. `in_scope` lives on `job_items`, not on items.
+  Absence detection only for clean units against earlier clean collections of the same unit (ADR 0005).
 - Schema changes: new Alembic revision in `packages/db/migrations/versions/` (hand-written SQL, run via `split_sql`),
   update `edisc_db.models` to match (drift test fails otherwise), add RLS + grants for any new tenant table.
 - Tenant isolation: FORCE RLS on every tenant table. The app connects as `edisc_app` (not owner, not superuser,
