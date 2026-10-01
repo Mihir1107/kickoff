@@ -566,3 +566,16 @@ class ApiIdempotency(Base):
     request_hash: Mapped[str] = mapped_column(Text)
     job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+
+
+class WorkUnitScope(Base):
+    __tablename__ = "work_unit_scopes"
+    __table_args__ = (
+        ForeignKeyConstraint(["job_id", "unit_key"], ["work_units.job_id", "work_units.unit_key"]),
+        ForeignKeyConstraint(["scope_id"], ["collection_scopes.id"]),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    job_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    unit_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    scope_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)

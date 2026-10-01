@@ -38,6 +38,35 @@ sources paginate and how output is sliced (RSMF per conversation per 24h).
 - `completed_unverified` is shown **prominently** in the report and API (banner + per-unit list) and is
   never rendered or counted as a clean completion.
 
+## Amendment (2026-10-01, M13.5): jobs with several scopes
+A job may have N >= 1 scopes. Each scope has a selector (channel / custodian / all), a date range and its
+own thread-parent policy (ADR 0011). This replaces the single-scope guard of M11.1.
+
+- **Units are the union over scopes.** A conversation-day covered by several scopes is ONE work unit,
+  enumerated, fetched and reconciled once. `work_unit_scopes` records which scopes cover it.
+- **In scope = in any range that applies to the conversation.** A message's link is `in_scope` when its
+  timestamp lies in the range of any job scope that covers its conversation (taken from the scopes
+  covering any unit of that conversation), whichever unit links it first. Context items outside every
+  such range stay `in_scope = false`.
+- **Thread context per unit:**
+  - the date range is the union of the conversation's scope ranges, merged where they overlap or touch,
+    and the context uses the merged interval that contains the unit's day;
+  - the policy is the most inclusive policy among the scopes that cover the unit
+    (`include_parent_and_thread` > `include_parent_only` > `replies_only`);
+  - a unit covered by one scope therefore gets exactly that scope's policy, and a unit covered by
+    several gets a superset of what each would fetch alone;
+  - a parent outside every applicable range is fetched as context for each unit whose replies need it,
+    but stored once (idempotency key) and linked once per job (`job_items` primary key).
+- **Collected counts are per conversation-day across the whole job.** With several ranges, a message of
+  day D can be linked first as thread context by a neighbouring day's unit (one link per item and job).
+  It still counts for D. Found by a test with two partial-day ranges on one day, which reported a false
+  gap before this rule.
+- **Reconciliation and absence detection are per unit, unchanged.** Expected counts are per
+  conversation-day, and absence detection runs only for clean units (this ADR).
+- The custody `job_started` event lists every scope with its range and policy. A rerun job copies all
+  scopes of the original, and its units keep the coverage they had. Approximation: for a rerun, the
+  in-scope ranges of a conversation come from the scopes covering the re-run units only.
+
 ## Consequences
 - + Gaps are localized to a conversation-day; retries are cheap.
 - − Many tiny units for sparse sources; enumeration writes units to the DB in pages to keep history small.

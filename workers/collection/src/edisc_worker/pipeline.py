@@ -47,7 +47,7 @@ from edisc_connectors_base.types import (
 from edisc_core.ids import new_id
 from edisc_core.schemas import JobStatus, ReconStatus, ScopeType
 from edisc_core.settings import Settings
-from edisc_core.time import day_bounds, utc_now
+from edisc_core.time import day_bounds, ensure_utc, utc_now
 from edisc_custody.log import anchor_if_due, append, append_batch, seal_job_chain
 from edisc_custody.recovery import recover_job_evidence
 from edisc_db.session import tenant_tx
@@ -76,10 +76,15 @@ from edisc_normalizer.store import load_prior, persist
 
 DIRECTORY_UNIT = "directory"
 
-# Items of a unit, selected by id only (see Pipeline._messages_of_day for why there is no day filter)
+# Items of a unit's conversation linked to this job, selected by id only (see
+# Pipeline._messages_of_day for why there is no day filter). Conversation-wide, not unit-wide: with
+# several scopes a message of this day may have been linked first as thread context by a neighbouring
+# day's unit (job_items holds one link per item), and it still counts for this day.
 _UNIT_LINKED_ITEMS = (
     "SELECT source_item_id, item_type, sent_at FROM items WHERE id = ANY(ARRAY("
-    "SELECT item_id FROM job_items WHERE job_id = :j AND unit_key = :u))"
+    "SELECT ji.item_id FROM job_items ji WHERE ji.job_id = :j AND ji.unit_key IN ("
+    "SELECT wu.unit_key FROM work_units wu WHERE wu.job_id = :j AND wu.conversation_id = ("
+    "SELECT conversation_id FROM work_units WHERE job_id = :j AND unit_key = :u))))"
 )
 # ... and of the same unit in EARLIER CLEAN collections (matched, no file gaps)
 _EARLIER_CLEAN_ITEMS = (
@@ -92,9 +97,58 @@ _EARLIER_CLEAN_ITEMS = (
 ACTOR = "collection-worker"
 
 
-class MultiScopeNotSupportedError(ValueError):
-    """A job must have exactly one date-range scope until per-unit scope resolution lands (M13).
-    Rejected at creation: never silently use the first scope."""
+class NoScopeError(ValueError):
+    """A collection job needs at least one scope."""
+
+
+POLICY_ORDER = (
+    ThreadParentPolicy.REPLIES_ONLY,
+    ThreadParentPolicy.INCLUDE_PARENT_ONLY,
+    ThreadParentPolicy.INCLUDE_PARENT_AND_THREAD,
+)
+
+
+@dataclass(frozen=True)
+class UnitScope:
+    """How one unit is collected under a job's scopes (ADR 0005 amendment).
+
+    ``scope``: what the connector is asked for: the merged range of the conversation's scopes that
+    contains the unit's day, with the most inclusive policy among the scopes covering the unit.
+    ``ranges``: every range applying to the conversation; an item is in scope if any contains it."""
+
+    scope: CollectionScope
+    ranges: tuple[tuple[datetime, datetime], ...]
+
+    def context(
+        self,
+        tenant_id: uuid.UUID,
+        source: str,
+        workspace_id: str,
+        conversation_id: str | None,
+        day: date | None,
+    ) -> NormalizeContext:
+        if conversation_id is None:  # directory pages are not date-scoped
+            return NormalizeContext(tenant_id, source, workspace_id, None, None, None, None)
+        return NormalizeContext(
+            tenant_id,
+            source,
+            workspace_id,
+            conversation_id,
+            day,
+            self.scope.date_from,
+            self.scope.date_to,
+            ranges=self.ranges,
+        )
+
+
+def merged(ranges: Sequence[tuple[datetime, datetime]]) -> list[tuple[datetime, datetime]]:
+    out: list[tuple[datetime, datetime]] = []
+    for a, b in sorted(ranges):
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
 
 
 class CollectOutcome(StrEnum):
@@ -160,19 +214,18 @@ class Pipeline:
         connection_id: uuid.UUID,
         scopes: Sequence[CollectionScope],
         requested_by: str,
-    ) -> None:
-        """Create the job (idempotent for a given ``job_id``) and record ``job_started``."""
-        if len(scopes) != 1:
-            raise MultiScopeNotSupportedError(
-                f"a collection job needs exactly one date-range scope (got {len(scopes)}); "
-                "multiple scopes per job are not supported yet: create one job per scope"
-            )
+    ) -> list[uuid.UUID]:
+        """Create the job (idempotent for a given ``job_id``) with its scopes (one or more, ADR 0005
+        amendment) and record ``job_started``. Returns the scope ids in the given order."""
+        if not scopes:
+            raise NoScopeError("a collection job needs at least one scope")
+        scope_ids = [new_id() for _ in scopes]
         async with tenant_tx(self.sessions, tenant_id) as s:
             exists = (
                 await s.execute(text("SELECT 1 FROM collection_jobs WHERE id = :j"), {"j": job_id})
             ).first()
             if exists:
-                return
+                return [sid for sid, _ in await self._scope_rows(tenant_id, job_id)]
             await s.execute(
                 text(
                     "INSERT INTO collection_jobs (id, tenant_id, matter_id, connection_id, status, connector_version,"
@@ -187,14 +240,14 @@ class Pipeline:
                     "by": requested_by,
                 },
             )
-            for scope in scopes:
+            for scope_id, scope in zip(scope_ids, scopes, strict=True):
                 await s.execute(
                     text(
                         "INSERT INTO collection_scopes (id, tenant_id, job_id, scope_type, external_id, date_from,"
                         " date_to, thread_parent_policy) VALUES (:i, :t, :j, :st, :e, :f, :to, :p)"
                     ),
                     {
-                        "i": new_id(),
+                        "i": scope_id,
                         "t": tenant_id,
                         "j": job_id,
                         "st": scope.scope_type.value,
@@ -230,36 +283,87 @@ class Pipeline:
         await anchor_if_due(
             self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=job_id
         )
+        return scope_ids
 
-    async def scope(self, tenant_id: uuid.UUID, job_id: uuid.UUID) -> CollectionScope:
-        """The job's single scope (enforced at creation; re-checked here so bad data fails loudly)."""
-        scopes = await self.scopes(tenant_id, job_id)
-        if len(scopes) != 1:
-            raise MultiScopeNotSupportedError(
-                f"job {job_id} has {len(scopes)} scopes; expected exactly one"
-            )
-        return scopes[0]
-
-    async def scopes(self, tenant_id: uuid.UUID, job_id: uuid.UUID) -> list[CollectionScope]:
+    async def _scope_rows(
+        self, tenant_id: uuid.UUID, job_id: uuid.UUID
+    ) -> list[tuple[uuid.UUID, CollectionScope]]:
         async with tenant_tx(self.sessions, tenant_id) as s:
             rows = (
                 await s.execute(
                     text(
-                        "SELECT * FROM collection_scopes WHERE job_id = :j ORDER BY date_from, external_id"
+                        "SELECT * FROM collection_scopes WHERE job_id = :j ORDER BY date_from, external_id, id"
                     ),
                     {"j": job_id},
                 )
             ).all()
         return [
-            CollectionScope(
-                ScopeType(r.scope_type),
-                r.external_id,
-                r.date_from,
-                r.date_to,
-                ThreadParentPolicy(r.thread_parent_policy),
+            (
+                r.id,
+                CollectionScope(
+                    ScopeType(r.scope_type),
+                    r.external_id,
+                    r.date_from,
+                    r.date_to,
+                    ThreadParentPolicy(r.thread_parent_policy),
+                ),
             )
             for r in rows
         ]
+
+    async def scopes(self, tenant_id: uuid.UUID, job_id: uuid.UUID) -> list[CollectionScope]:
+        return [scope for _, scope in await self._scope_rows(tenant_id, job_id)]
+
+    async def unit_scope(self, tenant_id: uuid.UUID, job_id: uuid.UUID, unit_key: str) -> UnitScope:
+        """The effective scope of one unit (ADR 0005 amendment). Units with no recorded coverage (none
+        are expected) fall back to every scope of the job, never to one silently chosen scope."""
+        rows = await self._scope_rows(tenant_id, job_id)
+        by_id = dict(rows)
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            unit = (
+                await s.execute(
+                    text(
+                        "SELECT conversation_id, day, kind FROM work_units WHERE job_id = :j AND unit_key = :k"
+                    ),
+                    {"j": job_id, "k": unit_key},
+                )
+            ).one()
+            covering: list[uuid.UUID] = list(
+                (
+                    await s.execute(
+                        text(
+                            "SELECT scope_id FROM work_unit_scopes WHERE job_id = :j AND unit_key = :k"
+                        ),
+                        {"j": job_id, "k": unit_key},
+                    )
+                ).scalars()
+            )
+            conversation: list[uuid.UUID] = list(
+                (
+                    await s.execute(
+                        text(
+                            "SELECT DISTINCT ws.scope_id FROM work_unit_scopes ws JOIN work_units wu"
+                            " ON wu.job_id = ws.job_id AND wu.unit_key = ws.unit_key"
+                            " WHERE ws.job_id = :j AND wu.conversation_id = :c"
+                        ),
+                        {"j": job_id, "c": unit.conversation_id},
+                    )
+                ).scalars()
+            )
+        cover = [by_id[i] for i in covering] or [scope for _, scope in rows]
+        applying = [by_id[i] for i in conversation] or cover
+        ranges = merged([(ensure_utc(sc.date_from), ensure_utc(sc.date_to)) for sc in applying])
+        policy = max((sc.thread_parent_policy for sc in cover), key=POLICY_ORDER.index)
+        day_start, day_end = day_bounds(unit.day)
+        interval = next(
+            ((a, b) for a, b in ranges if a < day_end and b > day_start),
+            (ranges[0][0], ranges[-1][1]),
+        )
+        first = cover[0]
+        return UnitScope(
+            CollectionScope(first.scope_type, first.external_id, interval[0], interval[1], policy),
+            tuple(ranges),
+        )
 
     async def enumerate_units(
         self, *, tenant_id: uuid.UUID, job_id: uuid.UUID, conn: Connection
@@ -275,11 +379,13 @@ class Pipeline:
         if explicit:
             return 0
         units: dict[str, WorkUnit] = {}
+        coverage: dict[str, set[uuid.UUID]] = {}
         first_day: date | None = None
-        for scope in await self.scopes(tenant_id, job_id):
+        for scope_id, scope in await self._scope_rows(tenant_id, job_id):
             first_day = min(first_day or scope.date_from.date(), scope.date_from.date())
             async for unit in self.connector.enumerate(conn, scope):
                 units.setdefault(unit.unit_key, unit)
+                coverage.setdefault(unit.unit_key, set()).add(scope_id)
         async with tenant_tx(self.sessions, tenant_id) as s:
             for unit in units.values():
                 await s.execute(
@@ -307,6 +413,15 @@ class Pipeline:
                     "d": first_day or utc_now().date(),
                 },
             )
+            for unit_key, scope_ids in coverage.items():
+                for scope_id in scope_ids:
+                    await s.execute(
+                        text(
+                            "INSERT INTO work_unit_scopes (tenant_id, job_id, unit_key, scope_id)"
+                            " VALUES (:t, :j, :k, :s) ON CONFLICT DO NOTHING"
+                        ),
+                        {"t": tenant_id, "j": job_id, "k": unit_key, "s": scope_id},
+                    )
         return len(units)
 
     async def pending_units(self, tenant_id: uuid.UUID, job_id: uuid.UUID) -> list[str]:
@@ -369,7 +484,7 @@ class Pipeline:
             return CollectOutcome.DONE  # all pages applied; only finalize is left
         if not (await self.job_state(tenant_id, job_id)).accepts_batches:
             return CollectOutcome.STOPPED
-        scope = await self.scope(tenant_id, job_id)
+        scope = await self.unit_scope(tenant_id, job_id, unit_key)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + (time_box_seconds or self.settings.activity_time_box_seconds)
         state_checked = [loop.time(), True]
@@ -410,7 +525,7 @@ class Pipeline:
                             ),
                             {"e": expected, "j": job_id, "k": unit_key},
                         )
-                batches = self.connector.fetch(conn, unit, row.cursor, scope=scope)
+                batches = self.connector.fetch(conn, unit, row.cursor, scope=scope.scope)
             pages = 0
             async for batch in batches:
                 applied = await self.process_batch(
@@ -541,7 +656,7 @@ class Pipeline:
         batch: RawBatch,
         cursor_before: str | None,
         unit: WorkUnit | None,
-        scope: CollectionScope,
+        scope: UnitScope,
     ) -> bool:
         """One batch, exactly once. Returns False if the checkpoint had already moved (no-op)."""
         retention = await self._retention(tenant_id, job_id)
@@ -559,14 +674,12 @@ class Pipeline:
         )
         await self.hooks.hit("after_evidence")
 
-        ctx = NormalizeContext(
+        ctx = scope.context(
             tenant_id,
             self.connector.source,
             conn.workspace_id,
-            None if directory else unit.conversation_id if unit else None,
+            None if directory or unit is None else unit.conversation_id,
             None if directory or unit is None else unit.day,
-            None if directory else scope.date_from,
-            None if directory else scope.date_to,
         )
         # 2. one short transaction
         async with tenant_tx(self.sessions, tenant_id) as s:
@@ -703,7 +816,7 @@ class Pipeline:
         row: Any,
         conn: Connection,
         exc: ConversationInaccessibleError,
-        scope: CollectionScope,
+        scope: UnitScope,
     ) -> None:
         """One conversation-level observation; the unit is closed as access_lost (never per-message)."""
         retention = await self._retention(tenant_id, job_id)
@@ -713,14 +826,8 @@ class Pipeline:
             matter_retention_until=retention,
             stream=_one(exc.response),
         )
-        ctx = NormalizeContext(
-            tenant_id,
-            self.connector.source,
-            conn.workspace_id,
-            row.conversation_id,
-            row.day,
-            scope.date_from,
-            scope.date_to,
+        ctx = scope.context(
+            tenant_id, self.connector.source, conn.workspace_id, row.conversation_id, row.day
         )
         async with tenant_tx(self.sessions, tenant_id) as s:
             locked = (
@@ -819,15 +926,13 @@ class Pipeline:
             if locked.status == "done":
                 return recon
             if last_page is not None:
-                scope = await self.scope(tenant_id, job_id)
-                ctx = NormalizeContext(
+                scope = await self.unit_scope(tenant_id, job_id, unit_key)
+                ctx = scope.context(
                     tenant_id,
                     self.connector.source,
                     conn.workspace_id,
                     row.conversation_id,
                     row.day,
-                    scope.date_from,
-                    scope.date_to,
                 )
                 before = await self._previously_observed_clean(
                     s, tenant_id, job_id, unit_key, row.day
@@ -1300,7 +1405,7 @@ class Pipeline:
     ) -> uuid.UUID:
         """Failed units of a sealed job are re-run as a new job (the sealed original stays closed)."""
         job_id = new_id()
-        scope = await self.scope(tenant_id, original_job_id)
+        original_scopes = await self._scope_rows(tenant_id, original_job_id)
         async with tenant_tx(self.sessions, tenant_id) as s:
             original = (
                 await s.execute(
@@ -1316,14 +1421,25 @@ class Pipeline:
                     {"j": original_job_id},
                 )
             ).all()
-        await self.start_job(
+            coverage = (
+                await s.execute(
+                    text(
+                        "SELECT ws.unit_key, ws.scope_id FROM work_unit_scopes ws JOIN work_units wu"
+                        " ON wu.job_id = ws.job_id AND wu.unit_key = ws.unit_key"
+                        " WHERE ws.job_id = :j AND wu.status = 'failed'"
+                    ),
+                    {"j": original_job_id},
+                )
+            ).all()
+        new_ids = await self.start_job(
             tenant_id=tenant_id,
             job_id=job_id,
             matter_id=original.matter_id,
             connection_id=original.connection_id,
-            scopes=[scope],
+            scopes=[scope for _, scope in original_scopes],
             requested_by=requested_by,
         )
+        renamed = dict(zip([sid for sid, _ in original_scopes], new_ids, strict=True))
         async with tenant_tx(self.sessions, tenant_id) as s:
             await s.execute(
                 text(
@@ -1345,6 +1461,14 @@ class Pipeline:
                         "d": u.day,
                         "kind": u.kind,
                     },
+                )
+            for c in coverage:  # the same scopes cover the re-run units
+                await s.execute(
+                    text(
+                        "INSERT INTO work_unit_scopes (tenant_id, job_id, unit_key, scope_id)"
+                        " VALUES (:t, :j, :k, :s)"
+                    ),
+                    {"t": tenant_id, "j": job_id, "k": c.unit_key, "s": renamed[c.scope_id]},
                 )
         return job_id
 

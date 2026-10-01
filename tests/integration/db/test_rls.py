@@ -18,6 +18,9 @@ COPY_OVERRIDES = {
     "job_items": "'item_id', gen_random_uuid()",
     "custody_chain_heads": "'stream_id', gen_random_uuid()",
     "item_derivations": "'normalizer_version', gen_random_uuid()::text",
+    "work_unit_scopes": "'scope_id', gen_random_uuid()",
+    "group_members": "'id', gen_random_uuid()",
+    "api_idempotency": "'key', gen_random_uuid()::text",
 }
 UPDATABLE = {
     "matters": "name",

@@ -37,3 +37,7 @@ be outside the agreed scope of the matter.
    `include_parent_only` and `replies_only` add nothing in the mirror case.
 
 Status remains **Proposed** until the product owner confirms these three answers.
+
+- Several scopes per job (ADR 0005 amendment, M13.5): the policy is set per scope. A unit covered by
+  several scopes uses the most inclusive of their policies, over the merged range of the conversation's
+  scopes.

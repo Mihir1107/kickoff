@@ -121,7 +121,11 @@ def file_refs(page: bytes) -> list[FileMeta]:
 
 
 def _in_scope(sent_at: datetime | None, ctx: NormalizeContext) -> bool:
-    if sent_at is None or ctx.date_from is None or ctx.date_to is None:
+    if sent_at is None:
+        return True
+    if ctx.ranges:
+        return any(ensure_utc(a) <= sent_at < ensure_utc(b) for a, b in ctx.ranges)
+    if ctx.date_from is None or ctx.date_to is None:
         return True
     return ensure_utc(ctx.date_from) <= sent_at < ensure_utc(ctx.date_to)
 

@@ -55,6 +55,9 @@ class NormalizeContext:
     date_from: datetime | None  # collection scope (inclusive)
     date_to: datetime | None  # collection scope (exclusive)
     normalizer_version: str = NORMALIZER_VERSION
+    # several scopes (ADR 0005 amendment): every [from, to) range that applies to this conversation;
+    # when given, an item is in scope if any of them contains it (date_from/date_to are then the envelope)
+    ranges: tuple[tuple[datetime, datetime], ...] = ()
 
 
 @dataclass(frozen=True)

@@ -96,6 +96,13 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
             unit_key,
         )
         await conn.execute(
+            "INSERT INTO work_unit_scopes (tenant_id, job_id, unit_key, scope_id) VALUES ($1, $2, $3, $4)",
+            t,
+            ids["job"],
+            unit_key,
+            ids["scope"],
+        )
+        await conn.execute(
             "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind, retain_until, source_sha256,"
             " source_hash_origin) VALUES ($1, $2, $3, $4, 'page', now() + interval '1 day', $5, 'collection')",
             ids["ev"],
@@ -259,5 +266,6 @@ TENANT_TABLES = [
     "group_members",
     "role_assignments",
     "api_idempotency",
+    "work_unit_scopes",
 ]
 ALL_TABLES = ["tenants", *TENANT_TABLES]

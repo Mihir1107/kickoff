@@ -420,34 +420,30 @@ async def test_two_concurrent_executors_of_the_same_unit_apply_each_batch_once(
     await assert_invariants(app_sessions, s3, settings, race_t, sp, JobRun(job, status, False), 0)
 
 
-async def test_multi_scope_jobs_are_rejected_at_creation(
+async def test_a_job_without_scopes_is_rejected_at_creation(
     app_sessions: Sessions, s3: S3Client, settings: Settings
 ) -> None:
-    from datetime import UTC, datetime
-
     from sqlalchemy import text
 
-    from edisc_connector_dummy.connector import DummyConnector, scope_for_days
+    from edisc_connector_dummy.connector import DummyConnector
     from edisc_core.ids import new_id
     from edisc_db.session import tenant_tx
-    from edisc_worker.pipeline import MultiScopeNotSupportedError, Pipeline
+    from edisc_worker.pipeline import NoScopeError, Pipeline
 
     from ...unit.dummy.conftest import RecordingLimiter
 
     t = await new_tenant(app_sessions)
     p = Pipeline(app_sessions, s3, settings, DummyConnector(RecordingLimiter()))
-    day = datetime(2026, 1, 5, tzinfo=UTC)
     job = new_id()
-    for scopes in ([scope_for_days("C1", day, 1), scope_for_days("C2", day, 2)], []):
-        with pytest.raises(MultiScopeNotSupportedError, match="exactly one date-range scope"):
-            await p.start_job(
-                tenant_id=t.tenant_id,
-                job_id=job,
-                matter_id=t.matter_id,
-                connection_id=t.connection_id,
-                scopes=scopes,
-                requested_by="tester",
-            )
+    with pytest.raises(NoScopeError, match="at least one scope"):
+        await p.start_job(
+            tenant_id=t.tenant_id,
+            job_id=job,
+            matter_id=t.matter_id,
+            connection_id=t.connection_id,
+            scopes=[],
+            requested_by="tester",
+        )
     async with tenant_tx(app_sessions, t.tenant_id) as s:
         assert (
             await s.execute(text("SELECT count(*) FROM collection_jobs WHERE id = :j"), {"j": job})
@@ -595,7 +591,7 @@ async def test_page_files_are_written_concurrently_within_the_bound_and_fail_as_
             conn,
             WorkUnit(row.conversation_id, row.day),
             None,
-            scope=await p.scope(t2.tenant_id, job_id),
+            scope=(await p.unit_scope(t2.tenant_id, job_id, unit_key)).scope,
         )  # type: ignore[arg-type]
     )
     refs = [m.file_id for m in file_refs(batch.body)]
