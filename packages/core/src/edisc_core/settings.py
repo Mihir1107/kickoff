@@ -170,6 +170,18 @@ class Settings(BaseSettings):
         description="parent's DB reconcile interval (signals are only a fast path)",
     )
 
+    # API (ADR 0013)
+    api_base_domain: str = Field(
+        default="edisc.localhost", description="Tenants are served at {subdomain}.{api_base_domain}"
+    )
+    api_dev_idp: bool = Field(
+        default=False,
+        description="Built-in dev token issuer (key in EDISC_LOCAL_KMS_DIR). Only local/test/ci.",
+    )
+    api_jwt_leeway_seconds: int = Field(default=60, ge=0, le=300)
+    api_jwks_cache_seconds: int = Field(default=600, ge=10)
+    api_page_size_max: int = Field(default=200, ge=1)
+
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "edisc"
 
@@ -178,6 +190,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _guard_disposable_only_settings(self) -> Settings:
+        if self.api_dev_idp and not self.env.is_disposable:
+            raise ValueError(
+                "EDISC_API_DEV_IDP is only permitted when EDISC_ENV is local, test or ci"
+            )
         if self.evidence_small_file_max_bytes > self.evidence_part_size_bytes:
             raise ValueError(
                 "EDISC_EVIDENCE_SMALL_FILE_MAX_BYTES must not exceed EDISC_EVIDENCE_PART_SIZE_BYTES"

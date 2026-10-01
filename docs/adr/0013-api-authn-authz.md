@@ -43,8 +43,8 @@ Existing matters migrate to one default client per tenant, so no data is lost.
   1. The tenant is resolved from the `Host` subdomain (`{subdomain}.app...`).
   2. The token's issuer must be one of THAT tenant's IdPs.
   3. The user `(tenant_id, iss, sub)` must exist and be active.
-  - Any mismatch gives a 404 for the tenant (no enumeration). There is no `tenant_id` in any request body
-    or query.
+  - Any mismatch, and an unknown subdomain, gives the same 401 as a bad token (no enumeration of
+    subdomains). There is no `tenant_id` in any request body or query.
   - The resolved tenant goes into `tenant_tx`, so RLS is the second wall.
 - **Service accounts** (automation): OAuth client-credentials tokens from the same IdP. They map to a
   service principal with explicit role assignments; they never inherit a user's.

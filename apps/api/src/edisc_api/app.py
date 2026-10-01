@@ -1,0 +1,124 @@
+"""FastAPI application (M13): wiring, error rendering, the authenticated-caller dependency."""
+
+from __future__ import annotations
+
+import contextlib
+import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import Annotated
+
+import httpx
+import redis.asyncio as aioredis
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from temporalio.client import Client
+from types_aiobotocore_s3 import S3Client
+
+from edisc_api.auth import Authenticator, AuthError, Caller, JwksCache
+from edisc_api.errors import ApiError
+from edisc_connectors_base.ratelimit import RateLimiter
+from edisc_core.envelope import SecretBox
+from edisc_core.kms import LocalKmsClient
+from edisc_core.logs import get_logger
+from edisc_core.settings import Settings
+from edisc_db.session import create_engine, session_factory
+from edisc_evidence.s3 import s3_client
+
+log = get_logger(__name__)
+
+
+@dataclass
+class Resources:
+    settings: Settings
+    sessions: async_sessionmaker[AsyncSession]
+    s3: S3Client
+    temporal: Client
+    limiter: RateLimiter
+    box: SecretBox
+    authenticator: Authenticator
+
+
+@contextlib.asynccontextmanager
+async def build_resources(settings: Settings) -> AsyncIterator[Resources]:
+    """Production wiring (tests build ``Resources`` from their own fixtures)."""
+    engine = create_engine(settings, "app")
+    redis = aioredis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=5)
+    http = httpx.AsyncClient()
+    try:
+        sessions = session_factory(engine)
+        temporal = await Client.connect(
+            settings.temporal_address, namespace=settings.temporal_namespace
+        )
+        async with s3_client(settings) as s3:
+            yield Resources(
+                settings,
+                sessions,
+                s3,
+                temporal,
+                RateLimiter(redis, settings.rate_limits),
+                SecretBox(LocalKmsClient(settings)),
+                Authenticator(settings, sessions, JwksCache(settings, http)),
+            )
+    finally:
+        await http.aclose()
+        await redis.aclose()
+        await engine.dispose()
+
+
+def create_app(settings: Settings, resources: Resources | None = None) -> FastAPI:
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if resources is not None:
+            app.state.resources = resources
+            yield
+            return
+        async with build_resources(settings) as built:
+            app.state.resources = built
+            yield
+
+    app = FastAPI(title="eDiscovery collection API", version="1", lifespan=lifespan)
+    if resources is not None:
+        app.state.resources = resources
+
+    @app.exception_handler(AuthError)
+    async def _auth_error(request: Request, exc: AuthError) -> JSONResponse:
+        # same response for unknown tenant and any token problem: no subdomain enumeration
+        log.info("authentication failed", reason=str(exc), path=request.url.path)
+        return JSONResponse(
+            {"error": "unauthorized"}, status_code=401, headers={"WWW-Authenticate": "Bearer"}
+        )
+
+    @app.exception_handler(ApiError)
+    async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
+        return JSONResponse({"error": exc.code, "detail": exc.detail}, status_code=exc.status)
+
+    from edisc_api.routes import register
+
+    register(app)
+    return app
+
+
+def resources(request: Request) -> Resources:
+    res: Resources = request.app.state.resources
+    return res
+
+
+async def caller(request: Request) -> Caller:
+    res = resources(request)
+    return await res.authenticator.authenticate(
+        request.headers.get("host"), request.headers.get("authorization")
+    )
+
+
+CallerDep = Annotated[Caller, Depends(caller)]
+ResourcesDep = Annotated[Resources, Depends(resources)]
+
+
+def request_id(request: Request) -> str:
+    rid = request.headers.get("x-request-id")
+    return rid if rid and len(rid) <= 128 else str(uuid.uuid4())
+
+
+RequestIdDep = Annotated[str, Depends(request_id)]

@@ -4,11 +4,27 @@ version = "0.1.0"
 description = "FastAPI service: tenants, matters, connections, jobs, reports."
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "edisc-connector-dummy",
+    "edisc-connectors-base",
     "edisc-core",
+    "edisc-custody",
+    "edisc-db",
+    "edisc-evidence",
+    "edisc-worker",
+    "fastapi>=0.142.2",
+    "httpx>=0.28.1",
+    "pyjwt[crypto]>=2.15.1",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 [tool.uv.sources]
 edisc-core = { workspace = true }
+edisc-db = { workspace = true }
+edisc-worker = { workspace = true }
+edisc-custody = { workspace = true }
+edisc-evidence = { workspace = true }
+edisc-connectors-base = { workspace = true }
+edisc-connector-dummy = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
