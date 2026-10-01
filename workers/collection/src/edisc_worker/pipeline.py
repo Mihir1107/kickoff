@@ -74,6 +74,11 @@ DIRECTORY_UNIT = "directory"
 ACTOR = "collection-worker"
 
 
+class MultiScopeNotSupportedError(ValueError):
+    """A job must have exactly one date-range scope until per-unit scope resolution lands (M13).
+    Rejected at creation: never silently use the first scope."""
+
+
 class CrashHooks:
     """Test seam: named points where the crash-matrix tests interrupt the pipeline. No-op in production."""
 
@@ -109,6 +114,11 @@ class Pipeline:
         requested_by: str,
     ) -> None:
         """Create the job (idempotent for a given ``job_id``) and record ``job_started``."""
+        if len(scopes) != 1:
+            raise MultiScopeNotSupportedError(
+                f"a collection job needs exactly one date-range scope (got {len(scopes)}); "
+                "multiple scopes per job are not supported yet: create one job per scope"
+            )
         async with tenant_tx(self.sessions, tenant_id) as s:
             exists = (
                 await s.execute(text("SELECT 1 FROM collection_jobs WHERE id = :j"), {"j": job_id})
@@ -172,6 +182,15 @@ class Pipeline:
         await anchor_if_due(
             self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=job_id
         )
+
+    async def scope(self, tenant_id: uuid.UUID, job_id: uuid.UUID) -> CollectionScope:
+        """The job's single scope (enforced at creation; re-checked here so bad data fails loudly)."""
+        scopes = await self.scopes(tenant_id, job_id)
+        if len(scopes) != 1:
+            raise MultiScopeNotSupportedError(
+                f"job {job_id} has {len(scopes)} scopes; expected exactly one"
+            )
+        return scopes[0]
 
     async def scopes(self, tenant_id: uuid.UUID, job_id: uuid.UUID) -> list[CollectionScope]:
         async with tenant_tx(self.sessions, tenant_id) as s:
@@ -272,7 +291,7 @@ class Pipeline:
             return True
         if row.cursor is None and row.pages_done > 0:
             return True  # all pages applied; only finalize is left (a None cursor alone means "not started")
-        scope = (await self.scopes(tenant_id, job_id))[0]
+        scope = await self.scope(tenant_id, job_id)
         if row.kind == "directory":
             batches: AsyncIterator[RawBatch] = self.connector.fetch_directory(conn, row.cursor)
             unit = None
@@ -640,7 +659,7 @@ class Pipeline:
             if locked.status == "done":
                 return recon
             if last_page is not None:
-                scope = (await self.scopes(tenant_id, job_id))[0]
+                scope = await self.scope(tenant_id, job_id)
                 ctx = NormalizeContext(
                     tenant_id,
                     self.connector.source,
