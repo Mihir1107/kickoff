@@ -95,6 +95,16 @@ class Settings(BaseSettings):
         default=5 * 1024**3, ge=1, description="Above this, files are copied with UploadPartCopy."
     )
     evidence_copy_part_size_bytes: int = Field(default=512 * 1024 * 1024, ge=5 * 1024 * 1024)
+    evidence_small_file_max_bytes: int = Field(
+        default=8 * 1024 * 1024,
+        ge=0,
+        description="Files up to this size skip staging: hashed in memory, PUT straight to WORM (ADR 0002 amendment). 0 disables.",
+    )
+    evidence_file_concurrency: int = Field(
+        default=4,
+        ge=1,
+        description="Concurrent file writes per page; memory <= this x small-file max",
+    )
     evidence_copy_timeout_seconds: float = Field(
         default=1800,
         gt=0,
@@ -168,6 +178,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _guard_disposable_only_settings(self) -> Settings:
+        if self.evidence_small_file_max_bytes > self.evidence_part_size_bytes:
+            raise ValueError(
+                "EDISC_EVIDENCE_SMALL_FILE_MAX_BYTES must not exceed EDISC_EVIDENCE_PART_SIZE_BYTES"
+            )
         if self.evidence_retention_override_days is not None and not self.env.is_disposable:
             raise ValueError(
                 "EDISC_EVIDENCE_RETENTION_OVERRIDE_DAYS is only permitted when EDISC_ENV is local, test or ci"

@@ -21,7 +21,7 @@ evidence when a matter closes, and COMPLIANCE-mode retention can never be shorte
 | Kind | Key | Write path | Idempotency / dedup |
 |---|---|---|---|
 | Raw API page (exact bytes) | `t/{tenant}/jobs/{job}/pages/{evidence_id}.json` | Streamed directly into the WORM bucket (single pass, hashing while uploading) | A page is a per-fetch artifact whose bytes differ between fetches (volatile fields), so every attempt gets its own key. Idempotency comes from the items (ADR 0004). |
-| File / attachment | `t/{tenant}/files/sha256/{h[:2]}/{h}` | Streamed into the **unlocked staging bucket** while hashing, then server-side copied into the content-addressed WORM key, verified, staging deleted | Same bytes give the same key: dedup within the tenant, never across tenants |
+| File / attachment | `t/{tenant}/files/sha256/{h[:2]}/{h}` | Streamed into the **unlocked staging bucket** while hashing, then server-side copied into the content-addressed WORM key, verified, staging deleted. **Small files: direct PUT, no staging (amendment below)** | Same bytes give the same key: dedup within the tenant, never across tenants |
 | Custody anchor | `custody-anchors/{tenant}/{stream}/{seq}.json` | Single PUT (ADR 0003) | Deterministic body |
 
 - Items point at `(storage_key, json_path)` and carry their own `raw_hash`. Files are never embedded in
@@ -84,6 +84,43 @@ server-side copy and short-lived staging objects.
     with a composite we compute ourselves over the same byte ranges while streaming. That is an
     optimization, not a correctness requirement (backlog).
 - A mismatch at any point raises `EvidenceIntegrityError`. It is never retried away.
+
+### Amendment (2026-10-01): small-file direct path, dedup pre-check, parallel files
+Measured (docs/runs/2026-10-01-storage-throughput-breakdown.md): file evidence was 58% of batch time,
+~28 ms per file, and 73% of file writes were duplicates that still went through staging, the content
+lock and a copy.
+
+- **Small files** (size <= `EDISC_EVIDENCE_SMALL_FILE_MAX_BYTES`, default 8 MiB, never above the part
+  size; 0 disables) are read from the source **into memory** (bounded), hashed, and **skip staging**:
+  1. Under the same per-key advisory lock: the registry row is inserted (or found) with the
+     **source hash persisted before any write** (unchanged rule).
+  2. If no version exists: a single `PutObject` straight to the content-addressed WORM key with
+     `If-None-Match: *` (honoured on PutObject), Object Lock set on the request, and
+     `ChecksumSHA256` = our hash. The store rejects a body that does not match it.
+  3. The written version is verified (`HeadObject` full-object SHA-256 = our hash) and pinned; the row
+     completes with `sha256 = source_sha256` (DB trigger unchanged).
+  - No unlocked copy of client data exists at any point on this path: the bytes go from worker memory
+    straight into a locked object.
+  - A file whose stream exceeds the threshold switches to the staging path without re-reading the
+    source: the bytes already buffered are streamed first, then the rest of the same source stream.
+- **Dedup pre-check** (both paths): once the hash is known, a registry row for the key in state
+  `complete` is a dedup hit. The registry hash must match, retention is extended if needed (extend-only,
+  idempotent), and nothing is uploaded or copied. No content lock is needed, because complete rows are
+  final.
+  - For small files the hash is known before any upload, so a duplicate costs one source read and one
+    registry query.
+- **Large files** keep the staging path exactly as above.
+- **Parallel files per page:** a page's files are written concurrently with bounded concurrency
+  (`EDISC_EVIDENCE_FILE_CONCURRENCY`, default 4). Worker memory is bounded by concurrency x small-file
+  threshold (32 MiB by default).
+  - Every source download still goes through the rate limiter.
+  - The first unexpected failure cancels the page's other file writes and is raised unchanged (its error
+    class decides retry); failures of the cancelled writes are attached to it as notes.
+  - File refusals (`FileUnavailableError`) are per file and recorded, as before.
+- Recovery is unchanged:
+  - A small-file row that crashed after its PutObject has a persisted source hash and a matching
+    version, so it is completed by `recover_pending`.
+  - One that crashed before the write has no object and stays pending, writable for the next writer.
 
 ### Retention: rolling window, extended while the matter is active
 - Retain-until on write = `min(matter.retention_until, now + EDISC_EVIDENCE_RETENTION_WINDOW_DAYS)`,

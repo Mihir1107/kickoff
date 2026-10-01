@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import tracemalloc
+from collections.abc import AsyncIterator
 from datetime import timedelta
 
 import pytest
@@ -19,7 +21,7 @@ from edisc_db.session import tenant_tx
 from edisc_evidence.upload import rehash_object
 from edisc_evidence.writer import EvidenceIntegrityError, EvidenceWriter, file_key
 
-from .conftest import PART, Ctx, MiB, chunks, expected_sha, make_ctx, one_shot, rand
+from .conftest import PART, SMALL_MAX, Ctx, MiB, chunks, expected_sha, make_ctx, one_shot, rand
 
 Sessions = async_sessionmaker[AsyncSession]
 EMPTY_SHA = hashlib.sha256(b"").hexdigest()
@@ -82,7 +84,9 @@ async def test_page_sizes_and_part_boundaries(
 
 # ------------------------------------------------------------------ files: staging -> content-addressed WORM
 @pytest.mark.parametrize(
-    "size", [0, PART, PART + 1, 13 * MiB], ids=["zero", "exactly-part", "part+1", "multipart-copy"]
+    "size",
+    [0, 2048, SMALL_MAX, SMALL_MAX + 1, PART, PART + 1, 13 * MiB],
+    ids=["zero", "small", "small-max", "small-max+1", "exactly-part", "part+1", "multipart-copy"],
 )
 async def test_file_is_content_addressed_verified_and_staging_is_removed(
     writer: EvidenceWriter, s3: S3Client, ev_settings: Settings, ctx: Ctx, size: int
@@ -112,10 +116,16 @@ async def test_file_is_content_addressed_verified_and_staging_is_removed(
     assert staged.get("KeyCount", 0) == 0
 
 
+@pytest.mark.parametrize("size", [2048, PART + 3], ids=["small-direct", "staged"])
 async def test_same_content_is_stored_once_per_tenant_and_never_across_tenants(
-    writer: EvidenceWriter, app_sessions: Sessions, s3: S3Client, ev_settings: Settings, ctx: Ctx
+    writer: EvidenceWriter,
+    app_sessions: Sessions,
+    s3: S3Client,
+    ev_settings: Settings,
+    ctx: Ctx,
+    size: int,
 ) -> None:
-    data = rand(PART + 3)
+    data = rand(size)
     first = await writer.write_file(
         tenant_id=ctx.tenant_id,
         job_id=ctx.job_id,
@@ -356,3 +366,162 @@ async def test_retention_is_the_rolling_window_capped_locally(
     ]
     assert caps, "integration tests must run with a retention override"
     assert until <= utc_now() + min(caps) + timedelta(minutes=1)
+
+
+# ------------------------------------------------------------------ small-file direct path (ADR 0002 amendment)
+@pytest.mark.parametrize(
+    ("size", "path"),
+    [(SMALL_MAX, "small"), (SMALL_MAX + 1, "staged")],
+    ids=["at-threshold", "one-byte-over"],
+)
+async def test_path_selection_at_the_threshold_without_re_reading_the_source(
+    writer: EvidenceWriter,
+    s3: S3Client,
+    ev_settings: Settings,
+    ctx: Ctx,
+    monkeypatch: pytest.MonkeyPatch,
+    size: int,
+    path: str,
+) -> None:
+    staged_puts: list[str] = []
+    original = s3.put_object
+
+    async def spy(**kwargs: object) -> object:
+        staged_puts.append(str(kwargs.get("Bucket")))
+        return await original(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(s3, "put_object", spy)
+    reads = 0
+    data = rand(size)
+
+    async def source() -> AsyncIterator[bytes]:
+        nonlocal reads
+        reads += 1
+        for i in range(0, len(data), 64 * 1024):
+            yield data[i : i + 64 * 1024]
+
+    written = await writer.write_file(
+        tenant_id=ctx.tenant_id,
+        job_id=ctx.job_id,
+        matter_retention_until=ctx.matter_retention_until,
+        stream=source(),
+    )
+    assert reads == 1  # the buffered prefix is reused, never a second source read
+    assert (written.sha256, written.size) == (hashlib.sha256(data).hexdigest(), size)
+    used_staging = ev_settings.s3_staging_bucket in staged_puts
+    assert used_staging is (path == "staged")
+    if path == "small":
+        assert staged_puts == [ev_settings.s3_evidence_bucket]  # exactly one PUT, straight to WORM
+    head = await s3.head_object(
+        Bucket=ev_settings.s3_evidence_bucket,
+        Key=written.storage_key,
+        VersionId=written.version_id,
+        ChecksumMode="ENABLED",
+    )
+    assert head["ObjectLockMode"] == "COMPLIANCE"
+    if path == "small":  # the PUT carried our SHA-256: the store checked the body and reports it
+        assert base64.b64decode(head["ChecksumSHA256"]).hex() == written.sha256
+
+
+async def test_small_file_crash_after_put_is_completed_by_recovery(
+    writer: EvidenceWriter,
+    app_sessions: Sessions,
+    ev_settings: Settings,
+    ctx: Ctx,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Killed after the PutObject, before the registry completed: the source hash was persisted first,
+    so recovery pins the stored version and completes the row."""
+
+    class Killed(BaseException):
+        pass
+
+    async def die(*_: object, **__: object) -> None:
+        raise Killed
+
+    data = rand(4096)
+    monkeypatch.setattr(writer, "_complete", die)
+    with pytest.raises(Killed):
+        await writer.write_file(
+            tenant_id=ctx.tenant_id,
+            job_id=ctx.job_id,
+            matter_retention_until=ctx.matter_retention_until,
+            stream=one_shot(data),
+        )
+    monkeypatch.undo()
+    async with tenant_tx(app_sessions, ctx.tenant_id) as s:
+        row = (
+            await s.execute(
+                text("SELECT id, state, source_sha256 FROM evidence_objects WHERE job_id = :j"),
+                {"j": ctx.job_id},
+            )
+        ).one()
+    assert (row.state, row.source_sha256) == ("pending", hashlib.sha256(data).hexdigest())
+    report = await writer.recover_pending(tenant_id=ctx.tenant_id, job_id=ctx.job_id)
+    assert report.completed == [row.id]
+    assert (await writer.verify(tenant_id=ctx.tenant_id, evidence_id=row.id)).clean
+
+
+async def test_duplicate_small_file_takes_no_lock_and_writes_nothing(
+    writer: EvidenceWriter, s3: S3Client, ctx: Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = rand(3000)
+    first = await writer.write_file(
+        tenant_id=ctx.tenant_id,
+        job_id=ctx.job_id,
+        matter_retention_until=ctx.matter_retention_until,
+        stream=one_shot(data),
+    )
+
+    def forbidden(*_: object, **__: object) -> object:
+        raise AssertionError("a dedup hit must not lock, upload or copy")
+
+    monkeypatch.setattr(writer, "_content_lock", forbidden)
+    monkeypatch.setattr(s3, "put_object", forbidden)
+    monkeypatch.setattr(s3, "copy_object", forbidden)
+    again = await writer.write_file(
+        tenant_id=ctx.tenant_id,
+        job_id=ctx.job_id,
+        matter_retention_until=ctx.matter_retention_until,
+        stream=one_shot(data),
+    )
+    assert (again.deduplicated, again.evidence_id, again.version_id) == (
+        True,
+        first.evidence_id,
+        first.version_id,
+    )
+
+
+async def test_racing_retention_extensions_never_fail_or_shorten(
+    writer: EvidenceWriter, app_sessions: Sessions, s3: S3Client, ev_settings: Settings, ctx: Ctx
+) -> None:
+    """Dedup hits extend retention without the content lock. A writer holding a stale 'current' whose
+    target is below what another writer already set must neither fail nor shorten anything."""
+    from datetime import timedelta
+
+    written = await writer.write_file(
+        tenant_id=ctx.tenant_id,
+        job_id=ctx.job_id,
+        matter_retention_until=ctx.matter_retention_until,
+        stream=one_shot(rand(1500)),
+    )
+    async with tenant_tx(app_sessions, ctx.tenant_id) as s:
+        current = (
+            await s.execute(
+                text("SELECT retain_until FROM evidence_objects WHERE id = :e"),
+                {"e": written.evidence_id},
+            )
+        ).scalar_one()
+    later, latest = current + timedelta(seconds=30), current + timedelta(seconds=60)
+    await writer._extend_retention(
+        ctx.tenant_id, written.evidence_id, written.storage_key, written.version_id, current, latest
+    )
+    await writer._extend_retention(
+        ctx.tenant_id, written.evidence_id, written.storage_key, written.version_id, current, later
+    )
+    stored = await s3.get_object_retention(
+        Bucket=ev_settings.s3_evidence_bucket,
+        Key=written.storage_key,
+        VersionId=written.version_id,
+    )
+    assert stored["Retention"]["RetainUntilDate"] >= latest - timedelta(seconds=1)

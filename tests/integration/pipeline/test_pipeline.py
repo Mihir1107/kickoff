@@ -11,7 +11,7 @@ from edisc_core.schemas import JobStatus
 from edisc_core.settings import Settings
 
 from ..normalizer.harness import new_tenant
-from .conftest import CrashAt, assert_invariants, event_items, run_job, spec, units
+from .conftest import CrashAt, JobRun, assert_invariants, event_items, run_job, spec, units
 
 Sessions = async_sessionmaker[AsyncSession]
 
@@ -504,3 +504,104 @@ async def test_absence_detection_without_reading_the_last_page_back(
         assert reads == []
     else:
         assert reads
+
+
+async def test_page_files_are_written_concurrently_within_the_bound_and_fail_as_the_original_error(
+    app_sessions: Sessions, s3: S3Client, settings: Settings
+) -> None:
+    import asyncio
+    from collections.abc import AsyncIterator
+    from datetime import UTC, datetime
+
+    from edisc_connector_dummy.connector import DummyConnector, scope_for_days
+    from edisc_connectors_base.types import Connection
+    from edisc_core.ids import new_id
+    from edisc_worker.pipeline import Pipeline
+
+    from ...unit.dummy.conftest import RecordingLimiter
+
+    sp = spec(p_file=0.6)
+    ds = Dataset(sp)
+    bound = 3
+    in_flight, peak = 0, 0
+    boom_on: set[str] = set()
+
+    class Slow(DummyConnector):
+        async def open_file(self, conn: Connection, file_ref: str) -> AsyncIterator[bytes]:
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            try:
+                await asyncio.sleep(0.02)
+                if file_ref in boom_on:
+                    raise RuntimeError(f"unexpected failure downloading {file_ref}")
+                async for chunk in super().open_file(conn, file_ref):
+                    yield chunk
+            finally:
+                in_flight -= 1
+
+    async def job(t: object) -> tuple[Pipeline, Connection, object]:
+        conn = Connection(
+            t.tenant_id,  # type: ignore[attr-defined]
+            t.connection_id,  # type: ignore[attr-defined]
+            "dummy",
+            sp.workspace_id,
+            {"spec": sp.model_dump(mode="json"), "epoch": 0},
+        )
+        p = Pipeline(
+            app_sessions,
+            s3,
+            settings.model_copy(update={"evidence_file_concurrency": bound}),
+            Slow(RecordingLimiter()),
+        )
+        job_id = new_id()
+        first = datetime.combine(ds.day(0), datetime.min.time(), tzinfo=UTC)
+        await p.start_job(
+            tenant_id=t.tenant_id,  # type: ignore[attr-defined]
+            job_id=job_id,
+            matter_id=t.matter_id,  # type: ignore[attr-defined]
+            connection_id=t.connection_id,  # type: ignore[attr-defined]
+            scopes=[scope_for_days("*", first, ds.n_days(0))],
+            requested_by="tester",
+        )
+        return p, conn, job_id
+
+    t = await new_tenant(app_sessions)
+    p, conn, job_id = await job(t)
+    assert await p.run(tenant_id=t.tenant_id, job_id=job_id, conn=conn) is JobStatus.COMPLETED  # type: ignore[arg-type]
+    assert 1 < peak <= bound, f"peak concurrent downloads {peak}, bound {bound}"
+    await assert_invariants(
+        app_sessions,
+        s3,
+        settings,
+        t,
+        sp,
+        JobRun(job_id, JobStatus.COMPLETED, False),
+        0,  # type: ignore[arg-type]
+    )
+
+    # one unexpected failure: the batch raises THAT exception (classifiable), nothing is committed
+    from edisc_normalizer.slack import file_refs
+
+    t2 = await new_tenant(app_sessions)
+    p, conn, job_id = await job(t2)
+    await p.enumerate_units(tenant_id=t2.tenant_id, job_id=job_id, conn=conn)  # type: ignore[arg-type]
+    unit_key = next(k for k in await p.pending_units(t2.tenant_id, job_id) if k != "directory")  # type: ignore[arg-type]
+    row = next(u for u in await units(app_sessions, t2, job_id) if u.unit_key == unit_key)  # type: ignore[arg-type]
+    from edisc_connectors_base.types import WorkUnit
+
+    batch = await anext(
+        p.connector.fetch(
+            conn,
+            WorkUnit(row.conversation_id, row.day),
+            None,
+            scope=await p.scope(t2.tenant_id, job_id),
+        )  # type: ignore[arg-type]
+    )
+    refs = [m.file_id for m in file_refs(batch.body)]
+    assert len(refs) >= 2
+    boom_on.add(refs[-1])
+    with pytest.raises(RuntimeError, match="unexpected failure downloading"):
+        await p.collect_pages(tenant_id=t2.tenant_id, job_id=job_id, unit_key=unit_key, conn=conn)  # type: ignore[arg-type]
+    row = next(u for u in await units(app_sessions, t2, job_id) if u.unit_key == unit_key)  # type: ignore[arg-type]
+    assert (row.cursor, row.pages_done) == (None, 0)  # no batch committed

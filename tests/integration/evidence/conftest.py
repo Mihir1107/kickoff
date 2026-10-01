@@ -22,6 +22,7 @@ from ..custody.conftest import new_job
 
 MiB = 1024 * 1024
 PART = 5 * MiB  # S3 minimum part size
+SMALL_MAX = 1 * MiB
 
 
 @pytest.fixture
@@ -31,6 +32,8 @@ def ev_settings(settings: Settings) -> Settings:
             "evidence_part_size_bytes": PART,
             "evidence_single_copy_max_bytes": 6 * MiB,  # force UploadPartCopy above 6 MiB in tests
             "evidence_copy_part_size_bytes": PART,
+            # small-file direct path below this, staging above: both paths are exercised
+            "evidence_small_file_max_bytes": SMALL_MAX,
         }
     )
 

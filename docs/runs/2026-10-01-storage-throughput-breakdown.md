@@ -151,3 +151,67 @@ Recommended order, smallest risk first:
 3. S1 (page compression), only after measuring on real Slack exports. It needs an ADR 0002 amendment and
    verifier changes.
 4. S2 per connector (Slack page size) in Phase 2. S4 after the export format is settled. T5 deferred.
+
+## Results after options 1 and 2 (same day)
+
+**Implemented:**
+- **Option 1:** migration 0014, `wal_compression=lz4`, unit finalize without re-reading the page, and the
+  soak disk check.
+- **Option 2:** the small-file direct path, a dedup pre-check without the content lock, and bounded
+  parallel file writes per page (ADR 0002 amendment).
+- Option 3 (compression) is deferred until there is real Slack data.
+
+### Storage (deterministic; fresh stack, 10k messages)
+
+| | Before | After option 1 |
+|---|---:|---:|
+| Postgres `edisc` growth | 25,591,808 | 23,781,376 (-7%) |
+| `items` indexes | 7,397,376 | 5,619,712 (-24%) |
+| WAL generated | 39,007,752 | 36,647,432 (-6%; lz4 helps less than expected here) |
+| MinIO on disk | 40,976,384 | 40,984,576 (unchanged; option 2 changes how files are written, not what is stored) |
+
+### Finalize: the real cause was query plans, not the S3 re-read
+- Skipping the page re-read alone left unit finalize at ~300 ms per unit.
+- Per-statement timing found the cause: the absence/observed queries. With table statistics still stale
+  mid-load (no ANALYZE yet), the planner drove them from the `(tenant, source, sent_at)` index and scanned
+  a whole day's items for every link: 1,009,753 rows filtered, 339 ms. It should have looked up the
+  unit's ~650 links by primary key.
+- **Fix:**
+  - the queries select linked items by id only (`id = ANY(ARRAY(...job_items...))`), and the
+    day/message filter moved into Python;
+  - autovacuum analyzes the bulk tables after 2% change.
+- Result: unit finalize **6.9 s → 0.33 s** for 21 units.
+
+### Throughput, option 2 (paired runs, fresh stack each)
+- **Before** = the same code with `EDISC_EVIDENCE_SMALL_FILE_MAX_BYTES=0` and
+  `EDISC_EVIDENCE_FILE_CONCURRENCY=1`, i.e. the old file path. **After** = the defaults (8 MiB, 4).
+- The machine was shared and noisy during these runs: absolute times vary up to 2x between rounds.
+  Compare within a round.
+
+| Round | Path | In-process wall | msg/s | File time | Batch time | Through Temporal (3 workers) |
+|---|---|---:|---:|---:|---:|---:|
+| 1 | before | 72.9 s | 137 | 42.8 s | 67.5 s | 36.3 s |
+| 1 | after | 30.1 s | 333 | 10.4 s | 27.0 s | 47.6 s |
+| 2 | before | 61.3 s | 163 | 32.8 s | 57.3 s | 27.5 s |
+| 2 | after | 39.7 s | 252 | 13.9 s | 35.9 s | 27.2 s |
+
+- **File time is down 58 to 76%. Per-process throughput is up 1.5 to 2.4x.**
+  - Duplicates (73% of file writes) cost one source read and one registry query, with no lock and no
+    upload.
+  - Small files are one locked PUT, with no staging object and no server-side copy.
+- **The Temporal soak did not get faster** (27 to 48 s, all within noise).
+  - With 8 units in flight across 3 processes, file latency was already overlapped.
+  - That run is bound by worker CPU (normalization, canonical JSON, dummy generation) on a shared 8-core
+    laptop, plus Temporal round trips.
+  - Next lever, if needed: more worker processes or hosts, not the file path.
+- **New finding, not changed:** every dedup hit calls `PutObjectRetention`, because the rolling target
+  `now + window` moves every second (831 registry updates and S3 calls in this run).
+  - Proposal: extend only when the target exceeds the current retain-until by more than a slack
+    (e.g. min(1 day, 10% of the window)).
+  - Concurrent extensions are already safe: a refused shortening that another writer already exceeded
+    counts as success (tested).
+
+### 1M soak
+- Not run locally. Free disk was 14 to 15 GB, varying with system swap. The corrected check needs 20.5 GB:
+  ~10.5 GB projected (7 KB x 1.5 x 1M, plus 2 GB of WAL) and 8 GB left after the run.
+- It stays in the backlog for a cloud VM, as decided.

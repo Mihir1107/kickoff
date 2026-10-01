@@ -26,12 +26,14 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - Rate-limit fairness across concurrent jobs within one tenant (e.g. per-job sub-buckets or weighted round-robin over a shared bucket) so one large job cannot starve another (ADR 0010).
 - Test infra: run integration tests in parallel ephemeral stacks (pytest-xdist + per-worker compose project)
   if suite time grows; today one `edisc-test` stack per run.
-- Throughput: write a page's files concurrently (bounded, e.g. 4) with errors classified per file; today files
-  are written one after another and dominate batch time for attachment-heavy pages (M12 measurements).
 - Throughput: make `guard_job_open` a statement-level check (or cache the job-open check per transaction) instead of
   a per-row `FOR SHARE` on the job row for every inserted item/link/event.
 - Activity hang detection: `_ticking` heartbeats keep a deadlocked-but-alive activity alive until start-to-close
   (30 min). Add per-step watchdogs (DB statement timeout already bounds SQL; S3 calls have client timeouts).
 - Re-authorization alerting delivery (email/webhook) for `alerts` rows; today alerts are records only (M13+).
-- **[required before Phase 1 sign-off]** 1M-message resume soak on a host with >= 64 GB free disk and >= 32 GB
-  RAM (docs/runs/2026-10-01-resume-soak.md); the laptop run was aborted at ~110k messages to protect the disk.
+- **[required before Phase 1 sign-off]** 1M-message resume soak on a cloud VM (>= 32 GB free disk after the
+  corrected ~7 KB/message estimate, >= 16 GB RAM): `scripts/resume_soak.py --messages 1000000 --kills 10`. The laptop
+  run was aborted at ~110k messages and later refused by the disk check (docs/runs/2026-10-01-*.md).
+- Evidence retention extension hysteresis: a dedup hit extends retention only if the rolling target exceeds the
+  current retain-until by more than a slack (today every hit calls PutObjectRetention; docs/runs breakdown).
+- Page-object compression (option 3), once real Slack exports are available to measure the ratio.

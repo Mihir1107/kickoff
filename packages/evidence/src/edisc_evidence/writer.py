@@ -1,9 +1,12 @@
 """Evidence writer and reader (ADR 0002, scheme C).
 
 Pages  -> ``t/{tenant}/jobs/{job}/pages/{evidence_id}.json``: single pass straight into the WORM bucket.
-Files  -> staged, then ``t/{tenant}/files/sha256/{h[:2]}/{h}``: streamed into the unlocked staging bucket
-          while hashing, then server-side copied into the content-addressed WORM key (skipped if it
-          already exists: dedup within the tenant), verified, staging deleted. No evidence on worker disk.
+Files  -> ``t/{tenant}/files/sha256/{h[:2]}/{h}`` (dedup within the tenant):
+          - small (<= ``evidence_small_file_max_bytes``): read into memory, hashed, then a single locked
+            ``PutObject`` straight to the content key (no staging; ADR 0002 amendment);
+          - large: streamed into the unlocked staging bucket while hashing, then server-side copied into
+            the content key, verified, staging deleted. No evidence on worker disk either way.
+          A key already ``complete`` in the registry is a dedup hit: nothing is uploaded or copied.
 
 Provenance: the SHA-256 of the bytes as streamed from the source is persisted on the pending registry row
 BEFORE the object can exist in WORM (before PutObject/CompleteMultipartUpload for pages, before the copy
@@ -22,7 +25,7 @@ import base64
 import hashlib
 import random
 import uuid
-from collections.abc import AsyncIterable, AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -171,6 +174,51 @@ class EvidenceWriter:
         matter_retention_until: datetime,
         stream: AsyncIterable[bytes],
     ) -> WrittenEvidence:
+        small_max = self._settings.evidence_small_file_max_bytes
+        source = aiter(stream)
+        buffered: list[bytes] = []
+        if small_max > 0:
+            size = 0
+            async for chunk in source:
+                buffered.append(chunk)
+                size += len(chunk)
+                if size > small_max:
+                    break
+            else:  # the whole file fits: small-file path
+                return await self._write_small(
+                    tenant_id, job_id, matter_retention_until, b"".join(buffered)
+                )
+
+        async def rest() -> AsyncIterator[bytes]:  # what was buffered, then the same source stream
+            for chunk in buffered:
+                yield chunk
+            async for chunk in source:
+                yield chunk
+
+        return await self._write_staged(tenant_id, job_id, matter_retention_until, rest())
+
+    async def _write_small(
+        self, tenant_id: uuid.UUID, job_id: uuid.UUID, matter_retention_until: datetime, data: bytes
+    ) -> WrittenEvidence:
+        sha256 = hashlib.sha256(data).hexdigest()
+        key = file_key(tenant_id, sha256)
+        retain = effective_retain_until(self._settings, matter_retention_until)
+        hit = await self._dedup_hit(tenant_id, key, sha256, len(data), retain)
+        if hit is not None:
+            return hit
+
+        async def put(retain_until: datetime) -> str:
+            return await self._put_small(key, data, sha256, retain_until)
+
+        return await self._materialize(tenant_id, job_id, key, sha256, len(data), retain, put)
+
+    async def _write_staged(
+        self,
+        tenant_id: uuid.UUID,
+        job_id: uuid.UUID,
+        matter_retention_until: datetime,
+        stream: AsyncIterable[bytes],
+    ) -> WrittenEvidence:
         staging_key = f"t/{tenant_id}/staging/{new_id()}"
         staged = await stream_upload(
             self._s3,
@@ -182,49 +230,83 @@ class EvidenceWriter:
             if_none_match=True,
         )
         try:
-            return await self._promote(
-                tenant_id, job_id, matter_retention_until, staging_key, staged
+            key = file_key(tenant_id, staged.sha256)
+            retain = effective_retain_until(self._settings, matter_retention_until)
+            hit = await self._dedup_hit(tenant_id, key, staged.sha256, staged.size, retain)
+            if hit is not None:
+                return hit
+
+            async def copy(retain_until: datetime) -> str:
+                return await self._copy_into_worm(staging_key, key, staged, retain_until)
+
+            return await self._materialize(
+                tenant_id, job_id, key, staged.sha256, staged.size, retain, copy
             )
         finally:
             await self._s3.delete_object(Bucket=self._settings.s3_staging_bucket, Key=staging_key)
 
-    async def _promote(
+    async def _dedup_hit(
+        self, tenant_id: uuid.UUID, key: str, sha256: str, size: int, retain: datetime
+    ) -> WrittenEvidence | None:
+        """The content key is already complete in the registry: dedup without lock, upload or copy.
+        Complete rows are final; extending retention is monotonic and idempotent."""
+        async with tenant_tx(self._sessions, tenant_id) as s:
+            row = (
+                await s.execute(
+                    text(
+                        "SELECT id, state, sha256, retain_until, version_id FROM evidence_objects"
+                        " WHERE storage_key = :k"
+                    ),
+                    {"k": key},
+                )
+            ).one_or_none()
+        if row is None or row.state != "complete":
+            return None
+        if row.sha256 != sha256:
+            raise EvidenceIntegrityError(f"{key}: registry sha256 != {sha256}")
+        await self._extend_retention(
+            tenant_id, row.id, key, row.version_id, row.retain_until, retain
+        )
+        return WrittenEvidence(row.id, key, sha256, size, row.version_id, deduplicated=True)
+
+    async def _materialize(
         self,
         tenant_id: uuid.UUID,
         job_id: uuid.UUID,
-        matter_retention_until: datetime,
-        staging_key: str,
-        staged: UploadResult,
+        key: str,
+        sha256: str,
+        size: int,
+        retain: datetime,
+        write: Callable[[datetime], Awaitable[str]],
     ) -> WrittenEvidence:
-        key = file_key(tenant_id, staged.sha256)
-        retain = effective_retain_until(self._settings, matter_retention_until)
-        # Serialize writers of the same content: MinIO ignores If-None-Match on CopyObject, so the DB
-        # advisory lock (dedicated autocommit connection, held for the whole promotion) prevents a second copy.
+        """Create the content-addressed object once, under the per-key lock (MinIO ignores If-None-Match
+        on CopyObject, so the DB advisory lock on a dedicated connection prevents a second write)."""
         async with self._content_lock(key):
             try:
-                # a hung copy must not hold the content lock forever
+                # a hung write must not hold the content lock forever
                 async with asyncio.timeout(self._settings.evidence_copy_timeout_seconds):
-                    return await self._promote_locked(
-                        tenant_id, job_id, staging_key, staged, key, retain
+                    return await self._materialize_locked(
+                        tenant_id, job_id, key, sha256, size, retain, write
                     )
             except TimeoutError as exc:
                 raise EvidenceCopyTimeoutError(
                     f"{key}: promotion exceeded {self._settings.evidence_copy_timeout_seconds}s; lock released"
                 ) from exc
 
-    async def _promote_locked(
+    async def _materialize_locked(
         self,
         tenant_id: uuid.UUID,
         job_id: uuid.UUID,
-        staging_key: str,
-        staged: UploadResult,
         key: str,
+        sha256: str,
+        size: int,
         retain: datetime,
+        write: Callable[[datetime], Awaitable[str]],
     ) -> WrittenEvidence:
         """Runs while the per-key advisory lock is held."""
         candidate = new_id()
         async with tenant_tx(self._sessions, tenant_id) as s:
-            # the source hash is persisted with the row, BEFORE any copy into WORM
+            # the source hash is persisted with the row, BEFORE any write into WORM
             await s.execute(
                 text(
                     "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind,"
@@ -232,14 +314,7 @@ class EvidenceWriter:
                     " VALUES (:id, :t, :j, :k, 'file', :r, :h, 'collection')"
                     " ON CONFLICT (storage_key) DO NOTHING"
                 ),
-                {
-                    "id": candidate,
-                    "t": tenant_id,
-                    "j": job_id,
-                    "k": key,
-                    "r": retain,
-                    "h": staged.sha256,
-                },
+                {"id": candidate, "t": tenant_id, "j": job_id, "k": key, "r": retain, "h": sha256},
             )
             row = (
                 await s.execute(
@@ -251,35 +326,43 @@ class EvidenceWriter:
                 )
             ).one()
         if row.state == "complete":
-            if row.sha256 != staged.sha256:
-                raise EvidenceIntegrityError(f"{key}: registry sha256 != {staged.sha256}")
+            if row.sha256 != sha256:
+                raise EvidenceIntegrityError(f"{key}: registry sha256 != {sha256}")
             await self._extend_retention(
                 tenant_id, row.id, key, row.version_id, row.retain_until, retain
             )
-            return WrittenEvidence(
-                row.id, key, staged.sha256, staged.size, row.version_id, deduplicated=True
-            )
+            return WrittenEvidence(row.id, key, sha256, size, row.version_id, deduplicated=True)
         if row.state != "pending":
             raise EvidenceIntegrityError(f"{key}: unexpected registry state {row.state}")
-        if row.source_sha256 is None:  # left by an older writer: persist before the copy
-            await self._persist_source_hash(tenant_id, row.id, staged.sha256, "collection")
-        elif row.source_sha256 != staged.sha256:
+        if row.source_sha256 is None:  # left by an older writer: persist before the write
+            await self._persist_source_hash(tenant_id, row.id, sha256, "collection")
+        elif row.source_sha256 != sha256:
             raise EvidenceIntegrityError(f"{key}: persisted source hash differs from stream")
 
-        version = await self._find_version(key, staged.sha256, staged.size)
+        version = await self._find_version(key, sha256, size)
         if version is None:
-            version = await self._copy_into_worm(staging_key, key, staged, row.retain_until)
-            if not await self._version_matches(key, version, staged.sha256, staged.size):
-                raise EvidenceIntegrityError(f"{key}: copied version {version} != source hash")
-        await self._complete(tenant_id, row.id, staged.sha256, staged.size, version)
-        return WrittenEvidence(
-            row.id,
-            key,
-            staged.sha256,
-            staged.size,
-            version,
-            deduplicated=row.id != candidate,
+            version = await write(row.retain_until)
+            if not await self._version_matches(key, version, sha256, size):
+                raise EvidenceIntegrityError(f"{key}: written version {version} != source hash")
+        await self._complete(tenant_id, row.id, sha256, size, version)
+        return WrittenEvidence(row.id, key, sha256, size, version, deduplicated=row.id != candidate)
+
+    async def _put_small(self, key: str, data: bytes, sha256: str, retain_until: datetime) -> str:
+        """One PutObject into WORM: never overwrites (If-None-Match), locked at creation, and the store
+        checks the body against our SHA-256 (it then reports that full-object checksum on HEAD)."""
+        resp = await self._s3.put_object(
+            Bucket=self._bucket,
+            Key=key,
+            Body=data,
+            IfNoneMatch="*",
+            ChecksumSHA256=base64.b64encode(bytes.fromhex(sha256)).decode(),
+            ObjectLockMode="COMPLIANCE",
+            ObjectLockRetainUntilDate=ensure_utc(retain_until),
         )
+        version = resp.get("VersionId")
+        if not version:
+            raise EvidenceIntegrityError(f"{key}: store returned no VersionId (versioning off?)")
+        return version
 
     @asynccontextmanager
     async def _content_lock(self, key: str) -> AsyncIterator[None]:
@@ -474,12 +557,23 @@ class EvidenceWriter:
     ) -> None:
         if wanted <= current:
             return
-        await self._s3.put_object_retention(
-            Bucket=self._bucket,
-            Key=key,
-            VersionId=version_id,
-            Retention={"Mode": "COMPLIANCE", "RetainUntilDate": ensure_utc(wanted)},
-        )
+        try:
+            await self._s3.put_object_retention(
+                Bucket=self._bucket,
+                Key=key,
+                VersionId=version_id,
+                Retention={"Mode": "COMPLIANCE", "RetainUntilDate": ensure_utc(wanted)},
+            )
+        except ClientError:
+            # COMPLIANCE refuses any shortening. A concurrent dedup hit (no content lock on that path)
+            # may already have extended past ``wanted``: that is success. Anything else is raised.
+            stored = await self._s3.get_object_retention(
+                Bucket=self._bucket, Key=key, VersionId=version_id
+            )
+            until = stored["Retention"].get("RetainUntilDate")
+            if until is None or ensure_utc(until) < ensure_utc(wanted):
+                raise
+            wanted = ensure_utc(until)
         async with tenant_tx(self._sessions, tenant_id) as s:
             await s.execute(
                 text(

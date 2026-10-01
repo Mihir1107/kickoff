@@ -14,7 +14,7 @@ from edisc_core.settings import Settings
 from edisc_evidence.writer import EvidenceCopyTimeoutError, EvidenceWriter, file_key
 
 from ..conftest import Connect
-from .conftest import Ctx, one_shot, rand
+from .conftest import SMALL_MAX, Ctx, one_shot, rand
 
 Sessions = async_sessionmaker[AsyncSession]
 
@@ -39,11 +39,22 @@ async def _lock_connections(connect: Connect) -> int:
         await su.close()
 
 
+@pytest.mark.parametrize(
+    ("size", "hung_write"),
+    [(4096, "_put_small"), (SMALL_MAX + 10, "_copy_into_worm")],
+    ids=["small-direct-put", "staged-copy"],
+)
 async def test_hung_copy_releases_the_lock_and_a_waiter_proceeds(
-    app_sessions: Sessions, s3: S3Client, ev_settings: Settings, ctx: Ctx, connect: Connect
+    app_sessions: Sessions,
+    s3: S3Client,
+    ev_settings: Settings,
+    ctx: Ctx,
+    connect: Connect,
+    size: int,
+    hung_write: str,
 ) -> None:
     settings = ev_settings.model_copy(update={"evidence_copy_timeout_seconds": 1.0})
-    data = rand(4096)
+    data = rand(size)
     key = file_key(ctx.tenant_id, hashlib.sha256(data).hexdigest())
 
     hung = EvidenceWriter(app_sessions, s3, settings)
@@ -54,7 +65,7 @@ async def test_hung_copy_releases_the_lock_and_a_waiter_proceeds(
         await asyncio.sleep(3600)  # S3 never answers
         raise AssertionError("unreachable")
 
-    hung._copy_into_worm = hanging_copy  # type: ignore[method-assign]
+    setattr(hung, hung_write, hanging_copy)
     healthy = EvidenceWriter(app_sessions, s3, settings)
 
     holder = asyncio.create_task(

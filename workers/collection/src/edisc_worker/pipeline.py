@@ -75,6 +75,20 @@ from edisc_normalizer.slack import (
 from edisc_normalizer.store import load_prior, persist
 
 DIRECTORY_UNIT = "directory"
+
+# Items of a unit, selected by id only (see Pipeline._messages_of_day for why there is no day filter)
+_UNIT_LINKED_ITEMS = (
+    "SELECT source_item_id, item_type, sent_at FROM items WHERE id = ANY(ARRAY("
+    "SELECT item_id FROM job_items WHERE job_id = :j AND unit_key = :u))"
+)
+# ... and of the same unit in EARLIER CLEAN collections (matched, no file gaps)
+_EARLIER_CLEAN_ITEMS = (
+    "SELECT source_item_id, item_type, sent_at FROM items WHERE id = ANY(ARRAY("
+    "SELECT ji.item_id FROM work_units wu JOIN job_items ji ON ji.job_id = wu.job_id"
+    " AND ji.unit_key = wu.unit_key WHERE wu.unit_key = :u AND wu.job_id <> :j"
+    " AND wu.kind = 'conversation_day' AND wu.status = 'done' AND wu.recon_status = 'matched'"
+    " AND wu.file_gaps = 0))"
+)
 ACTOR = "collection-worker"
 
 
@@ -442,37 +456,68 @@ class Pipeline:
         conn: Connection,
         body: bytes,
     ) -> dict[str, FileEvidence | FileUnavailable]:
-        out: dict[str, FileEvidence | FileUnavailable] = {}
-        for meta in file_refs(body):
-            attempt = 0
-            while True:
-                attempt += 1
-                try:
-                    written = await self.writer.write_file(
-                        tenant_id=tenant_id,
-                        job_id=job_id,
-                        matter_retention_until=retention,
-                        stream=self.connector.open_file(conn, meta.file_id),
-                    )
-                    break
-                except FileUnavailableError as exc:
-                    # transient refusals (expired URL) get a bounded number of fresh attempts; permanent
-                    # ones are recorded at once. Either way the refusal is recorded, never skipped.
-                    if not exc.reason.transient or attempt >= self.settings.file_retry_attempts:
-                        out[meta.file_id] = FileUnavailable(meta.file_id, exc.reason.value)
-                        break
-                    await asyncio.sleep(
-                        self.settings.file_retry_backoff_seconds * 2 ** (attempt - 1)
-                    )
-            if meta.file_id in out:
+        """Write every file the page references, ``evidence_file_concurrency`` at a time (memory stays
+        bounded by that x the small-file threshold; every download still takes a rate-limit token).
+        The first unexpected failure cancels the rest and is raised unchanged, so its error class
+        decides the retry; failures of the cancelled writes are attached to it as notes."""
+        file_ids = list(dict.fromkeys(meta.file_id for meta in file_refs(body)))
+        if not file_ids:
+            return {}
+        gate = asyncio.Semaphore(self.settings.evidence_file_concurrency)
+        writer = self.writer
+
+        async def one(file_id: str) -> FileEvidence | FileUnavailable:
+            async with gate:
+                return await self._file(writer, tenant_id, job_id, retention, conn, file_id)
+
+        tasks = [asyncio.create_task(one(file_id)) for file_id in file_ids]
+        try:
+            results = await asyncio.gather(*tasks)
+        except BaseException as exc:
+            for task in tasks:
+                task.cancel()
+            for other in await asyncio.gather(*tasks, return_exceptions=True):
+                if (
+                    isinstance(other, BaseException)
+                    and other is not exc
+                    and not isinstance(other, asyncio.CancelledError)
+                ):
+                    exc.add_note(f"another file write of this page also failed: {other!r}")
+            raise
+        return dict(zip(file_ids, results, strict=True))
+
+    async def _file(
+        self,
+        writer: EvidenceWriter,
+        tenant_id: uuid.UUID,
+        job_id: uuid.UUID,
+        retention: datetime,
+        conn: Connection,
+        file_id: str,
+    ) -> FileEvidence | FileUnavailable:
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                written = await writer.write_file(
+                    tenant_id=tenant_id,
+                    job_id=job_id,
+                    matter_retention_until=retention,
+                    stream=self.connector.open_file(conn, file_id),
+                )
+            except FileUnavailableError as exc:
+                # transient refusals (expired URL) get a bounded number of fresh attempts; permanent
+                # ones are recorded at once. Either way the refusal is recorded, never skipped.
+                if not exc.reason.transient or attempt >= self.settings.file_retry_attempts:
+                    return FileUnavailable(file_id, exc.reason.value)
+                await asyncio.sleep(self.settings.file_retry_backoff_seconds * 2 ** (attempt - 1))
                 continue
-            out[meta.file_id] = FileEvidence(
-                meta.file_id,
+            return FileEvidence(
+                file_id,
                 written.sha256,
                 written.size,
                 EvidenceRef(written.evidence_id, written.storage_key),
             )
-        return out
 
     async def _retention(self, tenant_id: uuid.UUID, job_id: uuid.UUID) -> datetime:
         async with tenant_tx(self.sessions, tenant_id) as s:
@@ -855,24 +900,32 @@ class Pipeline:
             return len(await self._linked_messages(s, job_id, unit_key, day))
 
     @staticmethod
-    async def _linked_messages(
-        s: AsyncSession, job_id: uuid.UUID, unit_key: str, day: date
+    async def _messages_of_day(
+        s: AsyncSession, statement: str, params: dict[str, Any], day: date
     ) -> set[str]:
+        """Messages of ``day`` among the items ``statement`` selects by id (``_UNIT_LINKED_ITEMS`` or
+        ``_EARLIER_CLEAN_ITEMS``).
+
+        Items are fetched by id only and filtered here. Any day/type predicate in SQL let the planner
+        (with statistics stale mid-load) drive the query from the day's items instead of the unit's
+        links: ~300 ms per unit instead of ~3 ms."""
         start, end = day_bounds(day)
-        return set(
-            (
-                await s.execute(
-                    # LATERAL: always driven by the unit's links (selective), never by a scan of the
-                    # day's items; plain joins flipped to that plan when statistics were stale mid-load
-                    text(
-                        "SELECT DISTINCT i.source_item_id FROM job_items ji CROSS JOIN LATERAL"
-                        " (SELECT source_item_id FROM items WHERE tenant_id = ji.tenant_id AND id = ji.item_id"
-                        "  AND item_type = 'message' AND sent_at >= :a AND sent_at < :b) i"
-                        " WHERE ji.job_id = :j AND ji.unit_key = :u"
-                    ),
-                    {"j": job_id, "u": unit_key, "a": start, "b": end},
-                )
-            ).scalars()
+        rows = (await s.execute(text(statement), params)).all()
+        return {
+            r.source_item_id
+            for r in rows
+            if r.item_type == "message" and r.sent_at is not None and start <= r.sent_at < end
+        }
+
+    @classmethod
+    async def _linked_messages(
+        cls, s: AsyncSession, job_id: uuid.UUID, unit_key: str, day: date
+    ) -> set[str]:
+        return await cls._messages_of_day(
+            s,
+            _UNIT_LINKED_ITEMS,
+            {"j": job_id, "u": unit_key},
+            day,
         )
 
     async def _previously_observed_clean(
@@ -880,21 +933,11 @@ class Pipeline:
     ) -> set[str]:
         """Messages of this conversation-day seen by EARLIER CLEAN collections of the SAME unit (matched,
         no file gaps), excluding those already reported no-longer-observed. Never other units' context."""
-        start, end = day_bounds(day)
-        ids: set[str] = set(
-            (
-                await s.execute(
-                    text(
-                        "SELECT DISTINCT i.source_item_id FROM work_units wu"
-                        " JOIN job_items ji ON ji.job_id = wu.job_id AND ji.unit_key = wu.unit_key"
-                        " CROSS JOIN LATERAL (SELECT source_item_id FROM items WHERE tenant_id = ji.tenant_id"
-                        "  AND id = ji.item_id AND item_type = 'message' AND sent_at >= :a AND sent_at < :b) i"
-                        " WHERE wu.unit_key = :u AND wu.job_id <> :j AND wu.kind = 'conversation_day' AND wu.status = 'done'"
-                        " AND wu.recon_status = 'matched' AND wu.file_gaps = 0"
-                    ),
-                    {"u": unit_key, "j": job_id, "a": start, "b": end},
-                )
-            ).scalars()
+        ids = await self._messages_of_day(
+            s,
+            _EARLIER_CLEAN_ITEMS,
+            {"u": unit_key, "j": job_id},
+            day,
         )
         obs = await load_prior(
             s,
