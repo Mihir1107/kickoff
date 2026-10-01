@@ -97,6 +97,11 @@ class FileUnavailableReason(StrEnum):
     EXPIRED_URL = "expired_url"
     PERMISSION = "permission"
 
+    @property
+    def transient(self) -> bool:
+        """A fresh attempt may succeed (retried in the batch, ADR 0012); the rest are recorded at once."""
+        return self is FileUnavailableReason.EXPIRED_URL
+
 
 class AccessLossReason(StrEnum):
     NOT_IN_CHANNEL = "not_in_channel"
@@ -119,3 +124,20 @@ class ConversationInaccessibleError(Exception):
     def __init__(self, conversation_id: str, reason: AccessLossReason, response: bytes) -> None:
         super().__init__(f"conversation {conversation_id} inaccessible: {reason.value}")
         self.conversation_id, self.reason, self.response = conversation_id, reason, response
+
+
+class AuthenticationError(Exception):
+    """The source rejected our credentials (revoked/invalid token, ``invalid_auth``, ``token_revoked``,
+    ``invalid_grant``). Never retried: every running job on the connection pauses for re-authorization."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"source rejected credentials: {reason}")
+        self.reason = reason
+
+
+class InvalidCursorError(ValueError):
+    """The source (or our checkpoint) produced a cursor the connector cannot use: unit-scoped integrity."""
+
+
+class SourceUnavailableError(Exception):
+    """A transient upstream failure (HTTP 5xx-like). Retried with backoff."""

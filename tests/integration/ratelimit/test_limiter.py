@@ -55,3 +55,29 @@ async def test_buckets_are_separate_per_tenant_workspace_and_method(settings: Se
         assert max(g.waited_seconds for g in grants) < 1.6
     finally:
         await client.aclose()
+
+
+async def test_long_waits_call_on_wait_in_bounded_chunks(settings: Settings) -> None:
+    """A long Retry-After must not be one silent sleep: on_wait (activity heartbeat, cancel and
+    time-box checks) runs at least every ``wait_chunk_seconds``."""
+    client = aioredis.from_url(settings.redis_url)
+    try:
+        limiter = RateLimiter(
+            client,
+            {"dummy.fetch": RateLimitConfig(rate_per_second=100, burst=1)},
+            wait_chunk_seconds=0.2,
+        )
+        key = BucketKey(uuid.uuid4(), "dummy", "W1", "fetch")
+        await limiter.pause(key, 1.5)
+        calls: list[float] = []
+
+        async def on_wait(_reason: str, seconds: float) -> None:
+            calls.append(seconds)
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await limiter.acquire(key, on_wait=on_wait)
+        assert loop.time() - started >= 1.2
+        assert len(calls) >= 6 and max(calls) <= 0.2, calls
+    finally:
+        await client.aclose()

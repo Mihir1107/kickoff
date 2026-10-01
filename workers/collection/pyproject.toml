@@ -4,12 +4,14 @@ version = "0.1.0"
 description = "Temporal collection workers."
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "edisc-connector-dummy",
     "edisc-connectors-base",
     "edisc-core",
     "edisc-custody",
     "edisc-db",
     "edisc-evidence",
     "edisc-normalizer",
+    "temporalio>=1.33.0",
 ]
 
 [tool.uv.sources]
@@ -19,6 +21,7 @@ edisc-evidence = { workspace = true }
 edisc-custody = { workspace = true }
 edisc-normalizer = { workspace = true }
 edisc-connectors-base = { workspace = true }
+edisc-connector-dummy = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

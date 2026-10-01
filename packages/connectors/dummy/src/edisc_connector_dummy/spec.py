@@ -32,6 +32,10 @@ class FailureSpec(BaseModel):
     file_unavailable_rate: float = Field(default=0.0, ge=0, le=1)
     # conversation index -> first epoch at which the whole conversation is inaccessible
     inaccessible_from_epoch: dict[int, int] = Field(default_factory=dict)
+    # conversation indexes whose cursor is corrupt from the second page on (unit-scoped integrity)
+    corrupt_conversations: tuple[int, ...] = ()
+    # conversation indexes whose every request fails with an upstream error (transient that never heals)
+    unavailable_conversations: tuple[int, ...] = ()
 
 
 class DatasetSpec(BaseModel):

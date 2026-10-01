@@ -137,9 +137,28 @@ class Settings(BaseSettings):
     unit_retry_cooldown_seconds: float = Field(default=900, ge=0)
     unit_retry_horizon_seconds: float = Field(default=86_400, gt=0)
     file_retry_attempts: int = Field(
-        default=3, ge=1, description="in-batch retries for transient file refusals"
+        default=3, ge=1, description="in-batch attempts for transient file refusals"
     )
+    file_retry_backoff_seconds: float = Field(default=0.5, ge=0)
     max_units_in_flight: int = Field(default=8, ge=1)
+    activity_retry_initial_seconds: float = Field(default=1, gt=0)
+    activity_retry_max_seconds: float = Field(default=60, gt=0)
+    activity_start_to_close_seconds: float = Field(
+        default=1800, gt=0, description="time box + one batch + margin (ADR 0012 section 4)"
+    )
+    activity_heartbeat_timeout_seconds: float = Field(default=60, gt=0)
+    unclassified_max_attempts: int = Field(
+        default=3, ge=1, description="attempts for errors no class recognises, then the unit fails"
+    )
+    unit_pages_per_activity: int = Field(default=50, ge=1)
+    unit_iterations_per_run: int = Field(
+        default=200, ge=1, description="collect_pages calls before a unit continues-as-new"
+    )
+    job_poll_seconds: float = Field(
+        default=120,
+        gt=0,
+        description="parent's DB reconcile interval (signals are only a fast path)",
+    )
 
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "edisc"

@@ -179,3 +179,22 @@ Each sweeper is a Temporal Schedule with `overlap=SKIP`, running a one-activity 
 - − The parent polls the DB periodically. That is cheap: one activity per few minutes per job.
 - − `REJECT_DUPLICATE` means a job id can never be reused. That is intended: job ids are UUIDv7 and
   a retried API call must not start a second job.
+
+## Implementation notes (M12 commit 1)
+- Code: `edisc_worker.contracts` (sandbox-safe values), `errors` (classification), `activities`,
+  `workflows`, `__main__` (one worker per source, token-refresh reconcile at startup).
+- In-flight backstop: besides `job_overview` (DB), the parent runs `closed_children` every poll timeout
+  and right after continue-as-new. It asks Temporal (describe by deterministic id) which in-flight
+  children are closed, so a child that ended without signalling (terminated, failed) never blocks the
+  job. Re-starting a unit is always safe: `collect_pages` resumes from the DB checkpoint.
+- Control activities (`job_overview`, `fail_unit`, `defer_unit`, `request_stop`, `pause_for_reauth`,
+  `finalize_job`, ...) retry without an attempt limit (backoff capped at 60 s): a long DB/S3 outage must
+  not orphan a job. Non-retryable classes still fail at once. `collect_pages`, `finalize_unit` and
+  `enumerate_units` use the 25-attempt budget.
+- Unclassified errors: the activity marks its own error non-retryable at attempt
+  `EDISC_UNCLASSIFIED_MAX_ATTEMPTS` (3); the unit fails with the exception type in `last_error`.
+- Limiter waits are slept in chunks of at most `wait_chunk_seconds` (10 s), so `on_wait` (heartbeat,
+  time box, job state) runs at least that often during a long Retry-After.
+- Transient file refusals (`expired_url`) are retried in the batch `EDISC_FILE_RETRY_ATTEMPTS` times with
+  backoff `EDISC_FILE_RETRY_BACKOFF_SECONDS`; permanent refusals are recorded at once.
+- Tuning travels in the workflow input (`RunConfig.from_settings`), never read inside workflows.

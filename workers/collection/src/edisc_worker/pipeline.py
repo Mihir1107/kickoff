@@ -443,15 +443,27 @@ class Pipeline:
     ) -> dict[str, FileEvidence | FileUnavailable]:
         out: dict[str, FileEvidence | FileUnavailable] = {}
         for meta in file_refs(body):
-            try:
-                written = await self.writer.write_file(
-                    tenant_id=tenant_id,
-                    job_id=job_id,
-                    matter_retention_until=retention,
-                    stream=self.connector.open_file(conn, meta.file_id),
-                )
-            except FileUnavailableError as exc:
-                out[meta.file_id] = FileUnavailable(meta.file_id, exc.reason.value)
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    written = await self.writer.write_file(
+                        tenant_id=tenant_id,
+                        job_id=job_id,
+                        matter_retention_until=retention,
+                        stream=self.connector.open_file(conn, meta.file_id),
+                    )
+                    break
+                except FileUnavailableError as exc:
+                    # transient refusals (expired URL) get a bounded number of fresh attempts; permanent
+                    # ones are recorded at once. Either way the refusal is recorded, never skipped.
+                    if not exc.reason.transient or attempt >= self.settings.file_retry_attempts:
+                        out[meta.file_id] = FileUnavailable(meta.file_id, exc.reason.value)
+                        break
+                    await asyncio.sleep(
+                        self.settings.file_retry_backoff_seconds * 2 ** (attempt - 1)
+                    )
+            if meta.file_id in out:
                 continue
             out[meta.file_id] = FileEvidence(
                 meta.file_id,

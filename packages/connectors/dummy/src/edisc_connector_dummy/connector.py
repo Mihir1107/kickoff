@@ -10,7 +10,9 @@ Messiness (all deterministic from the seed; ``messy_pagination``):
 
 Failures (``FailureSpec``, deterministic per request): exceptions, timeouts and 429s fail the first N
 attempts of a request and then succeed; drops remove items from pages while ``expected_count`` still
-reports the true count (or None when the source "cannot count").
+reports the true count (or None when the source "cannot count"). Corrupt conversations fail with an
+invalid cursor from their second page; unavailable conversations fail every request. Credentials are
+revoked while the connection config says ``"auth_revoked": true`` (activities re-read it from the DB).
 
 Every request takes a rate-limit token through ``call_with_limits`` first.
 """
@@ -31,6 +33,7 @@ from edisc_connectors_base.protocol import Limiter
 from edisc_connectors_base.ratelimit import BucketKey, SourceThrottledError, call_with_limits
 from edisc_connectors_base.types import (
     AccessLossReason,
+    AuthenticationError,
     BatchKind,
     CollectionScope,
     Connection,
@@ -39,19 +42,17 @@ from edisc_connectors_base.types import (
     Cursor,
     FileUnavailableError,
     FileUnavailableReason,
+    InvalidCursorError,
     RawBatch,
+    SourceUnavailableError,
     WorkUnit,
 )
 from edisc_core.schemas import ScopeType
 from edisc_core.time import day_bounds, ensure_utc
 
 
-class DummySourceError(RuntimeError):
+class DummySourceError(SourceUnavailableError):
     """An injected upstream failure (HTTP 5xx-like)."""
-
-
-class InvalidCursorError(ValueError):
-    pass
 
 
 @dataclass(frozen=True)
@@ -121,10 +122,26 @@ class DummyConnector:
             raise TimeoutError(f"injected timeout for {request_key} (attempt {done + 1}/{planned})")
         raise SourceThrottledError(f.retry_after_seconds)
 
+    @staticmethod
+    def _check_auth(conn: Connection) -> None:
+        if conn.config.get("auth_revoked"):
+            raise AuthenticationError("token_revoked")
+
+    def _conversation_index(self, ds: Dataset, conversation_id: str) -> int:
+        return next(i for i, c in enumerate(ds.conversations()) if c.id == conversation_id)
+
+    def _check_available(self, ds: Dataset, conversation_id: str, request_key: str) -> None:
+        if (
+            self._conversation_index(ds, conversation_id)
+            in ds.spec.failures.unavailable_conversations
+        ):
+            raise DummySourceError(f"injected persistent upstream error for {request_key}")
+
     async def _request[T](
         self, conn: Connection, ds: Dataset, method: str, request_key: str, respond: Any
     ) -> T:
         async def do() -> T:
+            self._check_auth(conn)
             self._maybe_fail(ds, request_key)
             result: T = respond()
             return result
@@ -141,6 +158,7 @@ class DummyConnector:
         return ConnectionInfo("dummy", ("history", "replies", "users", "files"), blind, counts)
 
     async def enumerate(self, conn: Connection, scope: CollectionScope) -> AsyncIterator[WorkUnit]:
+        self._check_auth(conn)
         ds, epoch = self.dataset(conn)
         date_from, date_to = ensure_utc(scope.date_from), ensure_utc(scope.date_to)
         if scope.scope_type is ScopeType.CUSTODIAN:
@@ -156,8 +174,7 @@ class DummyConnector:
                     yield WorkUnit(conv.id, ds.day(d))
 
     def _check_access(self, ds: Dataset, epoch: int, conversation_id: str) -> None:
-        convs = ds.conversations()
-        index = next(i for i, c in enumerate(convs) if c.id == conversation_id)
+        index = self._conversation_index(ds, conversation_id)
         start = ds.spec.failures.inaccessible_from_epoch.get(index)
         if start is not None and epoch >= start:
             reason = list(AccessLossReason)[index % len(AccessLossReason)]
@@ -181,8 +198,10 @@ class DummyConnector:
         return reason
 
     async def expected_count(self, conn: Connection, unit_: WorkUnit) -> int | None:
+        self._check_auth(conn)
         ds, epoch = self.dataset(conn)
         self._check_access(ds, epoch, unit_.conversation_id)
+        self._check_available(ds, unit_.conversation_id, f"count|{unit_.unit_key}")
         if ds.spec.count_mode is CountMode.UNAVAILABLE:
             return None
         d = ds.day_index(unit_.day)
@@ -258,7 +277,14 @@ class DummyConnector:
         index = _decode(cursor)
         if index > len(batches):
             raise InvalidCursorError(f"cursor beyond the end of {unit_.unit_key}")
+        corrupt = (
+            self._conversation_index(ds, unit_.conversation_id)
+            in ds.spec.failures.corrupt_conversations
+        )
         while index < len(batches):
+            if corrupt and index >= 1:
+                raise InvalidCursorError(f"corrupt cursor for {unit_.unit_key} at page {index}")
+            self._check_available(ds, unit_.conversation_id, f"fetch|{unit_.unit_key}|{index}")
             batch = batches[index]
             nxt = _encode(index + 1) if index + 1 < len(batches) else None
             more_of_kind = index + 1 < len(batches) and batches[index + 1].kind is batch.kind

@@ -507,22 +507,26 @@ name = "edisc-worker"
 version = "0.1.0"
 source = { editable = "workers/collection" }
 dependencies = [
+    { name = "edisc-connector-dummy" },
     { name = "edisc-connectors-base" },
     { name = "edisc-core" },
     { name = "edisc-custody" },
     { name = "edisc-db" },
     { name = "edisc-evidence" },
     { name = "edisc-normalizer" },
+    { name = "temporalio" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "edisc-connector-dummy", editable = "packages/connectors/dummy" },
     { name = "edisc-connectors-base", editable = "packages/connectors/base" },
     { name = "edisc-core", editable = "packages/core" },
     { name = "edisc-custody", editable = "packages/custody" },
     { name = "edisc-db", editable = "packages/db" },
     { name = "edisc-evidence", editable = "packages/evidence" },
     { name = "edisc-normalizer", editable = "packages/normalizer" },
+    { name = "temporalio", specifier = ">=1.33.0" },
 ]
 
 [[package]]

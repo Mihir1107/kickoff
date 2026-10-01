@@ -58,6 +58,11 @@ make worker / api       # run the Temporal worker / API
   live in `tests/golden/jcs/`; keep non-ASCII in golden files as `\\u` escapes so editors cannot normalize them.
 - Workflows carry IDs and small cursors only. Raw data, tokens and large payloads never enter Temporal history.
 - The DB checkpoint is the source of truth for resume, not Temporal heartbeat details.
+- Workflows (ADR 0012): `edisc_worker.workflows` imports only `contracts` (sandbox-safe) and calls activities BY NAME.
+  Activities wrap `Pipeline` and raise only classified `ApplicationError`s (`edisc_worker.errors`). Any change
+  to workflow code that alters commands goes behind `workflow.patched`; goldens in `tests/golden/temporal`
+  (re-record: `EDISC_RECORD_HISTORIES=1 make test-integration TESTS=tests/integration/worker`); remove a patch
+  only when `scripts/temporal_patch_check.py` exits 0.
 - Per-batch writes (items + job_items + custody event + checkpoint + counts) happen in ONE transaction
   (`edisc_worker.pipeline.Pipeline.process_batch`, ADR 0006): evidence and file downloads happen BEFORE it, the
   transaction starts with the checkpoint guard (moved cursor = no-op), links are inserted before the custody event

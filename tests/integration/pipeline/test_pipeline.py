@@ -136,6 +136,75 @@ async def test_unavailable_files_are_recorded_gaps_and_later_availability_is_obs
     await assert_invariants(app_sessions, s3, settings, t, sp, second, 1, oracle=False)
 
 
+async def test_transient_file_refusals_get_bounded_retries_permanent_ones_none(
+    app_sessions: Sessions, s3: S3Client, settings: Settings
+) -> None:
+    """The same job with 1 attempt and with N attempts: expired-URL files are requested exactly N times
+    as often, permanently refused files exactly as often (never retried). Both are recorded."""
+    from collections import Counter
+    from collections.abc import AsyncIterator
+    from datetime import UTC, datetime
+
+    from edisc_connector_dummy.connector import DummyConnector, scope_for_days
+    from edisc_connectors_base.types import Connection, FileUnavailableReason
+    from edisc_core.ids import new_id
+    from edisc_worker.pipeline import Pipeline
+
+    from ...unit.dummy.conftest import RecordingLimiter
+
+    sp = spec(failures={"seed": 5, "file_unavailable_rate": 1.0})
+    ds = Dataset(sp)
+
+    async def requests(attempts: int) -> Counter[str]:
+        calls: Counter[str] = Counter()
+
+        class Counting(DummyConnector):
+            async def open_file(self, conn: Connection, file_ref: str) -> AsyncIterator[bytes]:
+                calls[file_ref] += 1
+                async for chunk in super().open_file(conn, file_ref):
+                    yield chunk
+
+        t = await new_tenant(app_sessions)
+        conn = Connection(
+            t.tenant_id,
+            t.connection_id,
+            "dummy",
+            sp.workspace_id,
+            {"spec": sp.model_dump(mode="json"), "epoch": 0},
+        )
+        job = new_id()
+        p = Pipeline(
+            app_sessions,
+            s3,
+            settings.model_copy(update={"file_retry_attempts": attempts}),
+            Counting(RecordingLimiter()),
+        )
+        first = datetime.combine(ds.day(0), datetime.min.time(), tzinfo=UTC)
+        await p.start_job(
+            tenant_id=t.tenant_id,
+            job_id=job,
+            matter_id=t.matter_id,
+            connection_id=t.connection_id,
+            scopes=[scope_for_days("*", first, ds.n_days(0))],
+            requested_by="tester",
+        )
+        status = await p.run(tenant_id=t.tenant_id, job_id=job, conn=conn)
+        assert status is JobStatus.COMPLETED_WITH_GAPS
+        assert (await event_items(app_sessions, t, job)).get("file_unavailable", 0) > 0
+        return calls
+
+    once, retried = await requests(1), await requests(3)
+    assert set(once) == set(retried)
+    reasons = {
+        f: DummyConnector(RecordingLimiter()).file_unavailable_reason(ds, 0, f) for f in once
+    }
+    transient = [f for f, r in reasons.items() if r is FileUnavailableReason.EXPIRED_URL]
+    permanent = [f for f, r in reasons.items() if r is not None and not r.transient]
+    assert transient and permanent
+    assert all(retried[f] == 3 * once[f] for f in transient), (once, retried)
+    assert all(retried[f] == once[f] for f in permanent), (once, retried)
+
+
 async def test_lost_conversation_is_one_observation_not_a_per_message_flood(
     app_sessions: Sessions, s3: S3Client, settings: Settings
 ) -> None:

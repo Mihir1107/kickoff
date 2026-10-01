@@ -136,8 +136,13 @@ class RateLimiter:
         backoff_initial_seconds: float = 0.2,
         backoff_max_seconds: float = 10.0,
         bucket_ttl_seconds: int = 3600,
+        wait_chunk_seconds: float = 10.0,
     ) -> None:
+        """``wait_chunk_seconds`` bounds every single sleep, so ``on_wait`` (which heartbeats Temporal
+        activities and checks cancel/time box) runs at least that often during a long Retry-After.
+        It must stay well below the activity heartbeat timeout (60 s)."""
         self._client = client
+        self._chunk = wait_chunk_seconds
         self._limits = dict(limits)
         self._backoff_initial = backoff_initial_seconds
         self._backoff_max = backoff_max_seconds
@@ -183,7 +188,7 @@ class RateLimiter:
                 outage, backoff = 0, self._backoff_initial
             if granted:
                 return Grant(int(now_us), waited)
-            delay = int(wait_us) / 1_000_000
+            delay = min(int(wait_us) / 1_000_000, self._chunk)
             if on_wait is not None:
                 await on_wait("throttled", delay)
             await asyncio.sleep(delay)

@@ -13,6 +13,7 @@ TEST_COMPOSE := docker compose -p edisc-test -f infra/docker-compose.yml --env-f
 TEST_TMP := $(or $(TMPDIR),/tmp)/edisc-tests
 TEST_RUN := EDISC_ENV_FILE=$(TEST_ENV) EDISC_COMPOSE_PROJECT=edisc-test uv run
 TEST_LOGS := test-stack-logs.txt
+TESTS ?= tests/integration
 
 .DEFAULT_GOAL := help
 .PHONY: help hooks sync disk-guard test-env-up test-env-down up up-ci down nuke ps logs migrate lint fmt typecheck test test-integration test-all worker api check
@@ -95,14 +96,14 @@ test-integration: disk-guard ## Integration tests on a FRESH ephemeral stack, de
 	@rm -rf $(TEST_TMP) && mkdir -p $(TEST_TMP)
 	@status=0; \
 	$(MAKE) test-env-up && \
-	$(TEST_RUN) pytest tests/integration -m "not elasticsearch" --basetemp=$(TEST_TMP)/pytest $(PYTEST_ARGS) || status=$$?; \
+	$(TEST_RUN) pytest $(TESTS) -m "not elasticsearch" --basetemp=$(TEST_TMP)/pytest $(PYTEST_ARGS) || status=$$?; \
 	if [ $$status -ne 0 ]; then $(TEST_COMPOSE) logs --no-color --tail=200 > $(TEST_LOGS) 2>&1 || true; \
 	  echo "test stack logs saved to $(TEST_LOGS)" >&2; fi; \
 	$(MAKE) test-env-down; rm -rf $(TEST_TMP); exit $$status
 
 test-integration-only: ## Run integration tests on an ALREADY RUNNING test stack (make test-env-up); keeps it
 	@rm -rf $(TEST_TMP) && mkdir -p $(TEST_TMP)
-	$(TEST_RUN) pytest tests/integration -m "not elasticsearch" --basetemp=$(TEST_TMP)/pytest $(PYTEST_ARGS)
+	$(TEST_RUN) pytest $(TESTS) -m "not elasticsearch" --basetemp=$(TEST_TMP)/pytest $(PYTEST_ARGS)
 
 check: lint typecheck test ## Everything CI runs without services
 

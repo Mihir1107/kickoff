@@ -26,6 +26,7 @@ OVERRIDES = {
     "EDISC_ES_URL": "http://localhost:19200",
     "EDISC_S3_DEFAULT_RETENTION_DAYS": "0",  # no day-level bucket default: objects lock for seconds
     "EDISC_EVIDENCE_RETENTION_OVERRIDE_SECONDS": "600",
+    "EDISC_FILE_RETRY_BACKOFF_SECONDS": "0.01",  # speed only; the attempt count is unchanged
 }
 DROP = {"EDISC_EVIDENCE_RETENTION_OVERRIDE_DAYS"}
 
