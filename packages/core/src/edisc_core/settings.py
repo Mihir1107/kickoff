@@ -111,6 +111,20 @@ class Settings(BaseSettings):
     )
     rate_limit_unavailable_backoff_max_seconds: float = Field(default=10.0, gt=0)
 
+    # Temporal orchestration (ADR 0012)
+    activity_time_box_seconds: float = Field(
+        default=600, gt=0, description="collect_pages returns after this"
+    )
+    activity_max_attempts: int = Field(
+        default=25, ge=1, description="transient retry budget per activity"
+    )
+    unit_retry_cooldown_seconds: float = Field(default=900, ge=0)
+    unit_retry_horizon_seconds: float = Field(default=86_400, gt=0)
+    file_retry_attempts: int = Field(
+        default=3, ge=1, description="in-batch retries for transient file refusals"
+    )
+    max_units_in_flight: int = Field(default=8, ge=1)
+
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "edisc"
 

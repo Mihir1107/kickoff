@@ -59,6 +59,8 @@ class JobStatus(StrEnum):
     COMPLETED = "completed"
     COMPLETED_WITH_GAPS = "completed_with_gaps"
     COMPLETED_UNVERIFIED = "completed_unverified"
+    COMPLETED_WITH_FAILED_UNITS = "completed_with_failed_units"  # never clean (ADR 0012 R4)
+    PAUSED_AWAITING_REAUTH = "paused_awaiting_reauth"  # not terminal
     FAILED = "failed"
     CANCELLED = "cancelled"
 
@@ -69,7 +71,7 @@ class JobStatus(StrEnum):
 
     @property
     def is_terminal(self) -> bool:
-        return self not in (JobStatus.PENDING, JobStatus.RUNNING)
+        return self not in (JobStatus.PENDING, JobStatus.RUNNING, JobStatus.PAUSED_AWAITING_REAUTH)
 
 
 class UnitStatus(StrEnum):
@@ -77,6 +79,8 @@ class UnitStatus(StrEnum):
     RUNNING = "running"
     DONE = "done"
     FAILED = "failed"
+    RETRY_LATER = "retry_later"  # transient budget exhausted: cool-down, re-scheduled by the parent
+    PAUSED = "paused"
 
 
 class ReconStatus(StrEnum):

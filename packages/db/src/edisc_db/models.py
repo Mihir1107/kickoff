@@ -90,6 +90,7 @@ class Connection(Base):
     token_key_version: Mapped[str | None] = mapped_column(Text)
     token_version: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
     token_updated_at: Mapped[datetime | None] = mapped_column(TZ)
+    config: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'"))
     status: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     updated_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
@@ -137,6 +138,9 @@ class CollectionJob(Base):
         ForeignKeyConstraint(
             ["tenant_id", "connection_id"], ["connections.tenant_id", "connections.id"]
         ),
+        ForeignKeyConstraint(
+            ["tenant_id", "rerun_of"], ["collection_jobs.tenant_id", "collection_jobs.id"]
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
@@ -149,6 +153,11 @@ class CollectionJob(Base):
     requested_by: Mapped[str] = mapped_column(Text)
     status_detail: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'"))
     seal_storage_key: Mapped[str | None] = mapped_column(Text)
+    stop_requested_at: Mapped[datetime | None] = mapped_column(TZ)
+    stop_reason: Mapped[str | None] = mapped_column(Text)
+    sealed_at: Mapped[datetime | None] = mapped_column(TZ)
+    rerun_of: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    explicit_units: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     started_at: Mapped[datetime | None] = mapped_column(TZ)
     finished_at: Mapped[datetime | None] = mapped_column(TZ)
@@ -201,6 +210,9 @@ class WorkUnit(Base):
     file_gaps: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     access_lost_reason: Mapped[str | None] = mapped_column(Text)
     last_page_evidence_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    retry_after: Mapped[datetime | None] = mapped_column(TZ)
+    first_failure_at: Mapped[datetime | None] = mapped_column(TZ)
+    failures: Mapped[int] = mapped_column(Integer, server_default=text("0"))
 
 
 class EvidenceObject(Base):
@@ -345,6 +357,37 @@ class ItemDerivation(Base):
     derived: Mapped[dict[str, Any]] = mapped_column(JSONB)
     derived_hash: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+
+
+class JobPause(Base):
+    __tablename__ = "job_pauses"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "job_id"], ["collection_jobs.tenant_id", "collection_jobs.id"]
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    job_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    connection_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    reason: Mapped[str] = mapped_column(Text)
+    paused_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    resumed_at: Mapped[datetime | None] = mapped_column(TZ)
+
+
+class Alert(Base):
+    __tablename__ = "alerts"
+    __table_args__ = (ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    kind: Mapped[str] = mapped_column(Text)
+    connection_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    message: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(TZ)
 
 
 class JobItem(Base):

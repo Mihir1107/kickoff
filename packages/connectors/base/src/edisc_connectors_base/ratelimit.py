@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -116,6 +117,12 @@ class Grant:
 
 
 WaitCallback = Callable[[str, float], Awaitable[None]]
+
+# Set by the activity around connector calls: connectors call ``call_with_limits`` without knowing about
+# Temporal, and every limiter wait still heartbeats / checks the time box and the job's cancel flag.
+current_wait_callback: contextvars.ContextVar[WaitCallback | None] = contextvars.ContextVar(
+    "edisc_current_wait_callback", default=None
+)
 """(reason, seconds) before each wait: "throttled", "paused" or "limiter_unavailable". Use it to
 heartbeat Temporal activities during long waits."""
 
@@ -237,8 +244,9 @@ async def call_with_limits[T](
 ) -> T:
     """The connector rate-limit hook: take a token before EVERY request; on a source 429, pause the
     bucket for all workers and retry the same request after the pause (nothing is skipped)."""
+    callback = on_wait or current_wait_callback.get()
     while True:
-        await limiter.acquire(key, on_wait=on_wait)
+        await limiter.acquire(key, on_wait=callback)
         try:
             return await request()
         except SourceThrottledError as exc:

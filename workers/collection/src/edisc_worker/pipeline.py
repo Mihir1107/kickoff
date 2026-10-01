@@ -19,11 +19,13 @@ Every function is idempotent and resumable from the database state alone.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import text
@@ -31,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
 
 from edisc_connectors_base.protocol import Connector
+from edisc_connectors_base.ratelimit import current_wait_callback
 from edisc_connectors_base.types import (
     BatchKind,
     CollectionScope,
@@ -77,6 +80,36 @@ ACTOR = "collection-worker"
 class MultiScopeNotSupportedError(ValueError):
     """A job must have exactly one date-range scope until per-unit scope resolution lands (M13).
     Rejected at creation: never silently use the first scope."""
+
+
+class CollectOutcome(StrEnum):
+    DONE = "done"  # pages exhausted: finalize next
+    MORE = "more"  # time box / page budget used: call again (resumes from the DB checkpoint)
+    STOPPED = "stopped"  # the job is cancelled, failing, paused or closed
+
+
+@dataclass(frozen=True)
+class JobState:
+    status: JobStatus
+    stop_reason: str | None
+    sealed: bool
+
+    @property
+    def accepts_batches(self) -> bool:
+        return self.status is JobStatus.RUNNING and self.stop_reason is None and not self.sealed
+
+
+@dataclass(frozen=True)
+class UnitsOverview:
+    ready: list[str]  # may be started now (pending, running without a live child, due retry_later)
+    remaining: list[str]  # not yet done or failed
+    next_retry_in: float | None  # seconds until the earliest retry_later unit is due
+
+
+class _StopWaiting(Exception):  # noqa: N818 - control flow out of a limiter wait (never inside a transaction)
+    def __init__(self, outcome: CollectOutcome) -> None:
+        super().__init__(outcome.value)
+        self.outcome = outcome
 
 
 class CrashHooks:
@@ -216,7 +249,16 @@ class Pipeline:
     async def enumerate_units(
         self, *, tenant_id: uuid.UUID, job_id: uuid.UUID, conn: Connection
     ) -> int:
-        """Write every work unit (and the directory unit) to the DB. Idempotent."""
+        """Write every work unit (and the directory unit) to the DB. Idempotent. Rerun jobs have an
+        explicit unit list and are not enumerated."""
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            explicit: bool = (
+                await s.execute(
+                    text("SELECT explicit_units FROM collection_jobs WHERE id = :j"), {"j": job_id}
+                )
+            ).scalar_one()
+        if explicit:
+            return 0
         units: dict[str, WorkUnit] = {}
         first_day: date | None = None
         for scope in await self.scopes(tenant_id, job_id):
@@ -258,7 +300,8 @@ class Pipeline:
                 (
                     await s.execute(
                         text(
-                            "SELECT unit_key FROM work_units WHERE job_id = :j AND status <> 'done' ORDER BY unit_key"
+                            "SELECT unit_key FROM work_units WHERE job_id = :j AND status NOT IN ('done', 'failed')"
+                            " ORDER BY unit_key"
                         ),
                         {"j": job_id},
                     )
@@ -275,6 +318,18 @@ class Pipeline:
                 )
             ).one()
 
+    async def job_state(self, tenant_id: uuid.UUID, job_id: uuid.UUID) -> JobState:
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            row = (
+                await s.execute(
+                    text(
+                        "SELECT status, stop_reason, sealed_at FROM collection_jobs WHERE id = :j"
+                    ),
+                    {"j": job_id},
+                )
+            ).one()
+        return JobState(JobStatus(row.status), row.stop_reason, row.sealed_at is not None)
+
     async def collect_pages(
         self,
         *,
@@ -283,38 +338,65 @@ class Pipeline:
         unit_key: str,
         conn: Connection,
         max_pages: int = 50,
-    ) -> bool:
-        """Process up to ``max_pages`` batches from the DB checkpoint. Returns True when the unit's pages
-        are exhausted (ready to finalize)."""
+        time_box_seconds: float | None = None,
+        heartbeat: Callable[[dict[str, Any]], None] | None = None,
+    ) -> CollectOutcome:
+        """Process batches from the DB checkpoint until the unit is exhausted (DONE), the time box or
+        ``max_pages`` is used up (MORE), or the job must stop (STOPPED: cancel, job failure, re-auth
+        pause, closed). The job state is checked before EVERY batch and during every limiter wait;
+        stopping never happens inside a transaction."""
         row = await self._unit(tenant_id, job_id, unit_key)
-        if row.status == "done" or (row.status == "running" and row.recon_status == "access_lost"):
-            return True
+        if row.status in ("done", "failed") or (
+            row.status == "running" and row.recon_status == "access_lost"
+        ):
+            return CollectOutcome.DONE
         if row.cursor is None and row.pages_done > 0:
-            return True  # all pages applied; only finalize is left (a None cursor alone means "not started")
+            return CollectOutcome.DONE  # all pages applied; only finalize is left
+        if not (await self.job_state(tenant_id, job_id)).accepts_batches:
+            return CollectOutcome.STOPPED
         scope = await self.scope(tenant_id, job_id)
-        if row.kind == "directory":
-            batches: AsyncIterator[RawBatch] = self.connector.fetch_directory(conn, row.cursor)
-            unit = None
-        else:
-            unit = WorkUnit(row.conversation_id, row.day)
-            if row.status == "pending":
-                try:
-                    expected = await self.connector.expected_count(conn, unit)
-                except ConversationInaccessibleError as exc:
-                    await self._record_access_lost(tenant_id, job_id, row, conn, exc, scope)
-                    return True
-                async with tenant_tx(self.sessions, tenant_id) as s:
-                    await s.execute(
-                        text(
-                            "UPDATE work_units SET status = 'running', expected_count = :e, updated_at = now()"
-                            " WHERE job_id = :j AND unit_key = :k AND status = 'pending'"
-                        ),
-                        {"e": expected, "j": job_id, "k": unit_key},
-                    )
-            batches = self.connector.fetch(conn, unit, row.cursor, scope=scope)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + (time_box_seconds or self.settings.activity_time_box_seconds)
+        state_checked = [loop.time(), True]
         cursor = row.cursor
-        pages = 0
+
+        async def on_wait(reason: str, seconds: float) -> None:
+            if heartbeat is not None:
+                heartbeat(
+                    {"unit_key": unit_key, "cursor": cursor, "waiting": reason, "seconds": seconds}
+                )
+            if loop.time() >= deadline:
+                raise _StopWaiting(CollectOutcome.MORE)
+            if loop.time() - float(state_checked[0]) >= 5:  # cached job-state check
+                state_checked[0] = loop.time()
+                if not (await self.job_state(tenant_id, job_id)).accepts_batches:
+                    raise _StopWaiting(CollectOutcome.STOPPED)
+
+        token = current_wait_callback.set(on_wait)
         try:
+            if row.kind == "directory":
+                batches: AsyncIterator[RawBatch] = self.connector.fetch_directory(conn, row.cursor)
+                unit = None
+            else:
+                unit = WorkUnit(row.conversation_id, row.day)
+                if row.status in ("pending", "retry_later", "paused"):
+                    expected = row.expected_count
+                    if row.status == "pending":
+                        try:
+                            expected = await self.connector.expected_count(conn, unit)
+                        except ConversationInaccessibleError as exc:
+                            await self._record_access_lost(tenant_id, job_id, row, conn, exc, scope)
+                            return CollectOutcome.DONE
+                    async with tenant_tx(self.sessions, tenant_id) as s:
+                        await s.execute(
+                            text(
+                                "UPDATE work_units SET status = 'running', expected_count = :e, retry_after = NULL,"
+                                " updated_at = now() WHERE job_id = :j AND unit_key = :k AND status <> 'done'"
+                            ),
+                            {"e": expected, "j": job_id, "k": unit_key},
+                        )
+                batches = self.connector.fetch(conn, unit, row.cursor, scope=scope)
+            pages = 0
             async for batch in batches:
                 applied = await self.process_batch(
                     tenant_id=tenant_id,
@@ -328,17 +410,28 @@ class Pipeline:
                 )
                 await self.hooks.hit("after_commit")
                 if not applied:
-                    break  # someone else advanced this unit: re-read the checkpoint next time
+                    return (
+                        CollectOutcome.MORE
+                    )  # someone else advanced this unit: re-read the checkpoint
                 cursor = batch.next_cursor
                 pages += 1
+                if heartbeat is not None:
+                    heartbeat({"unit_key": unit_key, "cursor": cursor, "pages": pages})
                 if batch.next_cursor is None:
-                    return True
-                if pages >= max_pages:
-                    return False
+                    return CollectOutcome.DONE
+                if pages >= max_pages or loop.time() >= deadline:
+                    return CollectOutcome.MORE
+                if not (await self.job_state(tenant_id, job_id)).accepts_batches:
+                    return CollectOutcome.STOPPED
         except ConversationInaccessibleError as exc:
             await self._record_access_lost(tenant_id, job_id, row, conn, exc, scope)
-            return True
-        return cursor is None and pages > 0
+            return CollectOutcome.DONE
+        except _StopWaiting as stop:
+            return stop.outcome
+        else:
+            return CollectOutcome.DONE if cursor is None and pages > 0 else CollectOutcome.MORE
+        finally:
+            current_wait_callback.reset(token)
 
     async def _files(
         self,
@@ -786,88 +879,425 @@ class Pipeline:
         )
         return {m for m in ids if obs[f"{m}#observation"].observation_status != NO_LONGER_OBSERVED}
 
-    # ------------------------------------------------------------------ job finalize
-    async def finalize_job(self, *, tenant_id: uuid.UUID, job_id: uuid.UUID) -> JobStatus:
-        await self.hooks.hit("during_finalize")
+    # ------------------------------------------------------------------ unit failure / retry later
+    async def fail_unit(
+        self, *, tenant_id: uuid.UUID, job_id: uuid.UUID, unit_key: str, error_type: str, error: str
+    ) -> None:
+        """Unit-scoped failure: loud (status, error, custody lifecycle event); other units go on."""
         async with tenant_tx(self.sessions, tenant_id) as s:
-            job = (
-                await s.execute(
-                    text("SELECT status, finished_at FROM collection_jobs WHERE id = :j"),
-                    {"j": job_id},
-                )
-            ).one()
-        if job.finished_at is not None:
-            return JobStatus(job.status)
-        await recover_job_evidence(
-            self.writer,
-            self.sessions,
-            self.s3,
-            self.settings,
-            tenant_id=tenant_id,
-            job_id=job_id,
-            actor=ACTOR,
-        )
-        async with tenant_tx(self.sessions, tenant_id) as s:
-            units = (
+            done = (
                 await s.execute(
                     text(
-                        "SELECT unit_key, kind, status, recon_status, file_gaps FROM work_units WHERE job_id = :j"
+                        "UPDATE work_units SET status = 'failed', recon_status = 'failed', last_error = :e, updated_at = now()"
+                        " WHERE job_id = :j AND unit_key = :k AND status NOT IN ('done', 'failed') RETURNING unit_key"
                     ),
-                    {"j": job_id},
+                    {"e": f"{error_type}: {error}"[:4000], "j": job_id, "k": unit_key},
                 )
-            ).all()
-            counted = [u for u in units if u.kind == "conversation_day"]
-            if any(u.status != "done" or u.recon_status == "failed" for u in counted):
-                status = JobStatus.FAILED
-            elif any(u.recon_status in ("gap", "surplus", "access_lost") for u in counted):
-                status = JobStatus.COMPLETED_WITH_GAPS
-            elif any(u.recon_status == "unverifiable" for u in counted):
-                status = JobStatus.COMPLETED_UNVERIFIED
-            else:
-                status = JobStatus.COMPLETED
-            summary: dict[str, int] = {}
-            for u in counted:
-                summary[u.recon_status] = summary.get(u.recon_status, 0) + 1
-            await s.execute(
-                text(
-                    "UPDATE collection_jobs SET status = :st, finished_at = now(), status_detail = CAST(:d AS jsonb)"
-                    " WHERE id = :j"
-                ),
-                {"st": status.value, "d": json.dumps({"units": summary}), "j": job_id},
-            )
+            ).first()
+            if done is None:
+                return
             await append(
                 s,
                 tenant_id=tenant_id,
                 stream_id=job_id,
                 job_id=job_id,
-                event_type="job_finished",
+                event_type="unit_failed",
                 actor=ACTOR,
-                payload={"status": status.value, "units": summary},
+                payload={"unit_key": unit_key, "error_type": error_type, "error": error[:2000]},
                 anchor_every=self.anchor_every,
             )
-        await seal_job_chain(
-            self.sessions, self.s3, self.settings, tenant_id=tenant_id, job_id=job_id
+        await anchor_if_due(
+            self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=job_id
         )
+
+    async def defer_unit(
+        self, *, tenant_id: uuid.UUID, job_id: uuid.UUID, unit_key: str, error: str
+    ) -> str:
+        """Transient budget exhausted: ``retry_later`` with a cool-down, or ``failed`` once the unit has
+        been failing for longer than the horizon. Returns the resulting status."""
+        cooldown = self.settings.unit_retry_cooldown_seconds
+        horizon = self.settings.unit_retry_horizon_seconds
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            row = (
+                await s.execute(
+                    text(
+                        "UPDATE work_units SET failures = failures + 1, first_failure_at = coalesce(first_failure_at, now()),"
+                        " last_error = :e, updated_at = now() WHERE job_id = :j AND unit_key = :k AND status NOT IN"
+                        " ('done', 'failed') RETURNING first_failure_at, now() AS now"
+                    ),
+                    {"e": error[:4000], "j": job_id, "k": unit_key},
+                )
+            ).first()
+            if row is None:
+                return "unchanged"
+            if (row.now - row.first_failure_at).total_seconds() < horizon:
+                await s.execute(
+                    text(
+                        "UPDATE work_units SET status = 'retry_later', retry_after = now() + make_interval(secs => :c)"
+                        " WHERE job_id = :j AND unit_key = :k"
+                    ),
+                    {"c": cooldown, "j": job_id, "k": unit_key},
+                )
+                return "retry_later"
+        await self.fail_unit(
+            tenant_id=tenant_id,
+            job_id=job_id,
+            unit_key=unit_key,
+            error_type="TransientExhausted",
+            error=f"failing for more than {horizon}s; last error: {error}",
+        )
+        return "failed"
+
+    async def startable_units(
+        self, tenant_id: uuid.UUID, job_id: uuid.UUID, limit: int
+    ) -> UnitsOverview:
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            rows = (
+                await s.execute(
+                    text(
+                        "SELECT unit_key, status, retry_after, retry_after <= now() AS due,"
+                        " extract(epoch FROM retry_after - now()) AS wait FROM work_units WHERE job_id = :j ORDER BY unit_key"
+                    ),
+                    {"j": job_id},
+                )
+            ).all()
+        ready = [
+            r.unit_key
+            for r in rows
+            if r.status in ("pending", "running", "paused") or (r.status == "retry_later" and r.due)
+        ]
+        waits = [float(r.wait) for r in rows if r.status == "retry_later" and not r.due]
+        remaining = [r.unit_key for r in rows if r.status not in ("done", "failed")]
+        return UnitsOverview(ready[:limit], remaining, min(waits) if waits else None)
+
+    async def unit_statuses(
+        self, tenant_id: uuid.UUID, job_id: uuid.UUID, unit_keys: Sequence[str]
+    ) -> dict[str, str]:
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            rows = (
+                await s.execute(
+                    text(
+                        "SELECT unit_key, status FROM work_units WHERE job_id = :j AND unit_key = ANY(:k)"
+                    ),
+                    {"j": job_id, "k": list(unit_keys)},
+                )
+            ).all()
+        return {r.unit_key: r.status for r in rows}
+
+    # ------------------------------------------------------------------ stop / pause / resume
+    async def request_stop(
+        self, *, tenant_id: uuid.UUID, job_id: uuid.UUID, reason: str, detail: str, actor: str
+    ) -> bool:
+        """Cancel or job-scoped failure: units stop at their next batch boundary. First request wins."""
+        if reason not in ("cancel", "job_failure"):
+            raise ValueError(f"unknown stop reason {reason}")
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            row = (
+                await s.execute(
+                    text(
+                        "UPDATE collection_jobs SET stop_requested_at = now(), stop_reason = :r WHERE id = :j"
+                        " AND stop_reason IS NULL AND finished_at IS NULL RETURNING id"
+                    ),
+                    {"r": reason, "j": job_id},
+                )
+            ).first()
+            if row is None:
+                return False
+            await append(
+                s,
+                tenant_id=tenant_id,
+                stream_id=job_id,
+                job_id=job_id,
+                event_type="cancel_requested" if reason == "cancel" else "job_failed",
+                actor=actor,
+                payload={"reason": reason, "detail": detail[:2000]},
+                anchor_every=self.anchor_every,
+            )
+        await anchor_if_due(
+            self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=job_id
+        )
+        return True
+
+    async def pause_connection(
+        self, *, tenant_id: uuid.UUID, connection_id: uuid.UUID, reason: str
+    ) -> list[uuid.UUID]:
+        """Revoked/invalid credentials pause EVERY running job on the connection, with one alert."""
+        paused: list[uuid.UUID] = []
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            await s.execute(
+                text(
+                    "UPDATE connections SET status = 'reauth_required', updated_at = now() WHERE id = :c"
+                ),
+                {"c": connection_id},
+            )
+            jobs: Sequence[uuid.UUID] = (
+                (
+                    await s.execute(
+                        text(
+                            "UPDATE collection_jobs SET status = 'paused_awaiting_reauth' WHERE connection_id = :c"
+                            " AND status = 'running' AND finished_at IS NULL RETURNING id"
+                        ),
+                        {"c": connection_id},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for job in jobs:
+                await s.execute(
+                    text(
+                        "INSERT INTO job_pauses (id, tenant_id, job_id, connection_id, reason) VALUES (:i, :t, :j, :c, :r)"
+                    ),
+                    {"i": new_id(), "t": tenant_id, "j": job, "c": connection_id, "r": reason},
+                )
+                await append(
+                    s,
+                    tenant_id=tenant_id,
+                    stream_id=job,
+                    job_id=job,
+                    event_type="job_paused",
+                    actor=ACTOR,
+                    payload={"reason": reason, "connection_id": str(connection_id)},
+                    anchor_every=self.anchor_every,
+                )
+                paused.append(job)
+            if jobs:
+                await s.execute(
+                    text(
+                        "INSERT INTO alerts (id, tenant_id, kind, connection_id, message) VALUES (:i, :t, 'reauth_required', :c, :m)"
+                    ),
+                    {
+                        "i": new_id(),
+                        "t": tenant_id,
+                        "c": connection_id,
+                        "m": f"Connection needs re-authorization ({reason}); {len(jobs)} job(s) paused.",
+                    },
+                )
+        for job in paused:
+            await anchor_if_due(
+                self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=job
+            )
+        return paused
+
+    async def resume_connection(
+        self, *, tenant_id: uuid.UUID, connection_id: uuid.UUID, actor: str
+    ) -> list[uuid.UUID]:
+        resumed: list[uuid.UUID] = []
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            await s.execute(
+                text("UPDATE connections SET status = 'active', updated_at = now() WHERE id = :c"),
+                {"c": connection_id},
+            )
+            jobs: Sequence[uuid.UUID] = (
+                (
+                    await s.execute(
+                        text(
+                            "UPDATE collection_jobs SET status = 'running' WHERE connection_id = :c"
+                            " AND status = 'paused_awaiting_reauth' RETURNING id"
+                        ),
+                        {"c": connection_id},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for job in jobs:
+                await s.execute(
+                    text(
+                        "UPDATE job_pauses SET resumed_at = now() WHERE job_id = :j AND resumed_at IS NULL"
+                    ),
+                    {"j": job},
+                )
+                await append(
+                    s,
+                    tenant_id=tenant_id,
+                    stream_id=job,
+                    job_id=job,
+                    event_type="job_resumed",
+                    actor=actor,
+                    payload={"connection_id": str(connection_id)},
+                    anchor_every=self.anchor_every,
+                )
+                resumed.append(job)
+        for job in resumed:
+            await anchor_if_due(
+                self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=job
+            )
+        return resumed
+
+    # ------------------------------------------------------------------ job finalize
+    async def finalize_job(self, *, tenant_id: uuid.UUID, job_id: uuid.UUID) -> JobStatus:
+        """Recover evidence, then ONE transaction: ``job_finished`` event THEN the terminal status (the
+        closed-job trigger rejects anything after), then seal and ``sealed_at``. Idempotent."""
+        await self.hooks.hit("during_finalize")
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            job = (
+                await s.execute(
+                    text(
+                        "SELECT status, finished_at, stop_reason, sealed_at FROM collection_jobs WHERE id = :j"
+                    ),
+                    {"j": job_id},
+                )
+            ).one()
+        if job.finished_at is None:
+            await recover_job_evidence(
+                self.writer,
+                self.sessions,
+                self.s3,
+                self.settings,
+                tenant_id=tenant_id,
+                job_id=job_id,
+                actor=ACTOR,
+            )
+            async with tenant_tx(self.sessions, tenant_id) as s:
+                units = (
+                    await s.execute(
+                        text(
+                            "SELECT unit_key, kind, status, recon_status FROM work_units WHERE job_id = :j"
+                        ),
+                        {"j": job_id},
+                    )
+                ).all()
+                paused: float = (
+                    await s.execute(
+                        text(
+                            "SELECT coalesce(sum(extract(epoch FROM coalesce(resumed_at, now()) - paused_at)), 0)"
+                            " FROM job_pauses WHERE job_id = :j"
+                        ),
+                        {"j": job_id},
+                    )
+                ).scalar_one()
+                counted = [u for u in units if u.kind == "conversation_day"]
+                if job.stop_reason == "cancel":
+                    status = JobStatus.CANCELLED
+                elif job.stop_reason == "job_failure":
+                    status = JobStatus.FAILED
+                elif any(u.status not in ("done", "failed") for u in counted):
+                    status = JobStatus.FAILED  # finalize without every unit settled: never clean
+                elif any(u.status == "failed" for u in counted):
+                    status = JobStatus.COMPLETED_WITH_FAILED_UNITS
+                elif any(u.recon_status in ("gap", "surplus", "access_lost") for u in counted):
+                    status = JobStatus.COMPLETED_WITH_GAPS
+                elif any(u.recon_status == "unverifiable" for u in counted):
+                    status = JobStatus.COMPLETED_UNVERIFIED
+                else:
+                    status = JobStatus.COMPLETED
+                summary: dict[str, int] = {}
+                for u in counted:
+                    summary[u.status if u.status == "failed" else u.recon_status] = (
+                        summary.get(u.status if u.status == "failed" else u.recon_status, 0) + 1
+                    )
+                detail = {
+                    "units": summary,
+                    "paused_seconds": round(float(paused), 3),
+                    "stop_reason": job.stop_reason,
+                }
+                await append(
+                    s,
+                    tenant_id=tenant_id,
+                    stream_id=job_id,
+                    job_id=job_id,
+                    event_type="job_cancelled" if status is JobStatus.CANCELLED else "job_finished",
+                    actor=ACTOR,
+                    payload={"status": status.value, **detail},
+                    anchor_every=self.anchor_every,
+                )
+                await s.execute(
+                    text(
+                        "UPDATE collection_jobs SET status = :st, finished_at = now(), status_detail = CAST(:d AS jsonb)"
+                        " WHERE id = :j"
+                    ),
+                    {"st": status.value, "d": json.dumps(detail), "j": job_id},
+                )
+        else:
+            status = JobStatus(job.status)
+        if job.sealed_at is None:
+            await seal_job_chain(
+                self.sessions, self.s3, self.settings, tenant_id=tenant_id, job_id=job_id
+            )
+            async with tenant_tx(self.sessions, tenant_id) as s:
+                await s.execute(
+                    text(
+                        "UPDATE collection_jobs SET sealed_at = now() WHERE id = :j AND sealed_at IS NULL"
+                    ),
+                    {"j": job_id},
+                )
         return status
+
+    # ------------------------------------------------------------------ rerun failed units (a NEW job)
+    async def create_rerun_job(
+        self, *, tenant_id: uuid.UUID, original_job_id: uuid.UUID, requested_by: str
+    ) -> uuid.UUID:
+        """Failed units of a sealed job are re-run as a new job (the sealed original stays closed)."""
+        job_id = new_id()
+        scope = await self.scope(tenant_id, original_job_id)
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            original = (
+                await s.execute(
+                    text("SELECT matter_id, connection_id FROM collection_jobs WHERE id = :j"),
+                    {"j": original_job_id},
+                )
+            ).one()
+            failed = (
+                await s.execute(
+                    text(
+                        "SELECT unit_key, conversation_id, day, kind FROM work_units WHERE job_id = :j AND status = 'failed'"
+                    ),
+                    {"j": original_job_id},
+                )
+            ).all()
+        await self.start_job(
+            tenant_id=tenant_id,
+            job_id=job_id,
+            matter_id=original.matter_id,
+            connection_id=original.connection_id,
+            scopes=[scope],
+            requested_by=requested_by,
+        )
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            await s.execute(
+                text(
+                    "UPDATE collection_jobs SET rerun_of = :o, explicit_units = true WHERE id = :j"
+                ),
+                {"o": original_job_id, "j": job_id},
+            )
+            for u in failed:
+                await s.execute(
+                    text(
+                        "INSERT INTO work_units (tenant_id, job_id, unit_key, conversation_id, day, kind)"
+                        " VALUES (:t, :j, :k, :c, :d, :kind)"
+                    ),
+                    {
+                        "t": tenant_id,
+                        "j": job_id,
+                        "k": u.unit_key,
+                        "c": u.conversation_id,
+                        "d": u.day,
+                        "kind": u.kind,
+                    },
+                )
+        return job_id
 
     # ------------------------------------------------------------------ whole job (no Temporal)
     async def run(
         self, *, tenant_id: uuid.UUID, job_id: uuid.UUID, conn: Connection, max_pages: int = 3
     ) -> JobStatus:
-        """Drive a job to completion from whatever state the DB holds (resumable at any point)."""
+        """Drive a job to completion from whatever state the DB holds, without Temporal (tests, tools)."""
         await self.enumerate_units(tenant_id=tenant_id, job_id=job_id, conn=conn)
         for unit_key in await self.pending_units(tenant_id, job_id):
-            while not await self.collect_pages(
-                tenant_id=tenant_id,
-                job_id=job_id,
-                unit_key=unit_key,
-                conn=conn,
-                max_pages=max_pages,
-            ):
-                pass
-            await self.finalize_unit(
-                tenant_id=tenant_id, job_id=job_id, unit_key=unit_key, conn=conn
-            )
+            outcome = CollectOutcome.MORE
+            while outcome is CollectOutcome.MORE:
+                outcome = await self.collect_pages(
+                    tenant_id=tenant_id,
+                    job_id=job_id,
+                    unit_key=unit_key,
+                    conn=conn,
+                    max_pages=max_pages,
+                )
+            if outcome is CollectOutcome.DONE:
+                await self.finalize_unit(
+                    tenant_id=tenant_id, job_id=job_id, unit_key=unit_key, conn=conn
+                )
         return await self.finalize_job(tenant_id=tenant_id, job_id=job_id)
 
 
