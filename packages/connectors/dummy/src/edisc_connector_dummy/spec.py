@@ -27,6 +27,11 @@ class FailureSpec(BaseModel):
     drop_rate: float = Field(default=0.0, ge=0, le=1)  # items silently missing from pages
     max_consecutive: int = Field(default=2, ge=1)  # a failing request fails this many times at most
     retry_after_seconds: float = Field(default=0.05, gt=0)
+    # files the source will not hand over (reason cycles deleted/external/expired_url/permission;
+    # expired_url is transient: the file downloads fine from the next epoch on)
+    file_unavailable_rate: float = Field(default=0.0, ge=0, le=1)
+    # conversation index -> first epoch at which the whole conversation is inaccessible
+    inaccessible_from_epoch: dict[int, int] = Field(default_factory=dict)
 
 
 class DatasetSpec(BaseModel):

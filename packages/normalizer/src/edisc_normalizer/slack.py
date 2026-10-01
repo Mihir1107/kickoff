@@ -42,20 +42,27 @@ from edisc_normalizer.model import (
     EvidenceRef,
     FileEvidence,
     FileMeta,
+    FileUnavailable,
     NormalizeContext,
     PageResult,
     PriorState,
 )
 
-FP_MESSAGE = "slack.message/1"
+FP_MESSAGE = "slack.message/2"  # v2: files by id/name/type, not bytes (ADR 0004, option B)
 FP_FILE = "slack.file/1"
 FP_REACTIONS = "slack.reactions/1"
 FP_PROFILE = "slack.profile/1"
 FP_PROFILE_EMBED = "slack.profile-embed/1"
 FP_CHANGE = "slack.change/1"
 FP_OBSERVATION = "slack.observation/1"
+FP_AVAILABILITY = "slack.file-availability/1"
+FP_ACCESS = "slack.access/1"
 
 NO_LONGER_OBSERVED = "no_longer_observed"
+UNAVAILABLE = "unavailable"
+AVAILABLE = "available"
+ACCESS_LOST = "access_lost"
+ACCESS_RESTORED = "access_restored"
 OBSERVED_AGAIN = "observed_again"
 _MENTION = re.compile(r"<@([A-Z0-9]+)(?:\|[^>]*)?>")
 
@@ -236,9 +243,12 @@ def normalize_messages_page(
     ctx: NormalizeContext,
     page_ref: EvidenceRef,
     prior: Mapping[str, PriorState],
-    files: Mapping[str, FileEvidence],
+    files: Mapping[str, FileEvidence | FileUnavailable],
 ) -> PageResult:
-    """Derive every record from one conversations.history / conversations.replies page."""
+    """Derive every record from one conversations.history / conversations.replies page.
+
+    ``files`` must cover every file the page references: collected bytes, or the source's refusal.
+    """
     if ctx.conversation_id is None:
         raise NormalizationError("a messages page needs a conversation")
     ws, conv = ctx.workspace_id, ctx.conversation_id
@@ -247,6 +257,7 @@ def normalize_messages_page(
     observed: set[str] = set()
     subjects: set[str] = set()
     emitted: set[str] = set()
+    unavailable: set[str] = set()
 
     def emit(d: Derived) -> None:
         key = d.idempotency_key(ctx.tenant_id, ctx.source)
@@ -267,42 +278,52 @@ def normalize_messages_page(
             observed.add(mid)
         deleted = raw.get("subtype") == "message_deleted"
 
-        # attachments first: the message fingerprint includes each file's content hash
-        file_pairs: list[list[str]] = []
-        for f in [] if deleted else (raw.get("files") or []):
-            evidence = files.get(f["id"])
-            if evidence is None:
+        # attachments: the message fingerprint carries id/name/type as shown in the message (option B);
+        # bytes are versioned on file items; availability is its own observation stream
+        file_entries: list[list[str]] = []
+        availability: list[tuple[str, FileEvidence | FileUnavailable, str, str]] = []
+        for index_f, f in enumerate([] if deleted else (raw.get("files") or [])):
+            fid = f["id"]
+            file_entries.append([fid, f.get("name", ""), f.get("mimetype", "")])
+            outcome = files.get(fid)
+            if outcome is None:
                 raise MissingFileEvidenceError(
-                    f"file {f['id']} of {mid} was not collected before normalizing"
+                    f"file {fid} of {mid} was not attempted before normalizing"
                 )
+            availability.append(
+                (fid, outcome, build("messages", index, "files", index_f), canonical_hash(f))
+            )
+            if isinstance(outcome, FileUnavailable):
+                unavailable.add(fid)
+                continue
             fp_file = {
                 "fp": FP_FILE,
-                "sha256": evidence.sha256,
+                "sha256": outcome.sha256,
                 "name": f.get("name", ""),
                 "mimetype": f.get("mimetype", ""),
             }
-            file_derived = Derived(
-                source_item_id=file_item_id(ws, f["id"]),
-                item_type=ItemType.FILE,
-                event_kind=None,
-                fingerprint=fp_file,
-                raw_hash=evidence.sha256,
-                evidence=evidence.evidence,
-                json_path="$",
-                parent=None,
-                sent_at=None,
-                change_hints={},
-                in_scope=in_scope,
-                derived={
-                    "file_id": f["id"],
-                    "name": fp_file["name"],
-                    "mimetype": fp_file["mimetype"],
-                    "size": evidence.size,
-                    "sha256": evidence.sha256,
-                },
+            emit(
+                Derived(
+                    source_item_id=file_item_id(ws, fid),
+                    item_type=ItemType.FILE,
+                    event_kind=None,
+                    fingerprint=fp_file,
+                    raw_hash=outcome.sha256,
+                    evidence=outcome.evidence,
+                    json_path="$",
+                    parent=None,
+                    sent_at=None,
+                    change_hints={},
+                    in_scope=in_scope,
+                    derived={
+                        "file_id": fid,
+                        "name": fp_file["name"],
+                        "mimetype": fp_file["mimetype"],
+                        "size": outcome.size,
+                        "sha256": outcome.sha256,
+                    },
+                )
             )
-            emit(file_derived)
-            file_pairs.append([f["id"], file_derived.content_hash])
 
         thread_ts = raw.get("thread_ts")
         author = raw.get("user") or raw.get("bot_id")
@@ -316,7 +337,7 @@ def normalize_messages_page(
             "subtype": raw.get("subtype"),
             "thread_root": thread_ts if thread_ts and thread_ts != ts else None,
             "deleted": deleted,
-            "files": sorted(file_pairs),
+            "files": sorted(file_entries),
         }
         hints = _hints(raw)
         text = "" if deleted else raw.get("text", "")
@@ -343,7 +364,7 @@ def normalize_messages_page(
                 "deleted": deleted,
                 "edited_ts": hints.get("edited_ts"),
                 "deleted_ts": hints.get("deleted_ts"),
-                "file_ids": [p[0] for p in sorted(file_pairs)],
+                "file_ids": sorted(e[0] for e in file_entries),
                 "mentions": sorted(set(_MENTION.findall(text))),
             },
         )
@@ -362,6 +383,58 @@ def normalize_messages_page(
             in_scope=in_scope,
         ):
             emit(d)
+
+        # file availability: refused now (once per change), or available again after a refusal
+        for fid, outcome, f_path, f_raw in availability:
+            aid = f"{file_item_id(ws, fid)}#availability"
+            subjects.add(aid)
+            aprior = prior.get(aid, EMPTY_PRIOR)
+            if isinstance(outcome, FileUnavailable):
+                if aprior.observation_status == UNAVAILABLE:
+                    continue
+                fp_a = {
+                    "fp": FP_AVAILABILITY,
+                    "file_id": fid,
+                    "status": UNAVAILABLE,
+                    "reason": outcome.reason,
+                    "occurrence": aprior.observation_count + 1,
+                }
+                emit(
+                    _event(
+                        aid,
+                        EventKind.FILE_UNAVAILABLE,
+                        fp_a,
+                        (mid, message.content_hash),
+                        page_ref,
+                        f_path,
+                        f_raw,
+                        sent_at,
+                        in_scope,
+                        {},
+                    )
+                )
+            elif aprior.observation_status == UNAVAILABLE:
+                fp_a = {
+                    "fp": FP_AVAILABILITY,
+                    "file_id": fid,
+                    "status": AVAILABLE,
+                    "reason": None,
+                    "occurrence": aprior.observation_count + 1,
+                }
+                emit(
+                    _event(
+                        aid,
+                        EventKind.FILE_BECAME_AVAILABLE,
+                        fp_a,
+                        (mid, message.content_hash),
+                        page_ref,
+                        f_path,
+                        f_raw,
+                        sent_at,
+                        in_scope,
+                        {},
+                    )
+                )
 
         # observed again after having been reported as no longer observed
         obs_id = f"{mid}#observation"
@@ -452,7 +525,9 @@ def normalize_messages_page(
                 )
             )
 
-    return PageResult(tuple(items), frozenset(observed), frozenset(subjects))
+    return PageResult(
+        tuple(items), frozenset(observed), frozenset(subjects), frozenset(unavailable)
+    )
 
 
 # ------------------------------------------------------------------ directory
@@ -557,10 +632,95 @@ def message_page_subjects(page: bytes, *, ctx: NormalizeContext) -> frozenset[st
     for raw in _parse(page, "messages"):
         mid = message_id(ctx.workspace_id, ctx.conversation_id, str(raw.get("ts")))
         out |= {mid, f"{mid}#reactions", f"{mid}#observation"}
+        out |= {
+            f"{file_item_id(ctx.workspace_id, f['id'])}#availability"
+            for f in raw.get("files") or []
+        }
     return frozenset(out)
 
 
 def directory_page_subjects(page: bytes, *, ctx: NormalizeContext) -> frozenset[str]:
     return frozenset(
         profile_id(ctx.workspace_id, str(m.get("id"))) for m in _parse(page, "members")
+    )
+
+
+# ------------------------------------------------------------------ conversation access
+def access_subject(workspace: str, conversation_id: str) -> str:
+    return f"{workspace}/{conversation_id}#access"
+
+
+def access_lost(
+    *,
+    ctx: NormalizeContext,
+    reason: str,
+    response: bytes,
+    response_ref: EvidenceRef,
+    prior: Mapping[str, PriorState],
+) -> tuple[Derived, ...]:
+    """ONE conversation-level observation when a whole conversation becomes inaccessible. Per-message
+    absence detection is suppressed for it (the pipeline never finalizes an inaccessible unit)."""
+    if ctx.conversation_id is None:
+        raise NormalizationError("access observations need a conversation")
+    sid = access_subject(ctx.workspace_id, ctx.conversation_id)
+    aprior = prior.get(sid, EMPTY_PRIOR)
+    if aprior.observation_status == ACCESS_LOST:
+        return ()
+    try:
+        doc = json.loads(response)
+    except ValueError as exc:
+        raise NormalizationError("access-loss response is not JSON") from exc
+    fp = {
+        "fp": FP_ACCESS,
+        "conversation": ctx.conversation_id,
+        "status": ACCESS_LOST,
+        "reason": reason,
+        "occurrence": aprior.observation_count + 1,
+    }
+    return (
+        _event(
+            sid,
+            EventKind.ACCESS_LOST,
+            fp,
+            None,
+            response_ref,
+            "$",
+            canonical_hash(doc),
+            None,
+            True,
+            {},
+        ),
+    )
+
+
+def access_restored(
+    *, ctx: NormalizeContext, page: bytes, page_ref: EvidenceRef, prior: Mapping[str, PriorState]
+) -> tuple[Derived, ...]:
+    """The conversation answers again after an access loss: one observation (first page as evidence)."""
+    if ctx.conversation_id is None:
+        raise NormalizationError("access observations need a conversation")
+    sid = access_subject(ctx.workspace_id, ctx.conversation_id)
+    aprior = prior.get(sid, EMPTY_PRIOR)
+    if aprior.observation_status != ACCESS_LOST:
+        return ()
+    fp = {
+        "fp": FP_ACCESS,
+        "conversation": ctx.conversation_id,
+        "status": ACCESS_RESTORED,
+        "reason": None,
+        "occurrence": aprior.observation_count + 1,
+    }
+    return (
+        _event(
+            sid,
+            EventKind.ACCESS_RESTORED,
+            fp,
+            None,
+            page_ref,
+            "$.messages",
+            canonical_hash(_parse(page, "messages")),
+            None,
+            True,
+            {},
+        ),
     )

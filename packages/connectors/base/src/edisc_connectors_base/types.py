@@ -89,3 +89,33 @@ class RawBatch:
     next_cursor: Cursor | None  # None when the unit is exhausted
     kind: BatchKind
     request: Mapping[str, str]  # method + parameters, for provenance (never secrets)
+
+
+class FileUnavailableReason(StrEnum):
+    DELETED = "deleted"
+    EXTERNAL_OR_HIDDEN = "external_or_hidden"
+    EXPIRED_URL = "expired_url"
+    PERMISSION = "permission"
+
+
+class AccessLossReason(StrEnum):
+    NOT_IN_CHANNEL = "not_in_channel"
+    CHANNEL_NOT_FOUND = "channel_not_found"
+    ARCHIVED = "archived"
+    ACCESS_REVOKED = "access_revoked"
+
+
+class FileUnavailableError(Exception):
+    """The source refused a file download for a known reason. Not a crash: recorded as a gap."""
+
+    def __init__(self, file_ref: str, reason: FileUnavailableReason, response: bytes) -> None:
+        super().__init__(f"file {file_ref} unavailable: {reason.value}")
+        self.file_ref, self.reason, self.response = file_ref, reason, response
+
+
+class ConversationInaccessibleError(Exception):
+    """The whole conversation is no longer accessible (one observation, never a per-message flood)."""
+
+    def __init__(self, conversation_id: str, reason: AccessLossReason, response: bytes) -> None:
+        super().__init__(f"conversation {conversation_id} inaccessible: {reason.value}")
+        self.conversation_id, self.reason, self.response = conversation_id, reason, response

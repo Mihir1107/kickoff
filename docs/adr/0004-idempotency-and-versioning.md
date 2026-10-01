@@ -17,7 +17,7 @@ fetches (reply counters, presigned URLs, profile embeds), so hashing raw bytes w
 
 | item_type | Version-defining fields (in fingerprint) | Explicitly excluded |
 |---|---|---|
-| message | author external user id (not name); body text; rich body (blocks/HTML) as delivered; message type/subtype; thread root id; parent id; **deleted state**; sorted list of attached file source ids with each file's content_hash | reactions; reply counts/reply users/latest reply; read receipts; pins/stars/bookmarks; presigned/expiring URLs; **author display name, avatar, profile embeds**; **link unfurls/previews**; **source change markers (etag, `edited.ts`, `lastModifiedDateTime`, deletion ts)** |
+| message | author external user id (not name); body text; rich body (blocks/HTML) as delivered; message type/subtype; thread root id; parent id; **deleted state**; sorted list of attached files as `[id, name, mimetype]` shown in the message (**not** their bytes; see below) | reactions; reply counts/reply users/latest reply; read receipts; pins/stars/bookmarks; presigned/expiring URLs; **author display name, avatar, profile embeds**; **link unfurls/previews**; **source change markers (etag, `edited.ts`, `lastModifiedDateTime`, deletion ts)** |
 | file | SHA-256 of file bytes; file name; mime type | download URLs, thumbnails, preview renditions, etag/lastModified |
 | event: reaction snapshot | parent message source id; sorted list of `(reaction name, sorted user ids)` | counts (derived) |
 | event: change observation | parent message source id; hint name; old hint value; new hint value | observation time (metadata) |
@@ -74,9 +74,30 @@ collected file evidence to derived records. It does no I/O, uses no clock, and i
 
 Fingerprints carry an `fp` tag (e.g. `slack.message/1`); changing a definition changes the tag.
 
-**Files are inputs.** The pipeline downloads referenced files first. Each file's content hash
-(`slack.file/1`: bytes SHA-256, name, mime type) goes into the message fingerprint. A missing file
-raises; it is never guessed.
+**Files (decided 2026-10-01: option B; message fingerprint `slack.message/2`).**
+- The message fingerprint carries attached files as `[id, name, mimetype]` as shown in the message,
+  never their bytes.
+- File bytes are versioned on the file item (`slack.file/1`: bytes SHA-256, name, mime type): new bytes
+  under the same id make a new FILE version, not a message version.
+- The pipeline attempts every referenced file before normalizing a page:
+  - a file it has not attempted raises (a pipeline bug);
+  - a file the source refuses (deleted, external/hidden, expired URL, permission) is a
+    `file_unavailable` event `{file_id, status, reason, occurrence}` on `{workspace}/file/{id}#availability`.
+    It is recorded, never raised, and the unit is marked as having a gap;
+  - if the file is collected later, a `file_became_available` event follows. Availability **never**
+    creates a message version.
+- **Trade-offs considered:**
+  - (A) a placeholder in the fingerprint replaced on availability would create versions that are not
+    authored changes;
+  - (A, frozen) would never reference the bytes from the message version;
+  - with (B), a byte change under the same file id versions the file item instead of the message. The
+    link is the message's file ids.
+
+**Conversation access.**
+- When a whole conversation becomes inaccessible (not_in_channel, channel_not_found, archived, access
+  revoked), one `access_lost` event is recorded on `{workspace}/{conversation}#access`, with the
+  source's error response as evidence. Per-message absence detection is suppressed for it.
+- `access_restored` follows when the conversation answers again.
 
 **Profile embeds** (`user_profile` in messages) show what the message displayed about its author.
 They become `#profile-embed` identity snapshots, a set of observed states with no latest/revert

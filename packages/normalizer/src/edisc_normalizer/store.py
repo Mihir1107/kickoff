@@ -73,7 +73,7 @@ async def load_prior(
                     else:
                         hints[d["hint"]] = d["new"]
         status, count = None, 0
-        if sid.endswith("#observation"):
+        if sid.endswith(("#observation", "#availability", "#access")):
             count = len(versions)
             status = (latest.derived or {}).get("status") if latest else None
         out[sid] = PriorState(

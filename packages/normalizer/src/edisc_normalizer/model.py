@@ -38,6 +38,14 @@ class FileEvidence:
 
 
 @dataclass(frozen=True)
+class FileUnavailable:
+    """The source refused a referenced file (reason as reported). Recorded, never raised."""
+
+    file_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class NormalizeContext:
     tenant_id: uuid.UUID
     source: str  # connector source, e.g. "dummy", "slack"
@@ -94,6 +102,7 @@ class PageResult:
     items: tuple[Derived, ...]
     observed_messages: frozenset[str]  # message source_item_ids of THIS unit seen on the page
     subjects: frozenset[str]  # every subject whose prior state was consulted
+    unavailable_files: frozenset[str] = frozenset()  # file ids the source refused: a unit gap
 
 
 @dataclass(frozen=True)

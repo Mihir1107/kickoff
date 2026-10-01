@@ -41,6 +41,10 @@ class EventKind(StrEnum):
     CHANGE_OBSERVATION = "change_observation"
     NO_LONGER_OBSERVED = "no_longer_observed"  # absence is never deletion
     OBSERVED_AGAIN = "observed_again"
+    FILE_UNAVAILABLE = "file_unavailable"  # the source refused the bytes (reason recorded)
+    FILE_BECAME_AVAILABLE = "file_became_available"
+    ACCESS_LOST = "access_lost"  # a whole conversation became inaccessible
+    ACCESS_RESTORED = "access_restored"
 
 
 class ScopeType(StrEnum):

@@ -30,11 +30,15 @@ from edisc_connector_dummy.spec import CountMode, DatasetSpec
 from edisc_connectors_base.protocol import Limiter
 from edisc_connectors_base.ratelimit import BucketKey, SourceThrottledError, call_with_limits
 from edisc_connectors_base.types import (
+    AccessLossReason,
     BatchKind,
     CollectionScope,
     Connection,
     ConnectionInfo,
+    ConversationInaccessibleError,
     Cursor,
+    FileUnavailableError,
+    FileUnavailableReason,
     RawBatch,
     WorkUnit,
 )
@@ -151,8 +155,34 @@ class DummyConnector:
                 if start < date_to and end > date_from:
                     yield WorkUnit(conv.id, ds.day(d))
 
+    def _check_access(self, ds: Dataset, epoch: int, conversation_id: str) -> None:
+        convs = ds.conversations()
+        index = next(i for i, c in enumerate(convs) if c.id == conversation_id)
+        start = ds.spec.failures.inaccessible_from_epoch.get(index)
+        if start is not None and epoch >= start:
+            reason = list(AccessLossReason)[index % len(AccessLossReason)]
+            body = json.dumps({"ok": False, "error": reason.value}, separators=(",", ":")).encode()
+            raise ConversationInaccessibleError(conversation_id, reason, body)
+
+    def file_unavailable_reason(
+        self, ds: Dataset, epoch: int, file_ref: str
+    ) -> FileUnavailableReason | None:
+        f = ds.spec.failures
+        if (
+            f.file_unavailable_rate <= 0
+            or unit(ds.seed, "funavail", f.seed, file_ref) >= f.file_unavailable_rate
+        ):
+            return None
+        reason = list(FileUnavailableReason)[
+            h64(ds.seed, "freason", f.seed, file_ref) % len(FileUnavailableReason)
+        ]
+        if reason is FileUnavailableReason.EXPIRED_URL and epoch >= 1:
+            return None  # transient: a fresh URL works in the next collection
+        return reason
+
     async def expected_count(self, conn: Connection, unit_: WorkUnit) -> int | None:
         ds, epoch = self.dataset(conn)
+        self._check_access(ds, epoch, unit_.conversation_id)
         if ds.spec.count_mode is CountMode.UNAVAILABLE:
             return None
         d = ds.day_index(unit_.day)
@@ -223,6 +253,7 @@ class DummyConnector:
         self, conn: Connection, unit_: WorkUnit, cursor: Cursor | None, *, scope: CollectionScope
     ) -> AsyncIterator[RawBatch]:
         ds, epoch = self.dataset(conn)
+        self._check_access(ds, epoch, unit_.conversation_id)
         batches = self.plan(conn, unit_, scope)
         index = _decode(cursor)
         if index > len(batches):
@@ -289,7 +320,17 @@ class DummyConnector:
             index += 1
 
     async def open_file(self, conn: Connection, file_ref: str) -> AsyncIterator[bytes]:
-        ds, _ = self.dataset(conn)
+        ds, epoch = self.dataset(conn)
+        reason = self.file_unavailable_reason(ds, epoch, file_ref)
+        if reason is not None:
+            error = {
+                "deleted": "file_deleted",
+                "external_or_hidden": "file_not_found",
+                "expired_url": "url_expired",
+                "permission": "access_denied",
+            }[reason.value]
+            body = json.dumps({"ok": False, "error": error}, separators=(",", ":")).encode()
+            raise FileUnavailableError(file_ref, reason, body)
         data: bytes = await self._request(
             conn, ds, "file", f"file|{file_ref}", lambda: ds.file_bytes(file_ref)
         )

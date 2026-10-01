@@ -17,11 +17,14 @@ from edisc_normalizer.model import (
     NORMALIZER_VERSION,
     EvidenceRef,
     FileEvidence,
+    FileUnavailable,
     NormalizeContext,
     PriorState,
 )
 from edisc_normalizer.slack import (
     MissingFileEvidenceError,
+    access_lost,
+    access_restored,
     finalize_unit,
     message_id,
     normalize_directory_page,
@@ -257,23 +260,95 @@ def test_absence_is_never_deletion() -> None:
     assert again.derived["occurrence"] == 2
 
 
-def test_file_hash_is_required_and_part_of_the_message_version() -> None:
-    with_file = page(
-        msg(files=[{"id": "F1", "name": "a.pdf", "mimetype": "application/pdf", "size": 3}])
-    )
+FILE_PAGE = page(
+    msg(files=[{"id": "F1", "name": "a.pdf", "mimetype": "application/pdf", "size": 3}])
+)
+
+
+def _fe(digest: str) -> dict[str, FileEvidence | FileUnavailable]:
+    return {"F1": FileEvidence("F1", digest, 3, EvidenceRef(uuid.UUID(int=2), "t/x/files/F1"))}
+
+
+def test_every_referenced_file_must_be_attempted_first() -> None:
     with pytest.raises(MissingFileEvidenceError):
-        norm(with_file)
+        norm(FILE_PAGE)
 
-    def fe(digest: str) -> dict[str, FileEvidence]:
-        return {"F1": FileEvidence("F1", digest, 3, EvidenceRef(uuid.UUID(int=2), "t/x/files/F1"))}
 
-    one = norm(with_file, files=fe("a" * 64))
-    two = norm(with_file, files=fe("b" * 64))
+def test_file_bytes_version_the_file_item_not_the_message() -> None:
+    """ADR 0004 option B: the message fingerprint carries file id/name/type, never bytes."""
+    one, two = norm(FILE_PAGE, files=_fe("a" * 64)), norm(FILE_PAGE, files=_fe("b" * 64))
     assert (
-        only(one, ItemType.MESSAGE)[0].content_hash != only(two, ItemType.MESSAGE)[0].content_hash
+        only(one, ItemType.MESSAGE)[0].content_hash == only(two, ItemType.MESSAGE)[0].content_hash
     )
-    (f,) = only(one, ItemType.FILE)
-    assert (f.raw_hash, f.json_path, f.evidence.storage_key) == ("a" * 64, "$", "t/x/files/F1")
+    (f1,), (f2,) = only(one, ItemType.FILE), only(two, ItemType.FILE)
+    assert f1.source_item_id == f2.source_item_id == "T0DUMMY01/file/F1"
+    assert f1.content_hash != f2.content_hash  # new bytes under the same id = a new FILE version
+    assert (f1.raw_hash, f1.json_path, f1.evidence.storage_key) == ("a" * 64, "$", "t/x/files/F1")
+    assert only(one, ItemType.MESSAGE)[0].fingerprint["files"] == [
+        ["F1", "a.pdf", "application/pdf"]
+    ]
+
+
+def test_unavailable_file_is_recorded_not_raised_and_later_availability_is_observed() -> None:
+    gone = norm(FILE_PAGE, files={"F1": FileUnavailable("F1", "permission")})
+    assert gone.unavailable_files == {"F1"}
+    assert not only(gone, ItemType.FILE)
+    (event,) = only(gone, ItemType.EVENT, EventKind.FILE_UNAVAILABLE)
+    assert (event.source_item_id, event.derived["reason"], event.derived["status"]) == (
+        "T0DUMMY01/file/F1#availability",
+        "permission",
+        "unavailable",
+    )
+    assert event.json_path == "$.messages[0].files[0]"
+    message_gone = only(gone, ItemType.MESSAGE)[0]
+    message_back = only(norm(FILE_PAGE, files=_fe("a" * 64)), ItemType.MESSAGE)[0]
+    assert (
+        message_gone.content_hash == message_back.content_hash
+    )  # availability never versions the message
+
+    unavailable_prior = {
+        "T0DUMMY01/file/F1#availability": PriorState(
+            "x", frozenset({"x"}), observation_status="unavailable", observation_count=1
+        )
+    }
+    assert not only(
+        norm(FILE_PAGE, unavailable_prior, files={"F1": FileUnavailable("F1", "permission")}),
+        ItemType.EVENT,
+        EventKind.FILE_UNAVAILABLE,
+    )  # still unavailable: nothing new
+    back = norm(FILE_PAGE, unavailable_prior, files=_fe("a" * 64))
+    (avail,) = only(back, ItemType.EVENT, EventKind.FILE_BECAME_AVAILABLE)
+    assert (avail.derived["status"], avail.derived["occurrence"]) == ("available", 2)
+    assert only(back, ItemType.FILE)
+
+
+def test_conversation_access_lost_is_one_observation_and_restoration_another() -> None:
+    body = b'{"ok":false,"error":"not_in_channel"}'
+    (lost,) = access_lost(
+        ctx=ctx(), reason="not_in_channel", response=body, response_ref=REF, prior={}
+    )
+    assert (lost.source_item_id, lost.derived["status"], lost.derived["reason"]) == (
+        "T0DUMMY01/C1#access",
+        "access_lost",
+        "not_in_channel",
+    )
+    lost_prior = {
+        "T0DUMMY01/C1#access": PriorState(
+            lost.content_hash,
+            frozenset({lost.content_hash}),
+            observation_status="access_lost",
+            observation_count=1,
+        )
+    }
+    assert (
+        access_lost(
+            ctx=ctx(), reason="not_in_channel", response=body, response_ref=REF, prior=lost_prior
+        )
+        == ()
+    )
+    (restored,) = access_restored(ctx=ctx(), page=page(msg()), page_ref=REF, prior=lost_prior)
+    assert restored.derived["status"] == "access_restored"
+    assert access_restored(ctx=ctx(), page=page(msg()), page_ref=REF, prior={}) == ()
 
 
 async def test_pure_and_deterministic_on_realistic_pages() -> None:
