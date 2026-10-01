@@ -7,9 +7,10 @@ from fastapi import FastAPI
 
 
 def register(app: FastAPI) -> None:
-    from edisc_api.routes import admin, connections, hierarchy, me
+    from edisc_api.routes import admin, connections, hierarchy, jobs, me
 
     app.include_router(me.router)
     app.include_router(hierarchy.router)
     app.include_router(admin.router)
     app.include_router(connections.router)
+    app.include_router(jobs.router)

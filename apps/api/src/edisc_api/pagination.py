@@ -51,3 +51,21 @@ def page_of[T](rows: list[T], limit: int, key: Callable[[T], uuid.UUID]) -> Page
     if len(rows) > limit:
         return Page[T](items=rows[:limit], next_cursor=encode(key(rows[limit - 1])))
     return Page[T](items=rows, next_cursor=None)
+
+
+def encode_text(last: str) -> str:
+    return base64.urlsafe_b64encode(json.dumps({"after_key": last}).encode()).decode().rstrip("=")
+
+
+def decode_text(cursor: str | None) -> str | None:
+    """Keyset cursor over a text key (e.g. unit keys)."""
+    if not cursor:
+        return None
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        value = json.loads(base64.urlsafe_b64decode(padded))["after_key"]
+    except (ValueError, KeyError, TypeError, binascii.Error) as exc:
+        raise unprocessable("invalid cursor") from exc
+    if not isinstance(value, str):
+        raise unprocessable("invalid cursor")
+    return value

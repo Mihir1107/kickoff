@@ -223,6 +223,12 @@ class CollectionJobWorkflow:
         iterations = 0
         while True:
             try:
+                # Patch "keep-early-wake" (M13): clear the wake flag BEFORE reading the DB, so a signal
+                # that arrives while this iteration runs wakes the next wait at once. Old runs cleared it
+                # just before waiting and could sleep a full poll interval after the last child finished.
+                early_wake = workflow.patched("keep-early-wake")
+                if early_wake:
+                    self._wake = False
                 if self._cancel and not stop_sent:
                     await _control(
                         cfg, "request_stop", StopRequest(job, "cancel", "cancel requested"), bool
@@ -264,7 +270,8 @@ class CollectionJobWorkflow:
                 timeout = cfg.job_poll_seconds
                 if running and ov.next_retry_in is not None:
                     timeout = max(1.0, min(timeout, ov.next_retry_in + 1))
-                self._wake = False
+                if not early_wake:
+                    self._wake = False
                 try:
                     await workflow.wait_condition(
                         lambda: self._wake, timeout=timedelta(seconds=timeout)

@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
@@ -217,71 +217,111 @@ class Pipeline:
     ) -> list[uuid.UUID]:
         """Create the job (idempotent for a given ``job_id``) with its scopes (one or more, ADR 0005
         amendment) and record ``job_started``. Returns the scope ids in the given order."""
-        if not scopes:
-            raise NoScopeError("a collection job needs at least one scope")
-        scope_ids = [new_id() for _ in scopes]
         async with tenant_tx(self.sessions, tenant_id) as s:
-            exists = (
-                await s.execute(text("SELECT 1 FROM collection_jobs WHERE id = :j"), {"j": job_id})
-            ).first()
-            if exists:
-                return [sid for sid, _ in await self._scope_rows(tenant_id, job_id)]
-            await s.execute(
-                text(
-                    "INSERT INTO collection_jobs (id, tenant_id, matter_id, connection_id, status, connector_version,"
-                    " requested_by, started_at) VALUES (:j, :t, :m, :c, 'running', :v, :by, now())"
-                ),
-                {
-                    "j": job_id,
-                    "t": tenant_id,
-                    "m": matter_id,
-                    "c": connection_id,
-                    "v": self.connector.version,
-                    "by": requested_by,
-                },
-            )
-            for scope_id, scope in zip(scope_ids, scopes, strict=True):
-                await s.execute(
-                    text(
-                        "INSERT INTO collection_scopes (id, tenant_id, job_id, scope_type, external_id, date_from,"
-                        " date_to, thread_parent_policy) VALUES (:i, :t, :j, :st, :e, :f, :to, :p)"
-                    ),
-                    {
-                        "i": scope_id,
-                        "t": tenant_id,
-                        "j": job_id,
-                        "st": scope.scope_type.value,
-                        "e": scope.external_id,
-                        "f": scope.date_from,
-                        "to": scope.date_to,
-                        "p": scope.thread_parent_policy.value,
-                    },
-                )
-            await append(
+            scope_ids = await self.create_job(
                 s,
                 tenant_id=tenant_id,
-                stream_id=job_id,
                 job_id=job_id,
-                event_type="job_started",
-                actor=requested_by,
-                payload={
-                    "connector": self.connector.source,
-                    "connector_version": self.connector.version,
-                    "scopes": [
-                        {
-                            "type": sc.scope_type.value,
-                            "id": sc.external_id,
-                            "from": sc.date_from.isoformat(),
-                            "to": sc.date_to.isoformat(),
-                            "thread_parent_policy": sc.thread_parent_policy.value,
-                        }
-                        for sc in scopes
-                    ],
-                },
-                anchor_every=self.anchor_every,
+                matter_id=matter_id,
+                connection_id=connection_id,
+                scopes=scopes,
+                requested_by=requested_by,
             )
         await anchor_if_due(
             self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=job_id
+        )
+        return scope_ids
+
+    async def create_job(
+        self,
+        s: AsyncSession,
+        *,
+        tenant_id: uuid.UUID,
+        job_id: uuid.UUID,
+        matter_id: uuid.UUID,
+        connection_id: uuid.UUID,
+        scopes: Sequence[CollectionScope],
+        requested_by: str,
+        workspace_id: uuid.UUID | None = None,
+        context: Mapping[str, Any] | None = None,
+    ) -> list[uuid.UUID]:
+        """``start_job`` inside the CALLER's tenant transaction (the API commits it together with its
+        idempotency record); the caller anchors the job stream after commit. ``context`` (request id,
+        idempotency key) is added to the ``job_started`` custody payload."""
+        if not scopes:
+            raise NoScopeError("a collection job needs at least one scope")
+        exists = (
+            await s.execute(text("SELECT 1 FROM collection_jobs WHERE id = :j"), {"j": job_id})
+        ).first()
+        if exists:
+            rows: Iterable[uuid.UUID] = (
+                await s.execute(
+                    text(
+                        "SELECT id FROM collection_scopes WHERE job_id = :j ORDER BY date_from, external_id, id"
+                    ),
+                    {"j": job_id},
+                )
+            ).scalars()
+            return list(rows)
+        scope_ids = [new_id() for _ in scopes]
+        await s.execute(
+            text(
+                "INSERT INTO collection_jobs (id, tenant_id, matter_id, connection_id, workspace_id, status,"
+                " connector_version, requested_by, started_at)"
+                " VALUES (:j, :t, :m, :c, :w, 'running', :v, :by, now())"
+            ),
+            {
+                "j": job_id,
+                "t": tenant_id,
+                "m": matter_id,
+                "c": connection_id,
+                "w": workspace_id,
+                "v": self.connector.version,
+                "by": requested_by,
+            },
+        )
+        for scope_id, scope in zip(scope_ids, scopes, strict=True):
+            await s.execute(
+                text(
+                    "INSERT INTO collection_scopes (id, tenant_id, job_id, scope_type, external_id, date_from,"
+                    " date_to, thread_parent_policy) VALUES (:i, :t, :j, :st, :e, :f, :to, :p)"
+                ),
+                {
+                    "i": scope_id,
+                    "t": tenant_id,
+                    "j": job_id,
+                    "st": scope.scope_type.value,
+                    "e": scope.external_id,
+                    "f": scope.date_from,
+                    "to": scope.date_to,
+                    "p": scope.thread_parent_policy.value,
+                },
+            )
+        await append(
+            s,
+            tenant_id=tenant_id,
+            stream_id=job_id,
+            job_id=job_id,
+            event_type="job_started",
+            actor=requested_by,
+            payload={
+                "connector": self.connector.source,
+                "connector_version": self.connector.version,
+                "connection_id": str(connection_id),
+                "scopes": [
+                    {
+                        "type": sc.scope_type.value,
+                        "id": sc.external_id,
+                        "from": sc.date_from.isoformat(),
+                        "to": sc.date_to.isoformat(),
+                        "thread_parent_policy": sc.thread_parent_policy.value,
+                    }
+                    for sc in scopes
+                ],
+                **({"workspace_id": str(workspace_id)} if workspace_id else {}),
+                **dict(context or {}),
+            },
+            anchor_every=self.anchor_every,
         )
         return scope_ids
 

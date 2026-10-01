@@ -53,6 +53,14 @@ def api_settings(settings: Settings, tmp_path_factory: pytest.TempPathFactory) -
     return settings.model_copy(
         update={
             "api_dev_idp": True,
+            # jobs started through the API take their RunConfig from settings. The poll stays at the
+            # production 120 s on purpose: every job test then fails (times out) if a finished child's
+            # signal is lost and the parent waits for the poll ("keep-early-wake" patch regression)
+            "job_poll_seconds": 120,
+            "activity_retry_initial_seconds": 0.1,
+            "activity_retry_max_seconds": 0.5,
+            "activity_max_attempts": 4,
+            "activity_heartbeat_timeout_seconds": 10,
             "local_kms_dir": Path(tmp_path_factory.mktemp("api-kms")),
         }
     )

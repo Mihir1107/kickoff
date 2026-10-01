@@ -224,3 +224,8 @@ Each sweeper is a Temporal Schedule with `overlap=SKIP`, running a one-activity 
 - Acceptance: `tests/integration/acceptance/test_resume_50k.py` drives `scripts/resume_soak.py`: 50,000
   messages (10 x 10 x 500, page 200), 3 `python -m edisc_worker` processes, 4 random SIGKILLs plus one
   kill-all/restart, oracle-exact. The 1M manual run is recorded in `docs/runs/`.
+
+## Active workflow patches
+| Patch id | Since | What | Remove when |
+|---|---|---|---|
+| `keep-early-wake` | 2026-10-01 (M13.6) | `CollectionJobWorkflow` clears its wake flag at the top of each iteration instead of just before waiting. A `unit_finished` signal that arrived while the parent was starting children was otherwise lost, and the job sat for a full poll interval (120 s). Found by the API job tests, which keep the production poll so they time out if it regresses. | `scripts/temporal_patch_check.py --deployed-at <deploy time>` exits 0; then `deprecate_patch`, and later remove the old branch and the pre-patch goldens (`job-*-[0-9].json` without the `-early-wake` suffix) |

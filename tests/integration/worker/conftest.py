@@ -41,6 +41,8 @@ Sessions = async_sessionmaker[AsyncSession]
 WORKFLOWS = [CollectionJobWorkflow, CollectUnitWorkflow]
 GOLDEN = Path(__file__).resolve().parents[2] / "golden" / "temporal"
 RECORD = os.environ.get("EDISC_RECORD_HISTORIES") == "1"
+# a new golden generation after a patched workflow change keeps the old ones (ADR 0012 section 6)
+RECORD_SUFFIX = os.environ.get("EDISC_RECORD_SUFFIX", "")
 
 # fast settings: small pages per activity and low continue-as-new thresholds so every test exercises
 # continue-as-new of both workflows; short polls and retries
@@ -219,7 +221,9 @@ async def replay_and_record(
         picked = _pick(histories)
         for i, h in enumerate(picked):
             doc = {"workflow_id": h.workflow_id, "history": json.loads(h.to_json())}
-            (GOLDEN / f"{name}-{i}.json").write_text(json.dumps(doc, indent=1, sort_keys=True))
+            (GOLDEN / f"{name}{RECORD_SUFFIX}-{i}.json").write_text(
+                json.dumps(doc, indent=1, sort_keys=True)
+            )
     return histories
 
 
