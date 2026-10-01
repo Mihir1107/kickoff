@@ -34,6 +34,9 @@ EDISC_ENV_FILE=.env.test uv run python scripts/resume_soak.py --messages 1000000
 
 Aborted by hand after about 10 minutes (8 of 101 units done, 136,103 job links, roughly 110,000 messages):
 
+- **Correction (same day):** the 26 KB/message below was wrong (those volumes also held the 50k run, the
+  integration tests and up to 1 GB of WAL). The clean figure is ~6.9 KB/message at rest
+  (docs/runs/2026-10-01-storage-throughput-breakdown.md).
 - the compose volumes grew about 2.8 GB for those ~110k messages (**~26 KB per message**: items 331 MB,
   derivations 161 MB, job links 62 MB at that point, plus MinIO page and file evidence), so 1M messages
   needs about 26 GB for the volumes alone;
