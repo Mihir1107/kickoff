@@ -23,7 +23,7 @@ The plan of record is in `docs/ARCHITECTURE.md` and `docs/adr/`. Read them befor
 - `packages/*`: libraries (`edisc_core`, `edisc_db`, `edisc_evidence`, `edisc_custody`, `edisc_connectors_base`,
   `edisc_connector_*`, `edisc_normalizer`, `edisc_renderers`). src layout, one uv workspace member each.
 - `apps/api` (`edisc_api`): FastAPI. `workers/collection` (`edisc_worker`): Temporal workers, one task queue per source.
-- `infra/docker-compose.yml`: Postgres, Redis, MinIO (object lock), Temporal + UI, Elasticsearch. Pinned by tag + digest.
+- `infra/docker-compose.yml`: Postgres, Redis, MinIO (object lock), Temporal + UI, Elasticsearch (optional `search` profile, off by default). Pinned by tag + digest.
   MinIO is the `pgsty/minio` community rebuild (upstream stopped publishing images). Temporal UI: http://localhost:8080.
 - `tests/unit` (no services), `tests/integration` (real compose services, **never mock DB, S3 or Temporal**), `tests/golden`.
 
@@ -32,6 +32,7 @@ The plan of record is in `docs/ARCHITECTURE.md` and `docs/adr/`. Read them befor
 make sync               # uv sync --all-packages
 make hooks              # once per clone: pre-commit runs ruff lint, ruff format --check, mypy on staged .py
 make up / down          # infra up (waits for health, runs idempotent init jobs) / stop
+make up-search          # optional Elasticsearch (compose profile "search"; nothing uses it yet)
 make up-ci              # subset CI uses (no UI, no Elasticsearch)
 make nuke               # down + delete volumes; refuses unless EDISC_ENV=local|test|ci
 make migrate            # bootstrap roles/schema as superuser (idempotent), then alembic upgrade head as owner

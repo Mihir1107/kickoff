@@ -1,8 +1,10 @@
 SHELL := /bin/bash
 COMPOSE := docker compose -f infra/docker-compose.yml --env-file .env
+# down/nuke/ps also cover optional profiles so nothing is left running or orphaned
+COMPOSE_ALL := $(COMPOSE) --profile search
 TYPED_SRC := packages apps workers
 # Long-running services. One-shot init jobs run separately because `up --wait` treats exited containers as failures.
-SERVICES := postgres redis minio temporal temporal-ui elasticsearch
+SERVICES := postgres redis minio temporal temporal-ui
 CI_SERVICES := postgres redis minio temporal
 INIT_JOBS := minio-init temporal-namespace
 # Refuse to start infra or tests when the disk is nearly full (a full disk turns the Docker VM read-only).
@@ -16,7 +18,7 @@ TEST_LOGS := test-stack-logs.txt
 TESTS ?= tests/integration
 
 .DEFAULT_GOAL := help
-.PHONY: help hooks sync disk-guard test-env-up test-env-down up up-ci down nuke ps logs migrate lint fmt typecheck test test-integration test-all worker api check
+.PHONY: help hooks sync disk-guard test-env-up test-env-down up up-search up-ci down nuke ps logs migrate lint fmt typecheck test test-integration test-all worker api check
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -54,22 +56,25 @@ up: disk-guard .env ## Start all local infra, wait until healthy, run init jobs 
 	$(COMPOSE) up -d --wait $(SERVICES)
 	@for job in $(INIT_JOBS); do $(COMPOSE) run --rm --no-deps $$job || exit 1; done
 
+up-search: disk-guard .env ## Optional: start Elasticsearch (profile "search"; nothing uses it yet)
+	$(COMPOSE) --profile search up -d --wait elasticsearch
+
 up-ci: disk-guard .env ## Infra subset (no UI, no Elasticsearch)
 	$(COMPOSE) up -d --wait $(CI_SERVICES)
 	@for job in $(INIT_JOBS); do $(COMPOSE) run --rm --no-deps $$job || exit 1; done
 
 down: ## Stop infra (keeps volumes)
-	$(COMPOSE) down
+	$(COMPOSE_ALL) down
 
 nuke: .env ## Stop infra AND delete volumes. Refuses unless EDISC_ENV is local or ci
 	@env_name=$$(grep -E '^EDISC_ENV=' .env | tail -1 | cut -d= -f2 | tr -d "'"); \
 	if [ "$$env_name" != "local" ] && [ "$$env_name" != "ci" ] && [ "$$env_name" != "test" ]; then \
 	  echo "refusing: make nuke destroys evidence volumes; EDISC_ENV='$$env_name' (need local|ci|test)" >&2; exit 1; \
 	fi
-	$(COMPOSE) down -v
+	$(COMPOSE_ALL) down -v
 
 ps: ## Show infra status
-	$(COMPOSE) ps
+	$(COMPOSE_ALL) ps
 
 logs: ## Tail infra logs
 	$(COMPOSE) logs -f --tail=100
