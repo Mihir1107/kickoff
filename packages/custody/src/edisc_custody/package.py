@@ -2,6 +2,15 @@
 
 Imports only the standard library and pure ``edisc_core`` / ``edisc_custody`` modules, so a third-party
 expert can run ``edisc-verify <dir>`` on an air-gapped machine.
+
+Format ``/2`` (ADR 0014 section 2) adds archives: evidence that is an ENTRY inside a locked export zip.
+A package carries each archive either **embedded** (``objects/<sha256>``) or **referenced** by its
+SHA-256 and size only, for archives too large to ship (the expert passes the file with ``--archive``).
+Either way the archive's SHA-256 and size are checked FIRST; only an archive that matches is opened.
+Then every entry is found by its exact name bytes in the central directory (duplicates rejected), its
+recorded CRC-32 and compressed size are compared with the directory, and it is decompressed under the
+export's limits with local header, CRC-32, size and SHA-256 checked, before item fragments are
+checked against it like any page. Format ``/1`` packages verify as before.
 """
 
 from __future__ import annotations
@@ -9,7 +18,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,8 +27,10 @@ from edisc_core.canonical import canonical_hash
 from edisc_core.idempotency import idempotency_key
 from edisc_core.jsonpath import JsonPathError, resolve
 from edisc_custody.chain import BATCH_EVENT, Anchor, ChainVerifier, EventRecord, VerificationReport
+from edisc_custody.package_archives import ArchiveEntries
 
-PACKAGE_FORMAT = "edisc-custody-package/1"
+PACKAGE_FORMAT = "edisc-custody-package/2"
+SUPPORTED_FORMATS = ("edisc-custody-package/1", PACKAGE_FORMAT)
 FILES = ("events.jsonl", "items.jsonl", "evidence.jsonl", "anchors.jsonl")
 
 
@@ -30,6 +41,8 @@ class PackageReport:
     manifest_sha256: str = ""
     items_checked: int = 0
     objects_checked: int = 0
+    archives_checked: int = 0
+    entries_checked: int = 0
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -42,6 +55,8 @@ class PackageReport:
             "manifest_sha256": self.manifest_sha256,
             "items_checked": self.items_checked,
             "objects_checked": self.objects_checked,
+            "archives_checked": self.archives_checked,
+            "entries_checked": self.entries_checked,
             "errors": self.errors,
             "chain": self.chain.as_dict() if self.chain else None,
         }
@@ -63,13 +78,14 @@ def _lines(path: Path) -> Iterator[dict[str, Any]]:
             yield obj
 
 
-def verify_package(root: Path) -> PackageReport:
-    """Verify an exported package with no database or network access."""
+def verify_package(root: Path, archives: Sequence[Path] = ()) -> PackageReport:
+    """Verify an exported package with no database or network access. ``archives``: files supplied for
+    archives the package references by hash instead of embedding (matched by their SHA-256)."""
     report = PackageReport()
     manifest_bytes = (root / "manifest.json").read_bytes()
     report.manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
     manifest = json.loads(manifest_bytes)
-    if manifest.get("format") != PACKAGE_FORMAT:
+    if manifest.get("format") not in SUPPORTED_FORMATS:
         raise PackageFormatError(f"unsupported package format {manifest.get('format')!r}")
 
     # 1. every file is exactly what the manifest says
@@ -104,6 +120,8 @@ def verify_package(root: Path) -> PackageReport:
     # 3. evidence registry (small): id -> record, and object bytes if included
     evidence: dict[str, dict[str, Any]] = {}
     objects_dir = root / "objects"
+    # archives are checked (hash first) by ArchiveEntries, embedded or supplied: not as plain objects
+    archive_ids = {str(a["evidence_id"]) for a in manifest.get("archives") or []}
     for rec in _lines(root / "evidence.jsonl"):
         evidence[rec["id"]] = rec
         if rec.get("state") == "complete" and not rec.get("version_id"):
@@ -123,6 +141,7 @@ def verify_package(root: Path) -> PackageReport:
             manifest.get("objects_included")
             and rec.get("state") == "complete"
             and rec.get("kind") in ("page", "file")
+            and str(rec["id"]) not in archive_ids
         ):
             path = objects_dir / str(rec["sha256"])
             if not path.exists():
@@ -136,6 +155,9 @@ def verify_package(root: Path) -> PackageReport:
                 )
             report.objects_checked += 1
 
+    # 3b. archives: hash first, then every entry the package references (format /2)
+    entries = ArchiveEntries(root, manifest, evidence, archives, report)
+
     # 4. events in order, each batch with its items (items.jsonl is grouped by batch, in seq order)
     items_iter = _lines(root / "items.jsonl")
     pending: dict[str, Any] | None = next(items_iter, None)
@@ -146,7 +168,7 @@ def verify_package(root: Path) -> PackageReport:
         if ev.event_type == BATCH_EVENT:
             while pending is not None and pending.get("custody_event_id") == ev.id:
                 page_cache = _check_item(
-                    report, manifest, evidence, objects_dir, pending, page_cache
+                    report, manifest, evidence, objects_dir, pending, page_cache, entries
                 )
                 pairs.append((pending["idempotency_key"], pending["content_hash"]))
                 pending = next(items_iter, None)
@@ -171,6 +193,7 @@ def _check_item(
     objects_dir: Path,
     item: dict[str, Any],
     page_cache: tuple[str, Any] | None,
+    entries: ArchiveEntries,
 ) -> tuple[str, Any] | None:
     report.items_checked += 1
     where = f"item {item.get('id')}"
@@ -191,6 +214,13 @@ def _check_item(
         return page_cache
     if ev["storage_key"] != item["storage_key"]:
         report.errors.append(f"{where}: storage_key disagrees with evidence registry")
+    if ev["kind"] == "archive_entry":
+        body = entries.body(str(ev["id"]))
+        if body is None:
+            return page_cache  # the entry or its archive failed: already reported
+        if page_cache is None or page_cache[0] != ev["sha256"]:
+            page_cache = (ev["sha256"], json.loads(body))
+        return _check_fragment(report, where, item, page_cache)
     if not manifest.get("objects_included"):
         return page_cache
     path = objects_dir / str(ev["sha256"])
@@ -202,6 +232,12 @@ def _check_item(
         return page_cache
     if page_cache is None or page_cache[0] != ev["sha256"]:
         page_cache = (ev["sha256"], json.loads(path.read_bytes()))
+    return _check_fragment(report, where, item, page_cache)
+
+
+def _check_fragment(
+    report: PackageReport, where: str, item: dict[str, Any], page_cache: tuple[str, Any]
+) -> tuple[str, Any]:
     try:
         fragment = resolve(page_cache[1], item["json_path"])
     except JsonPathError as exc:

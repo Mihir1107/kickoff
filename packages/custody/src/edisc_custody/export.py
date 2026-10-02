@@ -1,4 +1,9 @@
-"""Custody package export: DB + WORM bucket -> directory in ``edisc-custody-package/1`` format (ADR 0008)."""
+"""Custody package export: DB + WORM bucket -> directory in ``edisc-custody-package/2`` format (ADR 0008).
+
+Format /2 adds archives (ADR 0014): an export zip whose entries are evidence is either EMBEDDED
+(``objects/<sha256>``, streamed, never held in memory) or REFERENCED by SHA-256 and size only, for
+archives too large to ship; the expert then supplies the zip to ``edisc-verify --archive``.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +12,7 @@ import base64
 import hashlib
 import uuid
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Literal
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -50,6 +55,7 @@ async def export_package(
     job_id: uuid.UUID,
     dest: Path,
     include_objects: bool = True,
+    archives: Literal["embed", "reference"] = "embed",
     page_size: int = 1000,
 ) -> Path:
     """Write the package for one job's custody stream into ``dest`` (must not exist)."""
@@ -132,14 +138,35 @@ async def export_package(
                 # the job's own objects, plus content-addressed files first stored by another job and
                 # shared by dedup: those are found through this job's items, not by job_id
                 "SELECT id, storage_key, kind, state, sha256, size_bytes, version_id, source_sha256,"
-                " source_hash_origin FROM evidence_objects"
+                " source_hash_origin, archive_evidence_id, entry_path, entry_raw_name, entry_crc32,"
+                " entry_compressed_size FROM evidence_objects"
                 " WHERE job_id = :j OR id IN (SELECT i.evidence_object_id FROM job_items ji"
                 " JOIN items i ON i.tenant_id = ji.tenant_id AND i.id = ji.item_id WHERE ji.job_id = :j)"
+                # ... and the archives (export zips) holding any of those entries
+                " OR id IN (SELECT e.archive_evidence_id FROM evidence_objects e WHERE e.job_id = :j"
+                " OR e.id IN (SELECT i.evidence_object_id FROM job_items ji JOIN items i"
+                " ON i.tenant_id = ji.tenant_id AND i.id = ji.item_id WHERE ji.job_id = :j))"
                 " ORDER BY storage_key"
             ),
             {"j": job_id},
         )
-        evidence_rows = [dict(r._mapping) for r in evidence]
+        evidence_rows = [_evidence_record(dict(r._mapping)) for r in evidence]
+        archive_ids = {
+            r["archive_evidence_id"] for r in evidence_rows if r.get("archive_evidence_id")
+        }
+        limits = {
+            str(r.evidence_object_id): r.limits
+            for r in (
+                await session.execute(
+                    text(
+                        "SELECT DISTINCT ON (evidence_object_id) evidence_object_id, limits"
+                        " FROM slack_exports WHERE evidence_object_id = ANY(:a)"
+                        " ORDER BY evidence_object_id, created_at"
+                    ),
+                    {"a": [uuid.UUID(a) for a in archive_ids]},
+                )
+            ).all()
+        }
 
     for ev_row in evidence_rows:
         # Record every OTHER version at the key: shadows are storage incidents the expert must see.
@@ -153,7 +180,17 @@ async def export_package(
         writers["evidence.jsonl"].write(
             {**{k: _str(v) for k, v in ev_row.items()}, "shadow_versions": shadows}
         )
-        if include_objects and ev_row["state"] == "complete" and ev_row["kind"] in ("page", "file"):
+        is_archive = str(ev_row["id"]) in archive_ids
+        if is_archive and include_objects and archives == "embed":
+            target = objects_dir / ev_row["sha256"]
+            if not await asyncio.to_thread(target.exists):  # streamed: a zip can be very large
+                await _download(s3, bucket, ev_row["storage_key"], ev_row["version_id"], target)
+        elif (
+            include_objects
+            and not is_archive
+            and ev_row["state"] == "complete"
+            and ev_row["kind"] in ("page", "file")
+        ):
             target = objects_dir / ev_row["sha256"]
             if not await asyncio.to_thread(target.exists):
                 # always the PINNED version, never "latest" (which may be a shadow)
@@ -171,10 +208,44 @@ async def export_package(
         "head": {"seq": head.last_seq, "hash": head.last_hash} if head else None,
         "exported_at": format_utc(utc_now()),
         "objects_included": include_objects,
+        "archives": [
+            {
+                "evidence_id": str(r["id"]),
+                "storage_key": r["storage_key"],
+                "version_id": r["version_id"],
+                "sha256": r["sha256"],
+                "size_bytes": r["size_bytes"],
+                "embedded": include_objects and archives == "embed",
+                "limits": limits.get(str(r["id"])),
+            }
+            for r in evidence_rows
+            if str(r["id"]) in archive_ids
+        ],
         "files": {name: w.close() for name, w in writers.items()},
     }
     (dest / "manifest.json").write_bytes(canonical_json(manifest))
     return dest
+
+
+def _evidence_record(row: dict[str, Any]) -> dict[str, Any]:
+    raw = row.pop("entry_raw_name", None)
+    if row.get("kind") != "archive_entry":
+        for key in ("archive_evidence_id", "entry_path", "entry_crc32", "entry_compressed_size"):
+            row.pop(key, None)
+    else:
+        row["entry_raw_name_b64"] = base64.b64encode(bytes(raw)).decode()
+    return {k: _str(v) for k, v in row.items()}
+
+
+async def _download(s3: S3Client, bucket: str, key: str, version_id: str, target: Path) -> None:
+    """Stream the PINNED version to a file (bounded memory), written under a temporary name."""
+    partial = target.with_name(target.name + ".partial")
+    resp = await s3.get_object(Bucket=bucket, Key=key, VersionId=version_id)
+    with partial.open("wb") as fh:
+        async with resp["Body"] as body:
+            async for chunk in body.iter_chunks(1 << 20):
+                fh.write(chunk)
+    partial.replace(target)
 
 
 def _str(value: Any) -> Any:

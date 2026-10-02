@@ -41,6 +41,22 @@ independently: no access to our database, no network, no credentials, no trust i
 - Dependencies: the Python standard library, `rfc8785` and the pure modules of `edisc_core` /
   `edisc_custody`. A test asserts that the CLI imports no database, S3 or cloud code.
 
+## Amendment (2026-10-03, M14.6): format `edisc-custody-package/2`, archives
+- Evidence can be an entry inside a locked export zip (`archive_entry`, ADR 0014). `evidence.jsonl`
+  then carries `archive_evidence_id`, `entry_path`, `entry_raw_name_b64`, `entry_crc32` and
+  `entry_compressed_size`, and the manifest lists every such zip under `archives` (evidence id, key,
+  pinned version, SHA-256, size, the export's archive limits, `embedded`).
+- **Embedded:** the zip is `objects/<sha256>` (streamed at export, never held in memory).
+  **Referenced:** only its SHA-256 and size are in the package, for zips too large to ship. The expert
+  supplies the file with `edisc-verify --archive <path>` (repeatable; matched by content, not by name).
+  Without it the package is reported unverified, never verified.
+- The verifier checks the zip's SHA-256 and size FIRST and opens no entry of a zip that fails. Then,
+  per entry: exact name bytes in the central directory (case/Unicode-folded duplicates rejected),
+  recorded CRC-32 and compressed size equal to the directory's, decompression under the recorded limits
+  with local header, overlap bound, CRC-32 and size checked, decompressed SHA-256 and size equal to the
+  record. Then item fragments, as for pages. The zip reader is the same pure module the worker uses.
+- The verifier accepts /1 and /2; the exporter writes /2.
+
 ## Consequences
 - + Verification is reproducible by third parties with one command, air-gapped.
 - + Streaming reads: package size is not bounded by verifier memory (items are grouped by batch).

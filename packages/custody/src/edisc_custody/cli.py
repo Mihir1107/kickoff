@@ -20,9 +20,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("package", type=Path, help="directory produced by the custody export")
     parser.add_argument("--json", action="store_true", help="print the full report as JSON")
+    parser.add_argument(
+        "--archive",
+        type=Path,
+        action="append",
+        default=[],
+        help="an archive (export zip) the package references by hash instead of embedding; repeatable."
+        " Matched by its SHA-256, which is checked before any of its entries is read",
+    )
     args = parser.parse_args(argv)
     try:
-        report = verify_package(args.package)
+        report = verify_package(args.package, args.archive)
     except (OSError, PackageFormatError, KeyError, ValueError) as exc:
         sys.stderr.write(f"edisc-verify: cannot read package: {exc}\n")
         return 2
@@ -41,6 +49,11 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(
             f"  {report.items_checked} items and {report.objects_checked} evidence objects re-hashed\n"
         )
+        if report.archives_checked or report.entries_checked:
+            sys.stdout.write(
+                f"  {report.archives_checked} archives hash-checked, {report.entries_checked} archive"
+                " entries extracted and verified\n"
+            )
         for err in report.errors + (chain.errors if chain else []):
             sys.stdout.write(f"  ERROR {err}\n")
     return 0 if report.ok else 1
