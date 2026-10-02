@@ -1,6 +1,6 @@
 # ADR 0014: Slack export ingestion (`edisc_connector_slack_export`)
 
-Status: **Proposed** (2026-10-02). Not implemented. Follows the phase-2 decisions in
+Status: **Accepted** (2026-10-02) with review changes R1–R7 (below, and folded into the sections). Follows the phase-2 decisions in
 `docs/plans/phase-2.md` (1: entries referenced inside the locked zip; 2: `matched_against_archive`;
 3: real exports become fixtures).
 
@@ -35,8 +35,11 @@ checked against them.
     restarts. Nothing touches local disk.
 - **On complete,** the existing large-file evidence path (ADR 0002) runs, unchanged:
   1. one streaming pass over the staged object computes **our** SHA-256 and size (bounded memory);
-  2. the result must match the declared size and, if given, the declared SHA-256 (else 422 and the
-     staging object is deleted);
+  2. the result must match the declared size;
+  - **R7:** if the client declared a SHA-256 and it differs from ours, the export is **rejected before any
+    parsing**. It is still locked as evidence (what we received is what we keep), its status is
+    `rejected` with reason `declared_hash_mismatch`, the mismatch is audited, and the client gets a 422
+    with both hashes. This is an error, never a warning.
   3. the source hash is persisted on a pending registry row;
   4. a server-side copy goes into the content-addressed locked key, the destination is verified, the
      version is pinned, and staging is deleted.
@@ -81,12 +84,15 @@ checked against them.
 ### 3. Hostile and broken archives: explicit limits, all configurable
 The archive is attacker-influenced, since anyone with export access can craft one. Declared sizes are
 never trusted: every limit is enforced on bytes actually read or produced. All limits are `EDISC_EXPORT_*`
-settings.
+settings. **R1:** a tenant admin may override any limit for one upload (in the upload session); every
+override is recorded in the audit chain with the old and new value. The central directory is parsed **as
+a stream** with bounded memory: entries are validated and written to the database in batches, never held
+as one list (a test parses a synthetic directory of several million entries and checks peak memory).
 
 | Check | Default limit / rule | On violation |
 |---|---|---|
 | Zip size | 200 GB | upload refused (413) |
-| Entries in the central directory | 2,000,000 | archive rejected |
+| Entries in the central directory | 20,000,000 (R1) | archive rejected |
 | Decompressed size per entry | 1 GiB | archive rejected |
 | Total decompressed size | min(100 × compressed size, 2 TB) | archive rejected |
 | Compression ratio per entry | 200:1 for entries over 1 MiB decompressed | archive rejected |
@@ -100,6 +106,15 @@ settings.
 | CRC-32 | checked on every entry read | job-scoped integrity failure |
 | Decompression | streaming `zlib.decompressobj` in bounded chunks; stops one byte past the declared size or the limit, whichever is first | integrity failure |
 
+**R5 (fuzzing):** the zip reader is fuzzed with property-based tests (hypothesis) over mutated, truncated
+and spliced archives. The invariant is: every input either parses within limits or is rejected with a
+classified `ArchiveError`, never a crash, hang, unbounded memory use or an escape of a limit. CI runs a
+short budget; a longer budget is documented for manual runs.
+
+**R6 (S3 access):** entries are read in **local-header order** with large sequential range reads (several
+MiB, adjacent entries coalesced into one request), not one request per entry. Requests per 1,000 entries
+are measured on the synthetic export and recorded in `docs/runs/`.
+
 "Archive rejected" means:
 - the export stays as locked evidence;
 - its status becomes `rejected`, with the finding recorded in the audit chain;
@@ -110,9 +125,15 @@ SIGKILL crash matrix during ingestion.
 
 ### 4. Reconciliation: `matched_against_archive`
 An export has no server-side counts. Completeness is checked against the archive itself.
-- **Unit = conversation × day, as today.** A conversation is the folder named in `channels.json`,
-  `groups.json`, `mpims.json` or `dms.json` (for DMs the folder name is the DM id) *(confirm on real
-  export)*.
+- **Unit = one day file** (`<folder>/<YYYY-MM-DD>.json`): it is what is fetched, checkpointed and
+  reconciled. A conversation is the folder named in `channels.json`, `groups.json`, `mpims.json` or
+  `dms.json` (for DMs the folder name is the DM id) *(confirm on real export)*.
+- **R4 (dates):** every message is assigned to its conversation-day from its **own `ts`** (UTC), never
+  from the file name. The file name's date is recorded only as a hint; a message whose `ts` falls outside
+  the hinted day is reported as an anomaly. The time zone of the file names is *(confirm on real export)*
+  (believed to be the exporting workspace's time zone). Consequences:
+  - a day file is enumerated for a scope if the hinted day ±1 day overlaps the scope's range;
+  - each message's `in_scope` comes from its `ts`, as today.
 - **Per unit,** every element of the day file's JSON array must be accounted for exactly once: it becomes
   a message item, an event item (join, leave, topic, bot) or a recorded, typed skip. The file must parse.
   The unit's status is then `matched_against_archive`; otherwise `gap`, with the unaccounted indexes
@@ -201,9 +222,12 @@ An export has no server-side counts. Completeness is checked against the archive
 - Minus: Grid detection and several format details stay *(confirm on real export)* until the fixtures
   arrive. The defaults are conservative: process as `full`, flag the tier as unconfirmed.
 
-## Open questions
-1. The limits in §3. The defaults suit exports up to about 200 GB; raise or lower them?
-2. Should an archive with **unknown entries** be processable (proposed: yes; they are listed in the
-   report), or rejected outright?
-3. Job status name: `completed_against_archive` (proposed), or keep `completed_with_gaps` semantics plus a
-   flag?
+## Review changes (2026-10-02)
+- **R1:** up to 20,000,000 entries; per-upload limit overrides by tenant admins, audited; streaming
+  central-directory parse with bounded memory, tested at several million entries.
+- **R2:** unknown entries: the export is processed and they are listed in the report.
+- **R3:** status `completed_against_archive`.
+- **R4:** dates from each message's `ts`; the file-name date is a hint, and a mismatch is an anomaly.
+- **R5:** property-based fuzzing of the zip reader.
+- **R6:** sequential, coalesced range reads in local-header order, measured.
+- **R7:** a declared-hash mismatch rejects the export before parsing.
