@@ -78,20 +78,29 @@ make worker / api       # Temporal worker (+ maintenance queue and sweeper sched
   Activities wrap `Pipeline` and raise only classified `ApplicationError`s (`edisc_worker.errors`). Any change
   to workflow code that alters commands goes behind `workflow.patched`; goldens in `tests/golden/temporal`
   (re-record: `EDISC_RECORD_HISTORIES=1 make test-integration TESTS=tests/integration/worker`); remove a patch
-  only when `scripts/temporal_patch_check.py` exits 0.
+  only when `scripts/temporal_patch_check.py` exits 0. Active patches are listed in ADR 0012 ("Active workflow
+  patches"); a new golden generation is recorded with `EDISC_RECORD_SUFFIX=-<patch>` next to the old one.
 - Per-batch writes (items + job_items + custody event + checkpoint + counts) happen in ONE transaction
   (`edisc_worker.pipeline.Pipeline.process_batch`, ADR 0006): evidence and file downloads happen BEFORE it, the
   transaction starts with the checkpoint guard (moved cursor = no-op), links are inserted before the custody event
   (deferred FK) so the Merkle root covers exactly the new links. `in_scope` lives on `job_items`, not on items.
   Absence detection only for clean units against earlier clean collections of the same unit (ADR 0005).
+- Several scopes per job (ADR 0005 amendment): units are the union over scopes (`work_unit_scopes` records
+  coverage); `Pipeline.unit_scope()` gives the unit's merged range + most inclusive policy; in-scope = any range of a
+  scope covering the conversation; collected counts are per conversation-day across the job's links.
+- Queries that join a unit's links to items select items BY ID and filter day/type in Python: with stale statistics
+  mid-load the planner otherwise scans a whole day's items (see docs/runs/2026-10-01-storage-throughput-breakdown.md).
 - Schema changes: new Alembic revision in `packages/db/migrations/versions/` (hand-written SQL, run via `split_sql`),
   update `edisc_db.models` to match (drift test fails otherwise), add RLS + grants for any new tenant table.
 - Tenant isolation: FORCE RLS on every tenant table. The app connects as `edisc_app` (not owner, not superuser,
   no BYPASSRLS) and sets `SET LOCAL app.tenant_id` per transaction via the single `tenant_tx()` helper, in activities too.
   Superuser is only for migrations and tamper tests.
-- Evidence (`edisc_evidence.writer.EvidenceWriter`, ADR 0002): pages -> job-scoped keys, single pass; files -> staging
-  bucket (hash while streaming) -> server-side copy into content-addressed `t/{tenant}/files/sha256/...` (dedup per
-  tenant, advisory-locked, destination verified). Evidence hash = our own streaming SHA-256, never S3's composite.
+- Evidence (`edisc_evidence.writer.EvidenceWriter`, ADR 0002 + amendment): pages -> job-scoped keys, single pass.
+  Files -> content-addressed `t/{tenant}/files/sha256/...` (dedup per tenant): a key already `complete` in the registry
+  is a dedup hit (no lock, no upload); small files (<= `EDISC_EVIDENCE_SMALL_FILE_MAX_BYTES`) are hashed in memory and
+  PUT once (If-None-Match, lock, ChecksumSHA256) under the advisory lock; large files stream to the staging bucket and
+  are server-side copied. Source hash persisted before any WORM write. A page's files are written with bounded
+  concurrency (`EDISC_EVIDENCE_FILE_CONCURRENCY`). Evidence hash = our own SHA-256, never S3's composite.
   Lock set at create; abort multipart on any failure; `recover_pending` at job finalize. No evidence on local disk.
 - Retention: rolling window `min(matter.retention_until, now + EDISC_EVIDENCE_RETENTION_WINDOW_DAYS)`, extended while the
   matter is active (extension job: backlog, required before production). Never lock for the full matter upfront.
@@ -136,9 +145,15 @@ make worker / api       # Temporal worker (+ maintenance queue and sweeper sched
 - Tests have a 120 s timeout (pytest-timeout): a hang is a failure. Only the acceptance runs
   (`tests/integration/acceptance`) carry an explicit, larger `@pytest.mark.timeout`.
 
+## Measurements (re-run before and after performance changes; results go in docs/runs/)
+- `scripts/measure_breakdown.py` (storage per component + per-stage throughput), `scripts/bench_pipeline.py`,
+  `scripts/measure_audit_burst.py` (audited reads), `scripts/resume_soak.py` (SIGKILL soak; 50k is the CI test).
+  Run them on a FRESH test stack (`make test-env-up`); the laptop is noisy, so compare paired runs.
+
 ## Working agreement
 - One milestone at a time: implement → tests → run → commit (message ends with the attribution trailer).
 - Never chain `git commit` after checks with `;`: use `make check && git commit ...`. The pre-commit hook is a
   backstop, not a replacement; never bypass it with `--no-verify`.
 - No scope creep: later-phase ideas go in `docs/BACKLOG.md`.
 - Ask before deviating from a principle. Keep this file, ARCHITECTURE.md and ADRs current when decisions change.
+- Start of a session: read docs/HANDOFF.md (state, open decisions, next milestone, gotchas).
