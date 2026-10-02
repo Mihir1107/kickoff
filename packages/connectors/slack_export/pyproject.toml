@@ -7,12 +7,17 @@ dependencies = [
     "edisc-connectors-base",
     "edisc-core",
     "edisc-custody",
+    "edisc-db",
+    "edisc-evidence",
+    "httpx>=0.28.1",
 ]
 
 [tool.uv.sources]
 edisc-connectors-base = { workspace = true }
 edisc-core = { workspace = true }
 edisc-custody = { workspace = true }
+edisc-db = { workspace = true }
+edisc-evidence = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

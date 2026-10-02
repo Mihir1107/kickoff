@@ -98,20 +98,41 @@ def ts_datetime(ts: str) -> datetime:
 
 
 # ------------------------------------------------------------------ helpers
-def _parse(page: bytes, key: str) -> list[dict[str, Any]]:
+API, EXPORT = "api", "export"
+
+
+def _parse(page: bytes, key: str, dialect: str = API) -> list[dict[str, Any]]:
     try:
         doc = json.loads(page)
     except ValueError as exc:
         raise NormalizationError("page is not valid JSON") from exc
+    if dialect == EXPORT:  # an export file is the bare array
+        if not isinstance(doc, list):
+            raise NormalizationError("an export file must be a JSON array")
+        if not all(isinstance(e, dict) for e in doc):
+            raise NormalizationError("every element of an export file must be an object")
+        return doc
+    if dialect != API:
+        raise NormalizationError(f"unknown dialect {dialect!r}")
     if not isinstance(doc, dict) or doc.get("ok") is not True or not isinstance(doc.get(key), list):
         raise NormalizationError(f"not a successful Slack page with '{key}'")
     return doc[key]  # type: ignore[no-any-return]
 
 
-def file_refs(page: bytes) -> list[FileMeta]:
-    """Attachments referenced by a messages page: the pipeline downloads these BEFORE normalizing."""
+def _path(dialect: str, key: str, index: int, *rest: str | int) -> str:
+    """Where element ``index`` sits: ``$.messages[3]`` in an API page, ``$[3]`` in an export file."""
+    return build(index, *rest) if dialect == EXPORT else build(key, index, *rest)
+
+
+def file_refs(
+    page: bytes, dialect: str = API, select: frozenset[str] | None = None
+) -> list[FileMeta]:
+    """Attachments referenced by a messages page (only the ``select``-ed messages when given): the
+    pipeline downloads these BEFORE normalizing."""
     seen: dict[str, FileMeta] = {}
-    for m in _parse(page, "messages"):
+    for m in _parse(page, "messages", dialect):
+        if select is not None and m.get("ts") not in select:
+            continue
         for f in m.get("files", []) or []:
             if f.get("id") and f["id"] not in seen:
                 seen[f["id"]] = FileMeta(
@@ -248,10 +269,14 @@ def normalize_messages_page(
     page_ref: EvidenceRef,
     prior: Mapping[str, PriorState],
     files: Mapping[str, FileEvidence | FileUnavailable],
+    select: frozenset[str] | None = None,
 ) -> PageResult:
-    """Derive every record from one conversations.history / conversations.replies page.
+    """Derive every record from one conversations.history / conversations.replies page, or one export
+    day file (``ctx.dialect == "export"``).
 
     ``files`` must cover every file the page references: collected bytes, or the source's refusal.
+    ``select``: only the messages with these ``ts`` (thread context read from another export day file);
+    json paths keep the element's real index in the file.
     """
     if ctx.conversation_id is None:
         raise NormalizationError("a messages page needs a conversation")
@@ -269,12 +294,15 @@ def normalize_messages_page(
             emitted.add(key)
             items.append(d)
 
-    for index, raw in enumerate(_parse(page, "messages")):
+    dialect = ctx.dialect
+    for index, raw in enumerate(_parse(page, "messages", dialect)):
         ts = raw.get("ts")
         if not isinstance(ts, str):
             raise NormalizationError(f"message {index} has no string ts")
+        if select is not None and ts not in select:
+            continue
         mid = message_id(ws, conv, ts)
-        path = build("messages", index)
+        path = _path(dialect, "messages", index)
         raw_hash = canonical_hash(raw)
         sent_at = ts_datetime(ts)
         in_scope = _in_scope(sent_at, ctx)
@@ -295,7 +323,12 @@ def normalize_messages_page(
                     f"file {fid} of {mid} was not attempted before normalizing"
                 )
             availability.append(
-                (fid, outcome, build("messages", index, "files", index_f), canonical_hash(f))
+                (
+                    fid,
+                    outcome,
+                    _path(dialect, "messages", index, "files", index_f),
+                    canonical_hash(f),
+                )
             )
             if isinstance(outcome, FileUnavailable):
                 unavailable.add(fid)
@@ -475,7 +508,7 @@ def normalize_messages_page(
             if reactions or rprior.latest_content_hash is not None:
                 state = sorted([[r["name"], sorted(r.get("users", []))] for r in reactions or []])
                 fp_r = {"fp": FP_REACTIONS, "message": mid, "reactions": state}
-                r_path = build("messages", index, "reactions") if reactions else path
+                r_path = _path(dialect, "messages", index, "reactions") if reactions else path
                 r_raw = canonical_hash(reactions) if reactions else raw_hash
                 snapshot = _event(
                     rid,
@@ -521,7 +554,7 @@ def normalize_messages_page(
                     fp_e,
                     None,
                     page_ref,
-                    build("messages", index, "user_profile"),
+                    _path(dialect, "messages", index, "user_profile"),
                     canonical_hash(profile),
                     None,
                     True,
@@ -540,7 +573,7 @@ def normalize_directory_page(
 ) -> PageResult:
     items: list[Derived] = []
     subjects: set[str] = set()
-    for index, raw in enumerate(_parse(page, "members")):
+    for index, raw in enumerate(_parse(page, "members", ctx.dialect)):
         uid = raw.get("id")
         if not isinstance(uid, str):
             raise NormalizationError(f"member {index} has no id")
@@ -556,7 +589,7 @@ def normalize_directory_page(
             "deactivated": bool(raw.get("deleted")),
         }
         pid = profile_id(ctx.workspace_id, uid)
-        path = build("members", index)
+        path = _path(ctx.dialect, "members", index)
         raw_hash = canonical_hash(raw)
         snap = _event(
             pid, EventKind.IDENTITY_SNAPSHOT, fp, None, page_ref, path, raw_hash, None, True, {}
@@ -580,9 +613,9 @@ def normalize_directory_page(
 
 
 # ------------------------------------------------------------------ unit completion: absence
-def messages_fragment_hash(page: bytes) -> str:
+def messages_fragment_hash(page: bytes, dialect: str = API) -> str:
     """Canonical hash of a page's message list (the ``$.messages`` fragment absence events point to)."""
-    return canonical_hash(_parse(page, "messages"))
+    return canonical_hash(_parse(page, "messages", dialect))
 
 
 def finalize_unit(
@@ -639,7 +672,7 @@ def message_page_subjects(page: bytes, *, ctx: NormalizeContext) -> frozenset[st
     if ctx.conversation_id is None:
         raise NormalizationError("a messages page needs a conversation")
     out: set[str] = set()
-    for raw in _parse(page, "messages"):
+    for raw in _parse(page, "messages", ctx.dialect):
         mid = message_id(ctx.workspace_id, ctx.conversation_id, str(raw.get("ts")))
         out |= {mid, f"{mid}#reactions", f"{mid}#observation"}
         out |= {
@@ -651,7 +684,7 @@ def message_page_subjects(page: bytes, *, ctx: NormalizeContext) -> frozenset[st
 
 def directory_page_subjects(page: bytes, *, ctx: NormalizeContext) -> frozenset[str]:
     return frozenset(
-        profile_id(ctx.workspace_id, str(m.get("id"))) for m in _parse(page, "members")
+        profile_id(ctx.workspace_id, str(m.get("id"))) for m in _parse(page, "members", ctx.dialect)
     )
 
 
@@ -728,7 +761,7 @@ def access_restored(
             None,
             page_ref,
             "$.messages",
-            canonical_hash(_parse(page, "messages")),
+            canonical_hash(_parse(page, "messages", ctx.dialect)),
             None,
             True,
             {},

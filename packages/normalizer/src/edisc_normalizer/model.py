@@ -58,6 +58,9 @@ class NormalizeContext:
     # several scopes (ADR 0005 amendment): every [from, to) range that applies to this conversation;
     # when given, an item is in scope if any of them contains it (date_from/date_to are then the envelope)
     ranges: tuple[tuple[datetime, datetime], ...] = ()
+    # "api": Web API response pages ({"ok": true, "messages": [...]}); "export": a Slack export file, a
+    # bare JSON array (day files of messages, users.json of members). Same fingerprints either way.
+    dialect: str = "api"
 
 
 @dataclass(frozen=True)

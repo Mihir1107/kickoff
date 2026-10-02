@@ -68,6 +68,10 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Zip parsing only through `edisc_custody.archive` (pure, fuzzed; R5). Entries are read in local-header
   order through `CoalescingSource` (R6). Limits come from the export row (`slack_exports.limits`), never
   straight from settings: a tenant admin may override them per upload (audited).
+- Collection: `edisc_connector_slack_export.connector` (queue `collect-slack_export`). Batches reference
+  entries of the locked zip (`archive_entry` evidence, never a copy); items use `item_source = "slack"`
+  so exports and live API collections share identities (ADR 0004 amendment). Never `git checkout` a
+  file to undo a mutation check: restore from a copy (uncommitted work is lost otherwise).
 - Layout/tier rules: `edisc_connector_slack_export.layout`. Format details marked *(confirm on real
   export)* in ADR 0014 stay provisional until the real exports are fixtures.
 

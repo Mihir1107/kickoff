@@ -31,6 +31,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 from types_aiobotocore_s3 import S3Client
 
+from edisc_connector_slack_export.archive_access import archive_limits, entry_from_row
 from edisc_connector_slack_export.layout import (
     CONVERSATION_FILES,
     KNOWN_METADATA,
@@ -63,31 +64,14 @@ from edisc_custody.log import anchor_if_due, append
 from edisc_db.session import tenant_tx
 from edisc_evidence.archive_source import CoalescingSource, S3ObjectSource
 from edisc_evidence.writer import EvidenceWriter
+from edisc_normalizer.slack import ts_datetime
 from edisc_worker.activities import _ticking
 from edisc_worker.contracts import ExportRef
 
 log = get_logger(__name__)
 
 ACTOR = "system:export-ingest"
-LIMIT_NAMES = (
-    "max_archive_bytes",
-    "max_entries",
-    "max_entry_bytes",
-    "max_total_bytes",
-    "max_total_ratio",
-    "max_entry_ratio",
-    "ratio_floor_bytes",
-    "max_name_bytes",
-)
 SAMPLE = 100  # names listed per finding; the full lists stay queryable in export_entries
-
-
-def default_limits(settings: Settings) -> dict[str, int]:
-    return {name: int(getattr(settings, f"export_{name}")) for name in LIMIT_NAMES}
-
-
-def archive_limits(limits: Mapping[str, Any]) -> ArchiveLimits:
-    return ArchiveLimits(**{name: int(limits[name]) for name in LIMIT_NAMES})
 
 
 def _duplicate(first: str, second: str) -> ArchiveError:
@@ -116,6 +100,14 @@ class _Scan:
     junk_sample: list[str] = field(default_factory=list)
     encodings: Counter[str] = field(default_factory=Counter)
     encoding_samples: dict[str, list[str]] = field(default_factory=dict)
+    workspace: str | None = None
+    messages: int = 0
+    threaded: int = 0
+    anomalies: int = 0
+    anomaly_sample: list[str] = field(default_factory=list)
+    elements_without_ts: int = 0
+    unparseable: int = 0
+    unparseable_sample: list[str] = field(default_factory=list)
 
 
 class ExportIngest:
@@ -297,17 +289,19 @@ class ExportIngest:
                     " :org, :tier, '{}', 'active', CAST(:cfg AS jsonb))"
                 ),
                 {"i": connection_id, "t": tenant_id, "c": row.client_id,
-                 "org": f"slack-export:{export_id}", "tier": tier.tier,
+                 "org": scan.workspace or f"slack-export:{export_id}", "tier": tier.tier,
                  "cfg": json.dumps({"export_id": str(export_id)})},
             )  # fmt: skip
             done = await s.execute(
                 text(
                     "UPDATE slack_exports SET status = 'ready', entry_count = :n, detected_tier = :tier,"
                     " tier_confirmed = :conf, findings = CAST(:f AS jsonb), connection_id = :c, root_prefix = :root,"
+                    " workspace_id = :ws,"
                     " validated_at = now(), updated_at = now() WHERE id = :i AND status = 'validating'"
                 ),
                 {"n": scan.entries, "tier": tier.tier, "conf": tier.confirmed,
-                 "f": json.dumps(findings), "c": connection_id, "i": export_id, "root": scan.root},
+                 "f": json.dumps(findings), "c": connection_id, "i": export_id, "root": scan.root,
+                 "ws": scan.workspace},
             )  # fmt: skip
             if done.rowcount != 1:  # type: ignore[attr-defined]
                 raise RuntimeError(f"export {export_id} left 'validating' under us")
@@ -349,7 +343,164 @@ class ExportIngest:
                 "no channels.json, groups.json, dms.json or mpims.json at the top level",
             )
         records = await self._load_conversations(tenant_id, export_id, src, limits, scan)
+        scan.workspace = await self._workspace(src, limits, scan)
+        await self._index_day_files(tenant_id, export_id, src, limits, scan)
         return scan, tier, records
+
+    async def _workspace(
+        self, src: CoalescingSource, limits: ArchiveLimits, scan: _Scan
+    ) -> str | None:
+        """The Slack team the export belongs to: the most common ``team_id`` in users.json (external
+        members of shared channels carry other teams). Message identities are namespaced by it, as for
+        the live API, so an exported message and the same message collected live are one item."""
+        entry = scan.metadata.get("users.json")
+        if entry is None:
+            return None
+        teams: Counter[str] = Counter()
+        try:
+            async for raw in iter_array_elements(
+                open_entry(src, entry, limits),
+                max_element_bytes=self.settings.export_max_json_element_bytes,
+            ):
+                user = json.loads(raw)
+                if isinstance(user, dict) and isinstance(user.get("team_id"), str):
+                    teams[user["team_id"]] += 1
+        except (JsonStreamError, ValueError) as exc:
+            raise ExportRejectedError("metadata_invalid", f"users.json: {exc}") from exc
+        return teams.most_common(1)[0][0] if teams else None
+
+    async def _index_day_files(
+        self,
+        tenant_id: uuid.UUID,
+        export_id: uuid.UUID,
+        src: CoalescingSource,
+        limits: ArchiveLimits,
+        scan: _Scan,
+    ) -> None:
+        """One pass over every day file in local-header order (sequential range reads, R6), element by
+        element (bounded memory): element counts (the per-unit expectation), messages whose own ts is not
+        on the file's hinted day (R4 anomalies), and the thread index (every threaded message with its
+        entry and array index) for thread context across files. A file that does not parse is recorded;
+        the unit that reads it fails loudly later. A CRC or size failure rejects the archive."""
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            folders = {
+                r.folder: r.conversation_id
+                for r in (
+                    await s.execute(
+                        text(
+                            "SELECT folder, conversation_id FROM export_conversations WHERE export_id = :e"
+                        ),
+                        {"e": export_id},
+                    )
+                ).all()
+            }
+        after = -1
+        threads: list[dict[str, Any]] = []
+        while True:
+            async with tenant_tx(self.sessions, tenant_id) as s:
+                rows = (
+                    await s.execute(text(DAY_FILES_PAGE), {"e": export_id, "after": after})
+                ).all()
+            if not rows:
+                break
+            after = rows[-1].local_header_offset
+            days = []
+            for row in rows:
+                days.append(await self._index_one(src, limits, scan, row, folders, threads))
+                if len(threads) >= self.settings.export_entry_batch:
+                    await self._insert_threads(tenant_id, export_id, threads)
+                    threads = []
+            if threads:  # a day file is recorded only once its thread rows are
+                await self._insert_threads(tenant_id, export_id, threads)
+                threads = []
+            await self._insert_days(tenant_id, export_id, days)
+
+    async def _index_one(
+        self,
+        src: CoalescingSource,
+        limits: ArchiveLimits,
+        scan: _Scan,
+        row: Any,
+        folders: Mapping[str, str],
+        threads: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        entry = entry_from_row(row)
+        conversation = folders.get(row.folder)
+        elements: int | None = 0
+        anomalies = 0
+        error: str | None = None
+        found: list[dict[str, Any]] = []
+        try:
+            index = -1
+            async for raw in iter_array_elements(
+                open_entry(src, entry, limits),
+                max_element_bytes=self.settings.export_max_json_element_bytes,
+            ):
+                index += 1
+                message = json.loads(raw)
+                ts = message.get("ts") if isinstance(message, dict) else None
+                try:
+                    sent = ts_datetime(ts) if isinstance(ts, str) else None
+                except ValueError:
+                    sent = None
+                if sent is None:
+                    scan.elements_without_ts += 1
+                    continue
+                if sent.date() != row.hint_day:
+                    anomalies += 1
+                    if len(scan.anomaly_sample) < SAMPLE:
+                        scan.anomaly_sample.append(f"{entry.name}: {ts}")
+                thread_ts = message.get("thread_ts")
+                if conversation is not None and isinstance(thread_ts, str):
+                    found.append(
+                        {"entry": entry.index, "element": index, "conv": conversation,
+                         "thread": thread_ts, "ts": ts}
+                    )  # fmt: skip
+            elements = index + 1
+        except (JsonStreamError, ValueError) as exc:
+            elements, error = None, str(exc)[:500]
+            scan.unparseable += 1
+            if len(scan.unparseable_sample) < SAMPLE:
+                scan.unparseable_sample.append(entry.name)
+            found = []
+        scan.messages += elements or 0
+        scan.anomalies += anomalies
+        scan.threaded += len(found)
+        threads.extend(found)
+        return {"entry": entry.index, "elements": elements, "anomalies": anomalies, "error": error}
+
+    async def _insert_days(
+        self, tenant_id: uuid.UUID, export_id: uuid.UUID, rows: list[dict[str, Any]]
+    ) -> None:
+        if not rows:
+            return
+        cols = {k: [r[k] for r in rows] for k in rows[0]}
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            await s.execute(
+                text(
+                    "INSERT INTO export_day_files (tenant_id, export_id, entry_idx, elements, anomalies,"
+                    " parse_error) SELECT CAST(:t AS uuid), CAST(:e AS uuid), * FROM unnest("
+                    " CAST(:entry AS bigint[]), CAST(:elements AS integer[]),"
+                    " CAST(:anomalies AS integer[]), CAST(:error AS text[])) ON CONFLICT DO NOTHING"
+                ),
+                {"t": tenant_id, "e": export_id, **cols},
+            )
+
+    async def _insert_threads(
+        self, tenant_id: uuid.UUID, export_id: uuid.UUID, rows: list[dict[str, Any]]
+    ) -> None:
+        cols = {k: [r[k] for r in rows] for k in rows[0]}
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            await s.execute(
+                text(
+                    "INSERT INTO export_threads (tenant_id, export_id, entry_idx, element_idx,"
+                    " conversation_id, thread_ts, ts) SELECT CAST(:t AS uuid), CAST(:e AS uuid), *"
+                    " FROM unnest(CAST(:entry AS bigint[]), CAST(:element AS integer[]),"
+                    " CAST(:conv AS text[]), CAST(:thread AS text[]), CAST(:ts AS text[]))"
+                    " ON CONFLICT DO NOTHING"
+                ),
+                {"t": tenant_id, "e": export_id, **cols},
+            )
 
     async def _scan_directory(
         self,
@@ -396,7 +547,7 @@ class ExportIngest:
                  "folder": placement.folder, "day": placement.hint_day, "method": e.method,
                  "crc": e.crc32, "csize": e.compressed_size, "usize": e.uncompressed_size,
                  "offset": e.local_header_offset, "raw": e.raw_name,
-                 "encoding": e.name_encoding.value}
+                 "encoding": e.name_encoding.value, "flags": e.flags}
             )  # fmt: skip
             if len(batch) >= self.settings.export_entry_batch:
                 await self._insert_entries(tenant_id, export_id, batch)
@@ -423,12 +574,12 @@ class ExportIngest:
                     text(
                         "INSERT INTO export_entries (tenant_id, export_id, idx, name, folded_name, kind,"
                         " folder, hint_day, method, crc32, compressed_size, uncompressed_size,"
-                        " local_header_offset, raw_name, name_encoding)"
+                        " local_header_offset, raw_name, name_encoding, flags)"
                         " SELECT CAST(:t AS uuid), CAST(:e AS uuid), * FROM unnest(CAST(:idx AS bigint[]), CAST(:name AS text[]),"
                         " CAST(:folded AS text[]), CAST(:kind AS text[]), CAST(:folder AS text[]),"
                         " CAST(:day AS date[]), CAST(:method AS smallint[]), CAST(:crc AS bigint[]),"
                         " CAST(:csize AS bigint[]), CAST(:usize AS bigint[]), CAST(:offset AS bigint[]),"
-                        " CAST(:raw AS bytea[]), CAST(:encoding AS text[]))"
+                        " CAST(:raw AS bytea[]), CAST(:encoding AS text[]), CAST(:flags AS integer[]))"
                         " ON CONFLICT (export_id, idx) DO NOTHING"
                     ),
                     {"t": tenant_id, "e": export_id, **cols},
@@ -573,6 +724,12 @@ class ExportIngest:
             },
             "metadata_files": sorted(scan.metadata),
             "root_prefix": scan.root,
+            "workspace_id": scan.workspace,
+            "messages": scan.messages,
+            "threaded_messages": scan.threaded,
+            "ts_outside_hint_day": {"count": scan.anomalies, "sample": scan.anomaly_sample},
+            "elements_without_ts": scan.elements_without_ts,
+            "day_files_unparseable": {"count": scan.unparseable, "sample": scan.unparseable_sample},
             "os_metadata_entries": {"count": scan.junk, "sample": scan.junk_sample},
             "name_encodings": {
                 enc: {"count": n, "sample": scan.encoding_samples[enc]}
@@ -638,6 +795,12 @@ class ExportIngest:
         )
 
 
+DAY_FILES_PAGE = (
+    "SELECT idx, name, kind, method, flags, crc32, compressed_size, uncompressed_size,"
+    " local_header_offset, raw_name, name_encoding, folder, hint_day FROM export_entries"
+    " WHERE export_id = :e AND kind = 'day' AND local_header_offset > :after"
+    " ORDER BY local_header_offset LIMIT 500"
+)
 # finding -> (count query, sample query)
 LISTINGS = {
     "folders_without_conversation": (

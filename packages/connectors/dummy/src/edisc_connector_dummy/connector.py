@@ -62,6 +62,16 @@ class _Batch:
     request: dict[str, str]
 
 
+# the reasons a Web API file download is refused (a fixed list: the oracle must not change when a
+# reason is added for other sources)
+DUMMY_FILE_REASONS = (
+    FileUnavailableReason.DELETED,
+    FileUnavailableReason.EXTERNAL_OR_HIDDEN,
+    FileUnavailableReason.EXPIRED_URL,
+    FileUnavailableReason.PERMISSION,
+)
+
+
 def _encode(index: int) -> Cursor:
     return base64.urlsafe_b64encode(json.dumps({"v": 1, "i": index}).encode()).decode()
 
@@ -82,6 +92,9 @@ def _decode(cursor: Cursor | None) -> int:
 class DummyConnector:
     source = "dummy"
     version = "0.1.0"
+    item_source = "slack"  # both dialects simulate the Slack Web API
+    dialect = "api"
+    archive_backed = False
 
     def __init__(self, limiter: Limiter) -> None:
         self._limiter = limiter
@@ -190,8 +203,8 @@ class DummyConnector:
             or unit(ds.seed, "funavail", f.seed, file_ref) >= f.file_unavailable_rate
         ):
             return None
-        reason = list(FileUnavailableReason)[
-            h64(ds.seed, "freason", f.seed, file_ref) % len(FileUnavailableReason)
+        reason = DUMMY_FILE_REASONS[
+            h64(ds.seed, "freason", f.seed, file_ref) % len(DUMMY_FILE_REASONS)
         ]
         if reason is FileUnavailableReason.EXPIRED_URL and epoch >= 1:
             return None  # transient: a fresh URL works in the next collection

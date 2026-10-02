@@ -258,6 +258,39 @@ The dummy generator writes all of these (`edisc_connector_dummy.dialects.slack_e
 small ZIP writer because `zipfile` cannot produce unflagged UTF-8 names or forced data descriptors);
 `zipfile` and Info-ZIP `unzip -t` accept every variant.
 
+### Collecting from the export (M14.5)
+- **Connector** `edisc_connector_slack_export.connector`: units are day files enumerated when the file
+  date +/- 1 day overlaps the scope; each batch is an entry read from the locked zip's pinned version
+  (CRC, size and SHA-256 checked) and recorded as an `archive_entry` evidence row (no second copy).
+  Channel scopes only (one conversation or `*`): exports carry no membership history, so custodian
+  scopes are refused at job creation.
+- **Validation also indexes** (one pass, local-header order, element by element): per day file its
+  element count, hint-day anomalies and parse errors (`export_day_files`), every threaded message with
+  its entry and array index (`export_threads`), and the workspace (team id) from `users.json`.
+- **Thread context across day files:** the same policy rules as the Web API (replies here with a parent
+  before the range: the parent or the whole thread; parents here with replies after the range: the
+  whole thread), resolved through `export_threads`. A context batch is the other day file's entry with
+  `select` = the thread members' `ts`; only those become items, with their real array index as path.
+- **Files:** links are downloaded through the `slack_export.file` bucket, https only and only from
+  `EDISC_EXPORT_FILE_HOSTS` (default `files.slack.com`: an attacker-made export must not make us fetch
+  internal addresses). Refusals become recorded file gaps with a reason: 3xx or 410 `expired_url`,
+  401/403 `permission`, 404 `deleted`, other errors or no answer `unreachable` (retried
+  `EDISC_FILE_RETRY_ATTEMPTS` times, then recorded), no link or a foreign host `external_or_hidden`.
+  Link tokens are registered as secrets; Temporal carries file ids only.
+- **R4 anomalies** are counted per unit (`day_anomalies`, in the API and the `unit_reconciled`
+  custody event) and listed at validation (`ts_outside_hint_day`).
+- **Export vs Web API shapes** (what makes or breaks one shared identity, ADR 0004 amendment):
+
+  | Field | Export | Web API | Handling |
+  |---|---|---|---|
+  | page shape | bare array per day file | `{"ok", "messages", ...}` per request | `dialect` in the normalizer; json paths `$[i]` vs `$.messages[i]` |
+  | deleted messages | absent | tombstones (Discovery) or absent (`conversations.history`) | absence never means deletion; export units skip absence detection |
+  | edits | latest text, `edited` marker | the same | identical fingerprint |
+  | `blocks` | present in current exports *(confirm on real export; older exports may lack them)* | present | part of the fingerprint: a message exported without blocks would be a new version; to be measured on the real exports |
+  | `files[].url_private*` | carries an export token | expiring per-request URL | never part of any fingerprint; stripped from derived data |
+  | reply counters, `user_profile` | present *(confirm)* | present | volatile, never versions |
+  | `users.json` vs `users.list` | array of members | paged `members` | same profile fingerprint |
+
 ## Consequences
 - Plus: the uploaded bytes are locked and hashed before any parsing. Every item traces to an entry
   verifiable offline from the zip alone, with no second copy of the data.

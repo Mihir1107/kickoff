@@ -138,6 +138,11 @@ class Settings(BaseSettings):
         ge=1,
         description="an export upload must complete within this; must match the staging lifecycle rule for exports/",
     )
+    export_file_hosts: list[str] = Field(
+        default_factory=lambda: ["files.slack.com"],
+        description="hosts export file links may be downloaded from (https only); anything else is a "
+        "recorded file gap, never a request (exports are attacker-influenced: no SSRF)",
+    )
     export_complete_wait_seconds: float = Field(
         default=20,
         ge=0,

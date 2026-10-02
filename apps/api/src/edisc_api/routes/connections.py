@@ -126,6 +126,8 @@ async def create_connection(
     connector = res.connectors.get(body.source)
     if connector is None:
         raise unprocessable(f"unknown source {body.source}")
+    if connector.archive_backed:  # its connection is created by validating an upload (ADR 0014)
+        raise unprocessable(f"{body.source} connections come from uploads: POST .../exports")
     connection_id = new_id()
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await authorize(s, caller, P.CONNECTION_MANAGE, Scope("client", client_id))

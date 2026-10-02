@@ -28,7 +28,7 @@ history.
 - the audit-burst measurement;
 - the anchor-storm fix (migration 0017).
 
-**Migrations at head:** 0021.
+**Migrations at head:** 0022.
 
 **Not done in Phase 1:** the 1M-message soak. Laptop disk is too small (~15 GB free; it needs ~21 GB). It is
 in the backlog for a cloud VM: `scripts/resume_soak.py --messages 1000000 --kills 10`.
@@ -67,12 +67,13 @@ Done:
 - **Reversible closing** (review 2026-10-02): tenant-admin reopen, immediate re-lock of lapsed evidence,
   `retention_gaps` + `audit.retention_gap` (migration 0021).
 
+- **M14.5** export collection: connector, `archive_entry` evidence, export dialect, thread index,
+  file links (rate-limited, host allowlist, gaps with reasons), `matched_against_archive` /
+  `completed_against_archive` with the caveat in the API; cross-source identity (`item_source`).
+
 Next, in order:
-1. **M14.5** the connector (units = day files, message day from `ts`, filename date as a hint, R4),
-   `archive_entry` evidence rows, normalizer dialect (URL query strings stripped, `register_secret`),
-   `matched_against_archive` and `completed_against_archive`, file downloads via `slack_export.file`.
-2. **M14.6** `edisc-verify` package format /2 (zip carried, entries verified offline).
-3. **M14.7** crash matrix during ingestion, real-export fixtures when provided, docs.
+1. **M14.6** `edisc-verify` package format /2 (zip carried, entries verified offline).
+2. **M14.7** crash matrix during ingestion, real-export fixtures when provided, docs.
 
 ## Gotchas learned (read before changing things)
 

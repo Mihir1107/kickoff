@@ -20,6 +20,7 @@ from edisc_api.auth import Authenticator, AuthError, Caller, JwksCache
 from edisc_api.client_ip import client_ip
 from edisc_api.errors import ApiError
 from edisc_connector_dummy.connector import DummyConnector
+from edisc_connector_slack_export.connector import SlackExportConnector
 from edisc_connectors_base.protocol import Connector
 from edisc_connectors_base.ratelimit import RateLimiter
 from edisc_core.envelope import SecretBox
@@ -66,7 +67,10 @@ async def build_resources(settings: Settings) -> AsyncIterator[Resources]:
                 limiter,
                 SecretBox(LocalKmsClient(settings)),
                 Authenticator(settings, sessions, JwksCache(settings, http)),
-                {"dummy": DummyConnector(limiter)},
+                {
+                    "dummy": DummyConnector(limiter),
+                    "slack_export": SlackExportConnector(sessions, s3, settings, limiter, http),
+                },
                 redis,
             )
     finally:

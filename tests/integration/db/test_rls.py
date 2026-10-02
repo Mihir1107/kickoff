@@ -24,6 +24,8 @@ COPY_OVERRIDES = {
     "export_upload_parts": "'export_id', gen_random_uuid()",
     "export_entries": "'export_id', gen_random_uuid()",
     "export_conversations": "'export_id', gen_random_uuid()",
+    "export_day_files": "'export_id', gen_random_uuid()",
+    "export_threads": "'export_id', gen_random_uuid()",
 }
 UPDATABLE = {
     "matters": "name",

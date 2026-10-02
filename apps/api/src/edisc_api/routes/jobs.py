@@ -29,10 +29,11 @@ from edisc_api.authz import P, Permission, Scope, authorize, perm
 from edisc_api.errors import conflict, not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, decode_text, encode_text, page_of
 from edisc_api.routes.hierarchy import ensure_matter_open
+from edisc_connector_slack_export.archive_access import open_archive_entry
 from edisc_connectors_base.types import CollectionScope, ThreadParentPolicy
 from edisc_core.canonical import canonical_json
 from edisc_core.ids import new_id
-from edisc_core.schemas import JobStatus, ScopeType
+from edisc_core.schemas import ARCHIVE_CAVEAT, JobStatus, ReconStatus, ScopeType
 from edisc_core.time import UtcDatetime
 from edisc_custody.log import anchor_if_due, append, verify_chain
 from edisc_db.session import tenant_tx
@@ -44,6 +45,21 @@ from edisc_worker.workflows import CollectionJobWorkflow
 router = APIRouter(prefix="/v1")
 
 CLEAN = {JobStatus.COMPLETED.value}
+MATCHED = {ReconStatus.MATCHED.value, ReconStatus.MATCHED_AGAINST_ARCHIVE.value}
+
+
+def clean_basis(status: str) -> str | None:
+    if status == JobStatus.COMPLETED.value:
+        return "source"
+    if status == JobStatus.COMPLETED_AGAINST_ARCHIVE.value:
+        return "archive"
+    return None
+
+
+def caveat(status: str) -> str | None:
+    return ARCHIVE_CAVEAT if status == JobStatus.COMPLETED_AGAINST_ARCHIVE.value else None
+
+
 IdempotencyKey = Annotated[str | None, Header(alias="Idempotency-Key", max_length=255)]
 
 
@@ -88,6 +104,10 @@ class JobOut(Strict):
     clean: (
         bool  # only "completed" is clean; completed_unverified / with_gaps / failed units never are
     )
+    # what completeness was checked against: "source" (the live source's counts) or "archive" (an
+    # uploaded export only); None while running or when not complete
+    clean_basis: str | None
+    caveat: str | None  # verbatim (ADR 0014) whenever the basis is the archive
     requested_by: str
     rerun_of: uuid.UUID | None
     created_at: datetime
@@ -107,12 +127,24 @@ class UnitOut(Strict):
     collected_count: int
     file_gaps: int
     last_error: str | None
+    day_anomalies: int
+    caveat: str | None  # verbatim (ADR 0014) when recon_status is matched_against_archive
+
+    @model_validator(mode="before")
+    @classmethod
+    def _caveat(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "caveat" not in data:
+            archive = data.get("recon_status") == ReconStatus.MATCHED_AGAINST_ARCHIVE.value
+            data = {**data, "caveat": ARCHIVE_CAVEAT if archive else None}
+        return data
 
 
 class ReconciliationOut(Strict):
     job_id: uuid.UUID
     status: str
     clean: bool
+    clean_basis: str | None
+    caveat: str | None
     by_recon_status: dict[str, int]
     not_matched: list[UnitOut]
 
@@ -185,6 +217,8 @@ async def _job_out(s: AsyncSession, job_id: uuid.UUID) -> JobOut:
         workspace_id=job.workspace_id,
         status=job.status,
         clean=job.status in CLEAN,
+        clean_basis=clean_basis(job.status),
+        caveat=caveat(job.status),
         requested_by=job.requested_by,
         rerun_of=job.rerun_of,
         created_at=job.created_at,
@@ -320,6 +354,13 @@ async def create_job(
             raise unprocessable("connection_id is not a connection of this matter's client")
         if conn.status != "active":
             raise conflict(f"connection is {conn.status}")
+        connector = res.connectors.get(conn.source)
+        if connector is None:
+            raise unprocessable(f"no connector for {conn.source}")
+        if connector.archive_backed and any(sc.type != "channel" for sc in body.scopes):
+            raise unprocessable(
+                "export collections take channel scopes only (no membership history)"
+            )
         if body.workspace_id is not None:
             ws = (
                 await s.execute(
@@ -515,8 +556,8 @@ async def rerun_job(
 
 # ------------------------------------------------------------------ units, reconciliation, custody
 UNIT_COLUMNS = (
-    "SELECT unit_key, kind, status, recon_status, expected_count, collected_count, file_gaps, last_error"
-    " FROM work_units WHERE job_id = :j"
+    "SELECT unit_key, kind, status, recon_status, expected_count, collected_count, file_gaps, last_error,"
+    " day_anomalies FROM work_units WHERE job_id = :j"
 )
 
 
@@ -574,8 +615,10 @@ async def reconciliation(
         job_id=job_id,
         status=status,
         clean=status in CLEAN,
+        clean_basis=clean_basis(status),
+        caveat=caveat(status),
         by_recon_status=counts,
-        not_matched=[UnitOut(**r._mapping) for r in rows if r.recon_status != "matched"][:500],
+        not_matched=[UnitOut(**r._mapping) for r in rows if r.recon_status not in MATCHED][:500],
     )
 
 
@@ -632,11 +675,23 @@ async def evidence_content(
     writer = EvidenceWriter(res.sessions, res.s3, res.settings)
 
     async def body() -> AsyncIterator[bytes]:
-        async for chunk in writer.open(tenant_id=caller.tenant_id, evidence_id=evidence_id):
+        if row.kind == "archive_entry":  # decompressed from the locked export's pinned version
+            chunks = open_archive_entry(
+                res.sessions,
+                res.s3,
+                res.settings,
+                tenant_id=caller.tenant_id,
+                evidence_id=evidence_id,
+            )
+        else:
+            chunks = writer.open(tenant_id=caller.tenant_id, evidence_id=evidence_id)
+        async for chunk in chunks:
             yield chunk
 
     return StreamingResponse(
         body(),
-        media_type="application/json" if row.kind == "page" else "application/octet-stream",
+        media_type="application/json"
+        if row.kind in ("page", "archive_entry")
+        else "application/octet-stream",
         headers={"x-evidence-sha256": row.sha256, "cache-control": "no-store"},
     )

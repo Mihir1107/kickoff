@@ -55,6 +55,7 @@ TERMINAL = frozenset(
         "completed_with_gaps",
         "completed_unverified",
         "completed_with_failed_units",
+        "completed_against_archive",
         "failed",
         "cancelled",
     }

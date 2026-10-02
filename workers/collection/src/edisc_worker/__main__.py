@@ -13,11 +13,15 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Sequence
 
+import httpx
 import redis.asyncio as aioredis
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
 from temporalio.worker import Worker
+from types_aiobotocore_s3 import S3Client
 
 from edisc_connector_dummy.connector import DummyConnector
+from edisc_connector_slack_export.connector import SlackExportConnector
 from edisc_connectors_base.protocol import Connector
 from edisc_connectors_base.ratelimit import RateLimiter
 from edisc_core.logs import configure_logging, get_logger
@@ -42,8 +46,19 @@ log = get_logger("edisc_worker")
 WORKFLOWS = [CollectionJobWorkflow, CollectUnitWorkflow]
 
 
-def build_connectors(limiter: RateLimiter, sources: Sequence[str]) -> dict[str, Connector]:
-    available: dict[str, Connector] = {"dummy": DummyConnector(limiter)}
+def build_connectors(
+    limiter: RateLimiter,
+    sources: Sequence[str],
+    *,
+    sessions: async_sessionmaker[AsyncSession],
+    s3: S3Client,
+    settings: Settings,
+    http: httpx.AsyncClient,
+) -> dict[str, Connector]:
+    available: dict[str, Connector] = {
+        "dummy": DummyConnector(limiter),
+        "slack_export": SlackExportConnector(sessions, s3, settings, limiter, http),
+    }
     unknown = set(sources) - available.keys()
     if unknown:
         raise SystemExit(f"no connector for source(s): {sorted(unknown)}")
@@ -57,17 +72,22 @@ async def activities_for(
     engine = create_engine(settings, "app")
     sweeper = create_engine(settings, "sweeper", pool_size=1)
     redis = aioredis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=5)
+    http = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
     try:
         sessions = session_factory(engine)
         result = await reconcile_token_refreshes(session_factory(sweeper), sessions)
         log.info("token refresh journal reconciled", **result)
         limiter = RateLimiter(redis, settings.rate_limits)
         async with s3_client(settings) as s3:
+            connectors = build_connectors(
+                limiter, sources, sessions=sessions, s3=s3, settings=settings, http=http
+            )
             yield (
-                Activities(sessions, s3, settings, build_connectors(limiter, sources), client),
+                Activities(sessions, s3, settings, connectors, client),
                 MaintenanceActivities(session_factory(sweeper), sessions, s3, settings),
             )
     finally:
+        await http.aclose()
         await redis.aclose()
         await sweeper.dispose()
         await engine.dispose()

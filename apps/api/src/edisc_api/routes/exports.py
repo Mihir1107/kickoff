@@ -40,10 +40,10 @@ from edisc_api.authz import TENANT, P, Permission, Scope, authorize, perm, permi
 from edisc_api.errors import ApiError, conflict, forbidden, not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, page_of
 from edisc_api.routes.hierarchy import ensure_client_open
+from edisc_connector_slack_export.archive_access import default_limits
 from edisc_core.ids import new_id
 from edisc_db.session import tenant_tx
 from edisc_worker.contracts import EXPORTS_QUEUE, ExportRef, export_workflow_id
-from edisc_worker.exports import default_limits
 
 router = APIRouter(prefix="/v1")
 
@@ -100,6 +100,7 @@ class ExportOut(Strict):
     findings: dict[str, Any]
     connection_id: uuid.UUID | None
     root_prefix: str | None
+    workspace_id: str | None
     created_by: str
     created_at: datetime
     locked_at: datetime | None
@@ -116,7 +117,7 @@ class PartOut(Strict):
 SELECT_ONE = (
     "SELECT id, client_id, status, reject_reason, reject_detail, declared_size, declared_sha256,"
     " declared_plan, limits, sha256, size_bytes, evidence_object_id, version_id, entry_count,"
-    " detected_tier, tier_confirmed, findings, connection_id, root_prefix, created_by, created_at, locked_at,"
+    " detected_tier, tier_confirmed, findings, connection_id, root_prefix, workspace_id, created_by, created_at, locked_at,"
     " validated_at FROM slack_exports WHERE id = :i"
 )
 

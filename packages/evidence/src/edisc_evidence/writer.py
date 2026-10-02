@@ -264,6 +264,66 @@ class EvidenceWriter:
 
         return await self._materialize(tenant_id, None, key, sha256, size, retain, copy)
 
+    async def register_archive_entry(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        job_id: uuid.UUID | None,
+        archive_evidence_id: uuid.UUID,
+        entry_path: str,
+        entry_raw_name: bytes,
+        entry_crc32: int,
+        entry_compressed_size: int,
+        sha256: str,
+        size: int,
+    ) -> WrittenEvidence:
+        """Reference an entry INSIDE a locked archive (ADR 0014 section 2): no bytes are written. The
+        caller read the entry from the archive's pinned version and computed ``sha256``/``size`` of the
+        decompressed bytes (CRC-32 and size checked). The row is complete at once, pinned to the
+        archive's version; the same entry read again (another job) reuses it, and must hash the same."""
+        async with tenant_tx(self._sessions, tenant_id) as s:
+            archive = (
+                await s.execute(
+                    text(
+                        "SELECT storage_key, version_id, retain_until, state, kind FROM evidence_objects"
+                        " WHERE id = :a"
+                    ),
+                    {"a": archive_evidence_id},
+                )
+            ).one()
+            if archive.state != "complete" or archive.kind == "archive_entry":
+                raise EvidenceIntegrityError(
+                    f"evidence {archive_evidence_id} is not a locked archive"
+                )
+            key = f"{archive.storage_key}#{entry_path}"
+            candidate = new_id()
+            await s.execute(
+                text(
+                    "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind, state, sha256,"
+                    " size_bytes, retain_until, completed_at, version_id, source_sha256, source_hash_origin,"
+                    " archive_evidence_id, entry_path, entry_raw_name, entry_crc32, entry_compressed_size)"
+                    " VALUES (:id, :t, :j, :k, 'archive_entry', 'complete', :h, :n, :r, now(), :v, :h,"
+                    " 'collection', :a, :p, :raw, :crc, :cs) ON CONFLICT (storage_key) DO NOTHING"
+                ),
+                {"id": candidate, "t": tenant_id, "j": job_id, "k": key, "h": sha256, "n": size,
+                 "r": archive.retain_until, "v": archive.version_id, "a": archive_evidence_id,
+                 "p": entry_path, "raw": entry_raw_name, "crc": entry_crc32, "cs": entry_compressed_size},
+            )  # fmt: skip
+            row = (
+                await s.execute(
+                    text(
+                        "SELECT id, sha256, size_bytes, version_id, entry_crc32 FROM evidence_objects"
+                        " WHERE storage_key = :k"
+                    ),
+                    {"k": key},
+                )
+            ).one()
+        if (row.sha256, row.size_bytes, row.entry_crc32) != (sha256, size, entry_crc32):
+            raise EvidenceIntegrityError(f"{key}: the entry read now differs from the one recorded")
+        return WrittenEvidence(
+            row.id, key, sha256, size, row.version_id, deduplicated=row.id != candidate
+        )
+
     async def _dedup_hit(
         self, tenant_id: uuid.UUID, key: str, sha256: str, size: int, retain: datetime
     ) -> WrittenEvidence | None:

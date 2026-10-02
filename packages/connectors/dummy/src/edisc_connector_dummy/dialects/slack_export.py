@@ -172,6 +172,7 @@ def _user(u: Any) -> dict[str, Any]:
             "display_name": u.display_name,
             "real_name": u.real_name,
             "avatar_hash": u.avatar_hash,
+            "title": "",
             **({"email": u.email} if u.email else {}),
             **({"bot_id": u.bot_id} if u.bot_id else {}),
         },

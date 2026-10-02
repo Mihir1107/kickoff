@@ -67,6 +67,17 @@ own thread-parent policy (ADR 0011). This replaces the single-scope guard of M11
   scopes of the original, and its units keep the coverage they had. Approximation: for a rerun, the
   in-scope ranges of a conversation come from the scopes covering the re-run units only.
 
+## Amendment (2026-10-02, ADR 0014): reconciliation against an uploaded export
+- Units of an export job are its day files, keyed `{conversation}/{file date}` like every unit; the
+  file date is a hint and items are placed and scoped by their own `ts`.
+- A unit is `matched_against_archive` when every element of its day file became a message item and no
+  file is missing; otherwise `gap`. The expectation is the element count taken at validation.
+- A job whose units are all `matched_against_archive` ends `completed_against_archive`: never
+  `completed`, `clean = false`, `clean_basis = "archive"`, and the ADR 0014 caveat is returned verbatim
+  with the job, its reconciliation and every such unit.
+- Absence detection ("no longer observed") never runs for export units: an export is a snapshot of
+  unknown completeness, so a message missing from it says nothing.
+
 ## Consequences
 - + Gaps are localized to a conversation-day; retries are cheap.
 - − Many tiny units for sparse sources; enumeration writes units to the DB in pages to keep history small.

@@ -139,6 +139,17 @@ collection that pulled it in as thread context). Tested with exactly that pair o
 - Mutation-checked: a volatile field leaking into the fingerprint, missing hint observations, and
   missing absence detection each fail.
 
+## Amendment (2026-10-02, M14.5): the "source" in the key is the platform, not the connector
+`items.source` and the `source` in `tenant + source + source_item_id + content_hash` are the identity
+namespace of what was collected (`Connector.item_source`), not the connector that collected it.
+- Every Slack connector uses `slack`: the live Web API connector, the export connector (ADR 0014) and the
+  dummy source, whose two dialects simulate the Slack Web API. The same message collected via the API
+  and via an export is ONE item with one version when its fingerprint matches (tested: one dummy dataset
+  collected both ways gives zero new items on the second job).
+- Message ids stay `{workspace}/{channel}/{ts}`; for an export the workspace is the team id found in
+  its `users.json`, so it matches the live connection's workspace.
+- `collection_jobs.connector_version` and the custody `job_started` payload still name the connector.
+
 ## Consequences
 - + Re-fetches are free no-ops; edits/deletes produce versions; nothing volatile is lost.
 - − Fingerprint definitions are consequential and must be reviewed per source.

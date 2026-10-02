@@ -205,7 +205,8 @@ class Activities:
     @_ticking
     async def finalize_job(self, ref: JobRef) -> str:
         tenant, job = self._ids(ref)
-        return (await self._pipeline().finalize_job(tenant_id=tenant, job_id=job)).value
+        pipeline, _ = await self._context(tenant, job)  # the job's own connector decides its status
+        return (await pipeline.finalize_job(tenant_id=tenant, job_id=job)).value
 
     # ------------------------------------------------------------------ unit level
     @activity.defn(name="collect_pages")

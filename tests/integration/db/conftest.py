@@ -252,6 +252,17 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
             export,
         )
         await conn.execute(
+            "INSERT INTO export_day_files (tenant_id, export_id, entry_idx, elements) VALUES ($1, $2, 0, 1)",
+            t,
+            export,
+        )
+        await conn.execute(
+            "INSERT INTO export_threads (tenant_id, export_id, entry_idx, element_idx, conversation_id,"
+            " thread_ts, ts) VALUES ($1, $2, 0, 0, 'C1', '1.000001', '1.000001')",
+            t,
+            export,
+        )
+        await conn.execute(
             "INSERT INTO retention_gaps (id, tenant_id, evidence_object_id, owner_type, owner_id,"
             " unprotected_from, unprotected_until, outcome) VALUES ($1, $2, $3, 'matter', $4, now(),"
             " now(), 'relocked')",
@@ -313,5 +324,7 @@ TENANT_TABLES = [
     "export_entries",
     "export_conversations",
     "retention_gaps",
+    "export_day_files",
+    "export_threads",
 ]
 ALL_TABLES = ["tenants", *TENANT_TABLES]

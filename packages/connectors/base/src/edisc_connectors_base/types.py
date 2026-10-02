@@ -84,11 +84,29 @@ Cursor = str
 
 
 @dataclass(frozen=True)
+class EntryRef:
+    """The batch's bytes ARE an entry of an archive already locked as evidence (an uploaded export,
+    ADR 0014): the pipeline references the entry instead of writing the bytes again."""
+
+    archive_evidence_id: uuid.UUID
+    name: str
+    raw_name: bytes
+    crc32: int
+    compressed_size: int
+    sha256: str  # of the decompressed bytes, computed while reading (CRC and size checked)
+    size: int
+
+
+@dataclass(frozen=True)
 class RawBatch:
     body: bytes  # the exact bytes the source returned for one request: stored as-is in WORM
     next_cursor: Cursor | None  # None when the unit is exhausted
     kind: BatchKind
     request: Mapping[str, str]  # method + parameters, for provenance (never secrets)
+    entry: EntryRef | None = None  # set: ``body`` is this archive entry (no new WORM object)
+    select: frozenset[str] | None = (
+        None  # set: only these message ts in ``body`` belong to the batch
+    )
 
 
 class FileUnavailableReason(StrEnum):
@@ -96,11 +114,14 @@ class FileUnavailableReason(StrEnum):
     EXTERNAL_OR_HIDDEN = "external_or_hidden"
     EXPIRED_URL = "expired_url"
     PERMISSION = "permission"
+    UNREACHABLE = (
+        "unreachable"  # the file host did not answer (export links); retried, then recorded
+    )
 
     @property
     def transient(self) -> bool:
         """A fresh attempt may succeed (retried in the batch, ADR 0012); the rest are recorded at once."""
-        return self is FileUnavailableReason.EXPIRED_URL
+        return self in (FileUnavailableReason.EXPIRED_URL, FileUnavailableReason.UNREACHABLE)
 
 
 class AccessLossReason(StrEnum):

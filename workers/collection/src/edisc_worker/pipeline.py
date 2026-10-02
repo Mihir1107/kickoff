@@ -20,6 +20,7 @@ Every function is idempotent and resumable from the database state alone.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
@@ -45,19 +46,20 @@ from edisc_connectors_base.types import (
     WorkUnit,
 )
 from edisc_core.ids import new_id
-from edisc_core.schemas import JobStatus, ReconStatus, ScopeType
+from edisc_core.schemas import ItemType, JobStatus, ReconStatus, ScopeType
 from edisc_core.settings import Settings
 from edisc_core.time import day_bounds, ensure_utc, utc_now
 from edisc_custody.log import anchor_if_due, append, append_batch, seal_job_chain
 from edisc_custody.recovery import recover_job_evidence
 from edisc_db.session import tenant_tx
-from edisc_evidence.writer import EvidenceWriter
+from edisc_evidence.writer import EvidenceIntegrityError, EvidenceWriter
 from edisc_normalizer.model import (
     Derived,
     EvidenceRef,
     FileEvidence,
     FileUnavailable,
     NormalizeContext,
+    PageResult,
 )
 from edisc_normalizer.slack import (
     NO_LONGER_OBSERVED,
@@ -126,9 +128,12 @@ class UnitScope:
         workspace_id: str,
         conversation_id: str | None,
         day: date | None,
+        dialect: str = "api",
     ) -> NormalizeContext:
         if conversation_id is None:  # directory pages are not date-scoped
-            return NormalizeContext(tenant_id, source, workspace_id, None, None, None, None)
+            return NormalizeContext(
+                tenant_id, source, workspace_id, None, None, None, None, dialect=dialect
+            )
         return NormalizeContext(
             tenant_id,
             source,
@@ -138,6 +143,7 @@ class UnitScope:
             self.scope.date_from,
             self.scope.date_to,
             ranges=self.ranges,
+            dialect=dialect,
         )
 
 
@@ -610,12 +616,14 @@ class Pipeline:
         retention: datetime,
         conn: Connection,
         body: bytes,
+        dialect: str = "api",
+        select: frozenset[str] | None = None,
     ) -> dict[str, FileEvidence | FileUnavailable]:
         """Write every file the page references, ``evidence_file_concurrency`` at a time (memory stays
         bounded by that x the small-file threshold; every download still takes a rate-limit token).
         The first unexpected failure cancels the rest and is raised unchanged, so its error class
         decides the retry; failures of the cancelled writes are attached to it as notes."""
-        file_ids = list(dict.fromkeys(meta.file_id for meta in file_refs(body)))
+        file_ids = list(dict.fromkeys(meta.file_id for meta in file_refs(body, dialect, select)))
         if not file_ids:
             return {}
         gate = asyncio.Semaphore(self.settings.evidence_file_concurrency)
@@ -700,26 +708,50 @@ class Pipeline:
     ) -> bool:
         """One batch, exactly once. Returns False if the checkpoint had already moved (no-op)."""
         retention = await self._retention(tenant_id, job_id)
-        # 1. network I/O first, outside any transaction: evidence written AND completed
-        page = await self.writer.write_page(
-            tenant_id=tenant_id,
-            job_id=job_id,
-            matter_retention_until=retention,
-            stream=_one(batch.body),
-        )
+        dialect = self.connector.dialect
+        # 1. network I/O first, outside any transaction: evidence written AND completed (or, for an
+        # entry of a locked export, referenced: the bytes are already evidence, ADR 0014)
+        if batch.entry is not None:
+            if hashlib.sha256(batch.body).hexdigest() != batch.entry.sha256:
+                raise EvidenceIntegrityError(
+                    f"{batch.entry.name}: bytes differ from the entry read"
+                )
+            page = await self.writer.register_archive_entry(
+                tenant_id=tenant_id,
+                job_id=job_id,
+                archive_evidence_id=batch.entry.archive_evidence_id,
+                entry_path=batch.entry.name,
+                entry_raw_name=batch.entry.raw_name,
+                entry_crc32=batch.entry.crc32,
+                entry_compressed_size=batch.entry.compressed_size,
+                sha256=batch.entry.sha256,
+                size=batch.entry.size,
+            )
+        else:
+            page = await self.writer.write_page(
+                tenant_id=tenant_id,
+                job_id=job_id,
+                matter_retention_until=retention,
+                stream=_one(batch.body),
+            )
         page_ref = EvidenceRef(page.evidence_id, page.storage_key)
         directory = batch.kind is BatchKind.DIRECTORY
         files = (
-            {} if directory else await self._files(tenant_id, job_id, retention, conn, batch.body)
+            {}
+            if directory
+            else await self._files(
+                tenant_id, job_id, retention, conn, batch.body, dialect, batch.select
+            )
         )
         await self.hooks.hit("after_evidence")
 
         ctx = scope.context(
             tenant_id,
-            self.connector.source,
+            self.connector.item_source,
             conn.workspace_id,
             None if directory or unit is None else unit.conversation_id,
             None if directory or unit is None else unit.day,
+            self.connector.dialect,
         )
         # 2. one short transaction
         async with tenant_tx(self.sessions, tenant_id) as s:
@@ -752,7 +784,12 @@ class Pipeline:
                     s, tenant_id=tenant_id, source=ctx.source, subjects=subjects
                 )
                 result = normalize_messages_page(
-                    batch.body, ctx=ctx, page_ref=page_ref, prior=prior, files=files
+                    batch.body,
+                    ctx=ctx,
+                    page_ref=page_ref,
+                    prior=prior,
+                    files=files,
+                    select=batch.select,
                 )
                 extra = (
                     access_restored(ctx=ctx, page=batch.body, page_ref=page_ref, prior=prior)
@@ -760,6 +797,13 @@ class Pipeline:
                     else ()
                 )
             items = (*result.items, *extra)
+            archive_counts = (
+                self._archive_counts(result, unit)
+                if self.connector.archive_backed
+                and batch.kind is BatchKind.HISTORY
+                and unit is not None
+                else None
+            )
             await self._link_batch(
                 s,
                 ctx=ctx,
@@ -772,6 +816,8 @@ class Pipeline:
             await s.execute(
                 text(
                     "UPDATE work_units SET cursor = :c, pages_done = pages_done + 1, file_gaps = file_gaps + :g,"
+                    " archive_accounted = coalesce(CAST(:acc AS integer), archive_accounted),"
+                    " day_anomalies = day_anomalies + :anom,"
                     " last_page_evidence_id = CASE WHEN :hist THEN CAST(:ev AS uuid) ELSE last_page_evidence_id END,"
                     " last_page_fragment_hash = CASE WHEN :hist THEN CAST(:frag AS text) ELSE last_page_fragment_hash END,"
                     " updated_at = now() WHERE job_id = :j AND unit_key = :k"
@@ -781,9 +827,11 @@ class Pipeline:
                     "g": len(result.unavailable_files),
                     "hist": batch.kind is BatchKind.HISTORY,
                     "ev": page.evidence_id,
-                    "frag": messages_fragment_hash(batch.body)
+                    "frag": messages_fragment_hash(batch.body, dialect)
                     if batch.kind is BatchKind.HISTORY
                     else None,
+                    "acc": None if archive_counts is None else archive_counts[0],
+                    "anom": 0 if archive_counts is None else archive_counts[1],
                     "j": job_id,
                     "k": unit_key,
                 },
@@ -793,6 +841,22 @@ class Pipeline:
             self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=job_id
         )
         return True
+
+    @staticmethod
+    def _archive_counts(result: PageResult, unit: WorkUnit) -> tuple[int, int]:
+        """(elements accounted for, elements whose own ts is not on the file's hinted day). Every
+        element of a day file must become a message item (ADR 0014 section 4); the normalizer fails
+        the batch loudly on any element it cannot interpret, so accounted = distinct messages derived."""
+        start, end = day_bounds(unit.day)
+        accounted = {d.source_item_id for d in result.items if d.item_type is ItemType.MESSAGE}
+        anomalies = sum(
+            1
+            for d in result.items
+            if d.item_type is ItemType.MESSAGE
+            and d.sent_at is not None
+            and not start <= d.sent_at < end
+        )
+        return len(accounted), anomalies
 
     async def _link_batch(
         self,
@@ -867,7 +931,12 @@ class Pipeline:
             stream=_one(exc.response),
         )
         ctx = scope.context(
-            tenant_id, self.connector.source, conn.workspace_id, row.conversation_id, row.day
+            tenant_id,
+            self.connector.item_source,
+            conn.workspace_id,
+            row.conversation_id,
+            row.day,
+            self.connector.dialect,
         )
         async with tenant_tx(self.sessions, tenant_id) as s:
             locked = (
@@ -922,6 +991,15 @@ class Pipeline:
             recon, collected = ReconStatus.NOT_APPLICABLE.value, 0
         elif row.recon_status == "access_lost":
             recon, collected = "access_lost", 0
+        elif self.connector.archive_backed:
+            # every element of the day file accounted for, against the archive only (ADR 0014 s.4)
+            collected = row.archive_accounted or 0
+            matched = (
+                row.expected_count is not None
+                and row.archive_accounted == row.expected_count
+                and row.file_gaps == 0
+            )
+            recon = ReconStatus.MATCHED_AGAINST_ARCHIVE.value if matched else ReconStatus.GAP.value
         else:
             collected = await self._collected(tenant_id, job_id, unit_key, row.day)
             if row.expected_count is None:
@@ -934,6 +1012,8 @@ class Pipeline:
                 recon = ReconStatus.MATCHED.value
         absent: tuple[Derived, ...] = ()
         last_page: tuple[str, EvidenceRef] | None = None  # (message-list fragment hash, page)
+        # absence detection compares with earlier clean collections of the source; an export is a
+        # snapshot of unknown completeness, so it never reports anything as no longer observed
         if recon == ReconStatus.MATCHED.value and row.last_page_evidence_id is not None:
             async with tenant_tx(self.sessions, tenant_id) as s:
                 key: str = (
@@ -969,10 +1049,11 @@ class Pipeline:
                 scope = await self.unit_scope(tenant_id, job_id, unit_key)
                 ctx = scope.context(
                     tenant_id,
-                    self.connector.source,
+                    self.connector.item_source,
                     conn.workspace_id,
                     row.conversation_id,
                     row.day,
+                    self.connector.dialect,
                 )
                 before = await self._previously_observed_clean(
                     s, tenant_id, job_id, unit_key, row.day
@@ -1030,6 +1111,11 @@ class Pipeline:
                     "recon_status": recon,
                     "file_gaps": row.file_gaps,
                     "no_longer_observed": len(absent),
+                    **(
+                        {"basis": "archive", "day_anomalies": row.day_anomalies}
+                        if self.connector.archive_backed and row.kind != "directory"
+                        else {}
+                    ),
                 },
                 anchor_every=self.anchor_every,
             )
@@ -1087,7 +1173,7 @@ class Pipeline:
         obs = await load_prior(
             s,
             tenant_id=tenant_id,
-            source=self.connector.source,
+            source=self.connector.item_source,
             subjects=[f"{m}#observation" for m in ids],
         )
         return {m for m in ids if obs[f"{m}#observation"].observation_status != NO_LONGER_OBSERVED}
@@ -1393,6 +1479,8 @@ class Pipeline:
                     status = JobStatus.COMPLETED_WITH_GAPS
                 elif any(u.recon_status == "unverifiable" for u in counted):
                     status = JobStatus.COMPLETED_UNVERIFIED
+                elif self.connector.archive_backed:
+                    status = JobStatus.COMPLETED_AGAINST_ARCHIVE  # never "completed" (ADR 0014)
                 else:
                     status = JobStatus.COMPLETED
                 summary: dict[str, int] = {}

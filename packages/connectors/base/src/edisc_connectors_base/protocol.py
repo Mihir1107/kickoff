@@ -25,8 +25,13 @@ class Limiter(Protocol):
 
 
 class Connector(Protocol):
-    source: str
+    source: str  # the connector (dummy, slack, slack_export, ...)
     version: str  # semver, recorded on every item and custody event
+    # the identity namespace of what it collects: the same Slack message gets the same idempotency key
+    # whichever connector (live API, export) collected it (ADR 0004, ADR 0014 section 7)
+    item_source: str
+    dialect: str  # normalizer dialect: "api" pages or "export" files
+    archive_backed: bool  # units are export day files: reconciled against the archive (ADR 0014)
 
     async def validate_connection(self, conn: Connection) -> ConnectionInfo:
         """Plan tier, granted scopes, known blind spots, whether the source can report counts."""

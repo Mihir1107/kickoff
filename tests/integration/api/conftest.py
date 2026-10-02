@@ -24,15 +24,17 @@ from edisc_api.admin import onboard_tenant
 from edisc_api.app import Resources, create_app
 from edisc_api.auth import DEV_ISSUER, DEV_JWKS, Authenticator, JwksCache, dev_token
 from edisc_connector_dummy.connector import DummyConnector
+from edisc_connector_slack_export.connector import SlackExportConnector
 from edisc_connectors_base.ratelimit import RateLimiter
 from edisc_core.envelope import SecretBox
 from edisc_core.ids import new_id
 from edisc_core.kms import LocalKmsClient
 from edisc_core.settings import Settings
 from edisc_db.session import tenant_tx
-from edisc_worker.contracts import EXPORTS_QUEUE
+from edisc_worker.activities import Activities
+from edisc_worker.contracts import EXPORTS_QUEUE, task_queue
 from edisc_worker.exports import ExportActivities
-from edisc_worker.workflows import ExportIngestWorkflow
+from edisc_worker.workflows import CollectionJobWorkflow, CollectUnitWorkflow, ExportIngestWorkflow
 
 Sessions = async_sessionmaker[AsyncSession]
 AUDIENCE = "edisc-api"
@@ -215,6 +217,8 @@ def export_settings(api: Api, **overrides: Any) -> Settings:
             "export_upload_part_min_bytes": 5 * MiB,
             "export_complete_wait_seconds": 20,
             "export_read_window_bytes": 1 * MiB,
+            "export_file_hosts": ["files.dummy.test"],
+            "file_retry_backoff_seconds": 0.01,
             **overrides,
         }
     )
@@ -249,3 +253,65 @@ async def exp_batched(api: Api) -> AsyncIterator[Api]:
     """Production batch size (large synthetic exports)."""
     async with export_worker(api) as tuned:
         yield tuned
+
+
+class FileHost:
+    """The file host behind export links (an external service, like the IdP's JWKS endpoint, so it is
+    the one thing faked here). ``outcomes`` maps a file id to an HTTP status or an exception; anything
+    else is served from the dummy dataset."""
+
+    def __init__(self, dataset: Any = None) -> None:
+        self.dataset = dataset
+        self.outcomes: dict[str, int | Exception] = {}
+        self.requests: list[str] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        file_id = request.url.path.strip("/").split("/")[0]
+        self.requests.append(file_id)
+        outcome = self.outcomes.get(file_id)
+        if isinstance(outcome, Exception):
+            raise outcome
+        if isinstance(outcome, int):
+            return httpx.Response(outcome, text="refused")
+        if self.dataset is None:
+            return httpx.Response(404)
+        return httpx.Response(200, content=self.dataset.file_bytes(file_id))
+
+
+def export_connector(api: Api, host: FileHost) -> SlackExportConnector:
+    http = httpx.AsyncClient(transport=httpx.MockTransport(host.handler))
+    return SlackExportConnector(api.sessions, api.s3, api.settings, api.resources.limiter, http)
+
+
+@contextlib.asynccontextmanager
+async def collection_workers(api: Api, host: FileHost) -> AsyncIterator[Api]:
+    """Export upload/validation AND collection workers, plus the dummy (live API) worker, all sharing
+    the export settings; the API resources get the same connectors."""
+    async with export_worker(api) as tuned:
+        connectors = {
+            "dummy": DummyConnector(tuned.resources.limiter),
+            "slack_export": export_connector(tuned, host),
+        }
+        tuned.resources.connectors = connectors
+        acts = Activities(
+            tuned.sessions,
+            tuned.s3,
+            tuned.settings.model_copy(update={"activity_time_box_seconds": 30}),
+            connectors,
+            tuned.temporal,
+        )
+        async with (
+            Worker(
+                tuned.temporal,
+                task_queue=task_queue("slack_export"),
+                workflows=[CollectionJobWorkflow, CollectUnitWorkflow],
+                activities=acts.all(),
+            ),
+            Worker(
+                tuned.temporal,
+                task_queue=task_queue("dummy"),
+                workflows=[CollectionJobWorkflow, CollectUnitWorkflow],
+                activities=acts.all(),
+            ),
+        ):
+            yield tuned

@@ -244,6 +244,8 @@ class WorkUnit(Base):
     retry_after: Mapped[datetime | None] = mapped_column(TZ)
     first_failure_at: Mapped[datetime | None] = mapped_column(TZ)
     failures: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    archive_accounted: Mapped[int | None] = mapped_column(Integer)
+    day_anomalies: Mapped[int] = mapped_column(Integer, server_default=text("0"))
 
 
 class EvidenceObject(Base):
@@ -253,6 +255,10 @@ class EvidenceObject(Base):
         UniqueConstraint("storage_key"),
         ForeignKeyConstraint(
             ["tenant_id", "job_id"], ["collection_jobs.tenant_id", "collection_jobs.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "archive_evidence_id"],
+            ["evidence_objects.tenant_id", "evidence_objects.id"],
         ),
         Index(None, "job_id", "state"),
     )
@@ -272,6 +278,11 @@ class EvidenceObject(Base):
     version_id: Mapped[str | None] = mapped_column(Text)
     source_sha256: Mapped[str | None] = mapped_column(Text)
     source_hash_origin: Mapped[str | None] = mapped_column(Text)
+    archive_evidence_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    entry_path: Mapped[str | None] = mapped_column(Text)
+    entry_raw_name: Mapped[bytes | None] = mapped_column(LargeBinary)
+    entry_crc32: Mapped[int | None] = mapped_column(BigInteger)
+    entry_compressed_size: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class CustodyEvent(Base):
@@ -630,6 +641,7 @@ class SlackExport(Base):
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     updated_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     root_prefix: Mapped[str | None] = mapped_column(Text)
+    workspace_id: Mapped[str | None] = mapped_column(Text)
     locked_at: Mapped[datetime | None] = mapped_column(TZ)
     validated_at: Mapped[datetime | None] = mapped_column(TZ)
 
@@ -678,6 +690,7 @@ class ExportEntry(Base):
     local_header_offset: Mapped[int] = mapped_column(BigInteger)
     raw_name: Mapped[bytes] = mapped_column(LargeBinary)
     name_encoding: Mapped[str] = mapped_column(Text)
+    flags: Mapped[int] = mapped_column(Integer, server_default=text("0"))
 
 
 class ExportConversation(Base):
@@ -717,3 +730,40 @@ class RetentionGap(Base):
     unprotected_until: Mapped[datetime] = mapped_column(TZ)
     outcome: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+
+
+class ExportDayFile(Base):
+    __tablename__ = "export_day_files"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["export_id", "entry_idx"], ["export_entries.export_id", "export_entries.idx"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "export_id"], ["slack_exports.tenant_id", "slack_exports.id"]
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    export_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    entry_idx: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    elements: Mapped[int | None] = mapped_column(Integer)
+    anomalies: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    parse_error: Mapped[str | None] = mapped_column(Text)
+
+
+class ExportThread(Base):
+    __tablename__ = "export_threads"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "export_id"], ["slack_exports.tenant_id", "slack_exports.id"]
+        ),
+        Index(None, "export_id", "conversation_id", "thread_ts"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    export_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    entry_idx: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    element_idx: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(Text)
+    thread_ts: Mapped[str] = mapped_column(Text)
+    ts: Mapped[str] = mapped_column(Text)

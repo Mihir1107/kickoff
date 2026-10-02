@@ -237,16 +237,21 @@ async def soak(
     result_task = asyncio.ensure_future(handle.result())
     kills: list[str] = []
     try:
-        # spread the kills over the expected duration; never kill once the job has finished
+        # spread the kills over the job's PROGRESS (links committed), not wall time: a faster or slower
+        # machine must not let the job finish before every kill fired (a timing-based plan was flaky)
         plan = ["one"] * cfg.kills + (["all"] if cfg.kill_all else [])
         rng.shuffle(plan)
-        budget = max(20.0, cfg.messages / 400)  # rough expected runtime (s) at ~400 msg/s
-        for kind in plan:
-            delay = rng.uniform(0.3, 1.0) * budget / (len(plan) + 1)
-            done, _ = await asyncio.wait({result_task}, timeout=delay)
+        for n, kind in enumerate(plan, start=1):
+            target = int(cfg.messages * (n - rng.uniform(0.0, 0.5)) / (len(plan) + 1))
+            while True:
+                done, _ = await asyncio.wait({result_task}, timeout=0.2)
+                if done:
+                    break
+                counts = await _counts(sessions, tenant, job)
+                if counts.links >= target:
+                    break
             if done:
                 break
-            counts = await _counts(sessions, tenant, job)
             if kind == "all":
                 await pool.stop_all()
                 kills.append(f"ALL at {counts.links} links")
