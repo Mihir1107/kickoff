@@ -247,3 +247,22 @@ def test_zip64_extra_fields_in_the_central_directory_are_honoured_and_checked() 
     short = bytearray(data)
     struct.pack_into("<H", short, first + 46 + nlen + 2, 64)  # zip64 extra length 24 -> 64
     assert code_of(bytes(short)) in {C.BAD_CENTRAL_DIRECTORY, C.BAD_ZIP64}
+
+
+def test_name_decoding_is_reported_never_guessed_silently() -> None:
+    import struct as st
+
+    from edisc_custody.archive import NameEncoding, decode_name
+
+    assert decode_name(b"a.json", 0, b"", 0) == ("a.json", NameEncoding.ASCII)
+    assert decode_name("café".encode(), 0x800, b"", 0) == ("café", NameEncoding.UTF8)
+    assert decode_name("café".encode(), 0, b"", 0) == ("café", NameEncoding.UTF8_UNFLAGGED)
+    assert decode_name("café".encode("cp437"), 0, b"", 0) == ("café", NameEncoding.CP437)
+    header = b"caf?"
+    body = st.pack("<BI", 1, zlib.crc32(header)) + "café".encode()
+    extra = st.pack("<HH", 0x7075, len(body)) + body
+    assert decode_name(header, 0, extra, 0) == ("café", NameEncoding.UTF8_EXTRA)
+    stale = st.pack("<HH", 0x7075, len(body)) + st.pack("<BI", 1, 0) + "café".encode()
+    assert decode_name(header, 0, stale, 0) == ("caf?", NameEncoding.ASCII)  # stale CRC: ignored
+    with pytest.raises(ArchiveError):
+        decode_name(b"\xff", 0x800, b"", 0)  # flagged UTF-8 that is not UTF-8

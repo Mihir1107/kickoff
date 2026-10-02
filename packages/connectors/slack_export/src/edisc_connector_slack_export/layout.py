@@ -64,9 +64,60 @@ class Placement:
     hint_day: date | None = None
 
 
+JUNK_DIRS = ("__MACOSX/",)  # macOS Archive Utility: AppleDouble twins of every file
+JUNK_FILES = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
+
+
+def is_junk(name: str) -> bool:
+    """Operating-system litter added when an export is re-zipped. Listed as unexpected entries, never a
+    reason to reject (M14.4)."""
+    return name.startswith(JUNK_DIRS) or name.rstrip("/").rsplit("/", 1)[-1] in JUNK_FILES
+
+
+class RootDetector:
+    """Finds a single wrapper folder around the whole export (``"Acme Slack export Jan 1 2026/..."``),
+    fed every entry name in one pass with constant memory. The wrapper counts only if every non-junk
+    entry is under it AND a conversation metadata file sits directly in it, so a lone conversation
+    folder is never mistaken for a wrapper."""
+
+    def __init__(self) -> None:
+        self._first: str | None = None
+        self._single = True
+        self._metadata = False
+
+    def feed(self, name: str, is_dir: bool) -> None:
+        if not self._single or is_junk(name):
+            return
+        head, _, rest = name.partition("/")
+        if not rest and not (is_dir and name.endswith("/")):
+            self._single = False  # a top-level file: no wrapper
+            return
+        if self._first is None:
+            self._first = head
+        elif head != self._first:
+            self._single = False
+            return
+        if rest in CONVERSATION_FILES:
+            self._metadata = True
+
+    def root(self) -> str | None:
+        """``"<wrapper>/"`` or None."""
+        if self._single and self._metadata and self._first is not None:
+            return self._first + "/"
+        return None
+
+
+def relative(name: str, root: str | None) -> str | None:
+    """The name inside the export root, or None when it lies outside the root."""
+    if root is None:
+        return name
+    return name[len(root) :] if name.startswith(root) else None
+
+
 def classify(name: str, is_dir: bool) -> Placement:
     """Where an entry sits in the documented layout. Names were already validated by the archive
-    reader (no absolute paths, ``..``, empty segments or backslashes)."""
+    reader (no absolute paths, ``..``, empty segments or backslashes). Pass the name RELATIVE to the
+    export root (``relative``); junk is the caller's ``is_junk`` check on the full name."""
     parts = name.rstrip("/").split("/")
     if is_dir:
         return Placement("directory")

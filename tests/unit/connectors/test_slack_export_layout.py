@@ -9,10 +9,13 @@ import pytest
 from edisc_connector_slack_export.layout import (
     BLIND_SPOTS_PUBLIC_ONLY,
     Placement,
+    RootDetector,
     classify,
     conversation_record,
     detect_tier,
+    is_junk,
     nested_metadata,
+    relative,
 )
 
 
@@ -86,3 +89,38 @@ def test_tier_detection() -> None:
     )
     assert downgraded is not None and any("public channels only" in w for w in downgraded.warnings)
     assert detect_tier({"users.json"}, nested_metadata_seen=False, declared_plan=None) is None
+
+
+def _root(names: list[str]) -> str | None:
+    d = RootDetector()
+    for n in names:
+        d.feed(n, n.endswith("/"))
+    return d.root()
+
+
+def test_wrapper_folder_detection() -> None:
+    w = "Acme Slack export Jan 1 2026"
+    assert _root([f"{w}/", f"{w}/channels.json", f"{w}/general/2026-01-05.json"]) == f"{w}/"
+    # macOS litter does not hide a wrapper
+    assert (
+        _root([f"{w}/channels.json", "__MACOSX/", f"__MACOSX/{w}/._channels.json", ".DS_Store"])
+        == f"{w}/"
+    )
+    assert _root(["channels.json", "general/2026-01-05.json"]) is None  # plain export
+    assert _root(["general/2026-01-05.json", "general/2026-01-06.json"]) is None  # a lone folder
+    assert _root([f"{w}/channels.json", "other/channels.json"]) is None  # two roots
+    assert relative(f"{w}/general/x.json", f"{w}/") == "general/x.json"
+    assert relative("elsewhere.json", f"{w}/") is None
+    assert relative("a.json", None) == "a.json"
+
+
+def test_os_litter() -> None:
+    for junk in (
+        "__MACOSX/",
+        "__MACOSX/general/._2026-01-05.json",
+        ".DS_Store",
+        "general/.DS_Store",
+        "Thumbs.db",
+    ):
+        assert is_junk(junk), junk
+    assert not is_junk("general/2026-01-05.json") and not is_junk("MACOSX.json")

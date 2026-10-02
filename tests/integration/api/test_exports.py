@@ -12,52 +12,20 @@ import os
 import struct
 import uuid
 import zipfile
-from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 import pytest
 from botocore.exceptions import ClientError
 from sqlalchemy import text
-from temporalio.worker import Worker
 
-from edisc_core.settings import Settings
 from edisc_db.session import tenant_tx
-from edisc_worker.contracts import EXPORTS_QUEUE
-from edisc_worker.exports import ExportActivities, ExportIngest
-from edisc_worker.workflows import ExportIngestWorkflow
+from edisc_worker.exports import ExportIngest
 
 from ...unit.custody.zips import cd_offset, make_zip, patch_cd
 from .conftest import Api, TenantCtx, add_principal
 
 MiB = 1 << 20
-
-
-def export_settings(api: Api, **overrides: Any) -> Settings:
-    return api.settings.model_copy(
-        update={
-            "export_upload_part_min_bytes": 5 * MiB,
-            "export_complete_wait_seconds": 20,
-            "export_read_window_bytes": 1 * MiB,
-            **overrides,
-        }
-    )
-
-
-@pytest.fixture
-async def exp(api: Api) -> AsyncIterator[Api]:
-    """The API with export settings, and the ``exports`` worker those settings drive."""
-    settings = export_settings(api, export_entry_batch=3)  # several batches even for small zips
-    api.resources.settings = settings
-    tuned = Api(settings, api.sessions, api.s3, api.temporal, api.resources, api.http)
-    acts = ExportActivities(api.sessions, api.s3, settings)
-    async with Worker(
-        api.temporal,
-        task_queue=EXPORTS_QUEUE,
-        workflows=[ExportIngestWorkflow],
-        activities=acts.all(),
-    ):
-        yield tuned
 
 
 def slack_export(*, full: bool = False, extra: dict[str, bytes] | None = None) -> bytes:

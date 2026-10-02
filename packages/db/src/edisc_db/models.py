@@ -629,6 +629,7 @@ class SlackExport(Base):
     created_by: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     updated_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    root_prefix: Mapped[str | None] = mapped_column(Text)
     locked_at: Mapped[datetime | None] = mapped_column(TZ)
     validated_at: Mapped[datetime | None] = mapped_column(TZ)
 
@@ -675,6 +676,8 @@ class ExportEntry(Base):
     compressed_size: Mapped[int] = mapped_column(BigInteger)
     uncompressed_size: Mapped[int] = mapped_column(BigInteger)
     local_header_offset: Mapped[int] = mapped_column(BigInteger)
+    raw_name: Mapped[bytes] = mapped_column(LargeBinary)
+    name_encoding: Mapped[str] = mapped_column(Text)
 
 
 class ExportConversation(Base):

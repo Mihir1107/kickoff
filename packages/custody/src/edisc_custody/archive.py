@@ -129,6 +129,17 @@ class Directory:
     zip64: bool
 
 
+class NameEncoding(StrEnum):
+    """How an entry name was decoded. Anything but ``ascii``/``utf-8`` is reported by callers: the
+    decoded name may not be what the archiver meant, so it is never used silently."""
+
+    ASCII = "ascii"
+    UTF8 = "utf-8"  # general-purpose flag bit 11 set
+    UTF8_EXTRA = "utf-8-extra"  # Info-ZIP Unicode Path extra field (0x7075), CRC-checked
+    UTF8_UNFLAGGED = "utf-8-unflagged"  # no flag, but the bytes are valid UTF-8 (e.g. macOS)
+    CP437 = "cp437"  # no flag and not UTF-8: the ZIP default code page
+
+
 @dataclass(frozen=True)
 class Entry:
     index: int  # position in the central directory
@@ -140,6 +151,45 @@ class Entry:
     compressed_size: int
     uncompressed_size: int
     local_header_offset: int
+    raw_name: bytes = b""  # the exact name bytes: what the local header must repeat
+    name_encoding: NameEncoding = NameEncoding.ASCII
+
+
+def decode_name(raw: bytes, flags: int, extra: bytes, index: int) -> tuple[str, NameEncoding]:
+    """The entry name and how it was decoded. Never guesses silently: the encoding is returned."""
+    if flags & 0x800:
+        try:
+            return raw.decode("utf-8"), NameEncoding.UTF8
+        except UnicodeDecodeError as exc:
+            raise _fail(ArchiveErrorCode.BAD_NAME, f"entry {index}: name is not UTF-8") from exc
+    # before the ASCII shortcut: some archivers write a lossy ASCII header ("caf?") plus the real name
+    unicode_path = _unicode_path_extra(raw, extra)
+    if unicode_path is not None:
+        return unicode_path, NameEncoding.UTF8_EXTRA
+    if raw.isascii():
+        return raw.decode("ascii"), NameEncoding.ASCII
+    try:
+        return raw.decode("utf-8"), NameEncoding.UTF8_UNFLAGGED
+    except UnicodeDecodeError:
+        return raw.decode("cp437"), NameEncoding.CP437
+
+
+def _unicode_path_extra(raw: bytes, extra: bytes) -> str | None:
+    """Info-ZIP Unicode Path (0x7075): version 1, CRC-32 of the header name, UTF-8 name. Ignored unless
+    the CRC matches the name actually in the header (the field may be stale after a rename)."""
+    pos = 0
+    while pos + 4 <= len(extra):
+        tag, length = struct.unpack_from("<HH", extra, pos)
+        body = extra[pos + 4 : pos + 4 + length]
+        if tag == 0x7075 and len(body) == length and length > 5 and body[0] == 1:
+            if struct.unpack_from("<I", body, 1)[0] == zlib.crc32(raw):
+                try:
+                    return body[5:].decode("utf-8")
+                except UnicodeDecodeError:
+                    return None
+            return None
+        pos += 4 + length
+    return None
 
 
 def fold_name(name: str) -> str:
@@ -322,10 +372,7 @@ async def iter_central_directory(
             raise _fail(ArchiveErrorCode.ENCRYPTED, f"entry {index} is encrypted")
         if method not in (STORED, DEFLATED):
             raise _fail(ArchiveErrorCode.METHOD, f"entry {index}: method {method}")
-        try:
-            name = raw_name.decode("utf-8") if flags & 0x800 else raw_name.decode("cp437")
-        except UnicodeDecodeError as exc:
-            raise _fail(ArchiveErrorCode.BAD_NAME, f"entry {index}: undecodable name") from exc
+        name, encoding = decode_name(raw_name, flags, extra, index)
         is_dir = check_name(name, limits)
         if made_by >> 8 == 3 and (ext_attr >> 16) & 0o170000 == 0o120000:
             raise _fail(ArchiveErrorCode.SYMLINK, f"entry {index} {name!r} is a symlink")
@@ -347,7 +394,9 @@ async def iter_central_directory(
             raise _fail(ArchiveErrorCode.TOTAL_TOO_LARGE, f"decompressed total exceeds {total_cap}")
         if is_dir and usize:
             raise _fail(ArchiveErrorCode.BAD_NAME, f"directory entry {name!r} has data")
-        yield Entry(index, name, is_dir, method, flags, crc, csize, usize, offset)
+        yield Entry(
+            index, name, is_dir, method, flags, crc, csize, usize, offset, raw_name, encoding
+        )
         index += 1
     if len(buf) - at or read_pos != end:
         raise _fail(
@@ -372,7 +421,7 @@ async def data_offset(src: Source, entry: Entry, limits: ArchiveLimits) -> int:
     if sig != LOCAL_SIG:
         raise _fail(ArchiveErrorCode.HEADER_MISMATCH, f"entry {entry.index}: bad local signature")
     name = await _read_exact(src, entry.local_header_offset + LOCAL_LEN, nlen, "local name")
-    expected = entry.name.encode("utf-8" if entry.flags & 0x800 else "cp437", "strict")
+    expected = entry.raw_name or entry.name.encode("utf-8" if entry.flags & 0x800 else "cp437")
     if name != expected or method != entry.method or (flags & 0x1):
         raise _fail(ArchiveErrorCode.HEADER_MISMATCH, f"entry {entry.index}: local header differs")
     if not flags & 0x8 and crc != entry.crc32:  # without a data descriptor the local CRC must match

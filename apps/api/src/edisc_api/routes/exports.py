@@ -99,6 +99,7 @@ class ExportOut(Strict):
     tier_confirmed: bool | None
     findings: dict[str, Any]
     connection_id: uuid.UUID | None
+    root_prefix: str | None
     created_by: str
     created_at: datetime
     locked_at: datetime | None
@@ -115,7 +116,7 @@ class PartOut(Strict):
 SELECT_ONE = (
     "SELECT id, client_id, status, reject_reason, reject_detail, declared_size, declared_sha256,"
     " declared_plan, limits, sha256, size_bytes, evidence_object_id, version_id, entry_count,"
-    " detected_tier, tier_confirmed, findings, connection_id, created_by, created_at, locked_at,"
+    " detected_tier, tier_confirmed, findings, connection_id, root_prefix, created_by, created_at, locked_at,"
     " validated_at FROM slack_exports WHERE id = :i"
 )
 

@@ -239,8 +239,9 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
         )
         await conn.execute(
             "INSERT INTO export_entries (tenant_id, export_id, idx, name, folded_name, kind, method,"
-            " crc32, compressed_size, uncompressed_size, local_header_offset)"
-            " VALUES ($1, $2, 0, 'users.json', 'users.json', 'metadata', 0, 0, 2, 2, 0)",
+            " crc32, compressed_size, uncompressed_size, local_header_offset, raw_name, name_encoding)"
+            " VALUES ($1, $2, 0, 'users.json', 'users.json', 'metadata', 0, 0, 2, 2, 0, 'users.json',"
+            " 'ascii')",
             t,
             export,
         )

@@ -242,6 +242,22 @@ An export has no server-side counts. Completeness is checked against the archive
   `export_upload_completed` (uploader), `export_uploaded`, `export_rejected` / `export_validated` and
   `export_upload_reopened` (actor `system:export-ingest`, uploader named in the payload).
 
+### Real-world archive variants (M14.4)
+Exports reach us re-zipped, wrapped and produced by different zippers. All of these are accepted and
+reported, never rejected and never silently altered:
+
+| Variant | Handling |
+|---|---|
+| macOS re-zip: `__MACOSX/` AppleDouble twins, `.DS_Store` (also `Thumbs.db`, `desktop.ini`) | classified as unexpected entries, listed (`os_metadata_entries`, `unknown_entries`), kept in the evidence |
+| One wrapper folder around everything (`"Acme Slack export Jan 1 2026/channels.json"`) | a first directory pass (constant memory) detects a single common first segment holding a conversation metadata file; it becomes the root, is reported as `root_prefix`, and the layout is classified relative to it. A lone conversation folder is never taken for a wrapper. |
+| ZIP64 (over 4 GiB or 65,535 entries, or forced) | supported and cross-checked (§3) |
+| Streaming zips with data descriptors (bit 3) | local sizes/CRC are not compared (they are zero); the central directory's are, and every read checks CRC and size |
+| Non-ASCII names | decoded as: UTF-8 when flagged; the Info-ZIP Unicode Path field (0x7075) when its CRC matches the header name; otherwise UTF-8 if the bytes are valid UTF-8 (macOS writes UTF-8 without the flag); otherwise CP437 (the ZIP default). Every non-flagged decode is reported (`name_encodings`). The exact name bytes are stored (`export_entries.raw_name`): the local header must repeat them and `edisc-verify` finds entries by them. A name decoded differently from what the archiver meant shows up as a folder no metadata file lists and a conversation without messages, besides the encoding finding. |
+
+The dummy generator writes all of these (`edisc_connector_dummy.dialects.slack_export`, with its own
+small ZIP writer because `zipfile` cannot produce unflagged UTF-8 names or forced data descriptors);
+`zipfile` and Info-ZIP `unzip -t` accept every variant.
+
 ## Consequences
 - Plus: the uploaded bytes are locked and hashed before any parsing. Every item traces to an entry
   verifiable offline from the zip alone, with no second copy of the data.

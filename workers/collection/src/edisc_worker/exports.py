@@ -34,11 +34,15 @@ from types_aiobotocore_s3 import S3Client
 from edisc_connector_slack_export.layout import (
     CONVERSATION_FILES,
     KNOWN_METADATA,
+    Placement,
+    RootDetector,
     Tier,
     classify,
     conversation_record,
     detect_tier,
+    is_junk,
     nested_metadata,
+    relative,
 )
 from edisc_core.ids import new_id
 from edisc_core.jsonstream import JsonStreamError, iter_array_elements
@@ -49,6 +53,7 @@ from edisc_custody.archive import (
     ArchiveErrorCode,
     ArchiveLimits,
     Entry,
+    NameEncoding,
     fold_name,
     iter_central_directory,
     locate_directory,
@@ -106,6 +111,11 @@ class _Scan:
     unrecognised_metadata: list[str] = field(default_factory=list)
     unrecognised_metadata_count: int = 0
     nested_metadata: bool = False
+    root: str | None = None
+    junk: int = 0
+    junk_sample: list[str] = field(default_factory=list)
+    encodings: Counter[str] = field(default_factory=Counter)
+    encoding_samples: dict[str, list[str]] = field(default_factory=dict)
 
 
 class ExportIngest:
@@ -293,11 +303,11 @@ class ExportIngest:
             done = await s.execute(
                 text(
                     "UPDATE slack_exports SET status = 'ready', entry_count = :n, detected_tier = :tier,"
-                    " tier_confirmed = :conf, findings = CAST(:f AS jsonb), connection_id = :c,"
+                    " tier_confirmed = :conf, findings = CAST(:f AS jsonb), connection_id = :c, root_prefix = :root,"
                     " validated_at = now(), updated_at = now() WHERE id = :i AND status = 'validating'"
                 ),
                 {"n": scan.entries, "tier": tier.tier, "conf": tier.confirmed,
-                 "f": json.dumps(findings), "c": connection_id, "i": export_id},
+                 "f": json.dumps(findings), "c": connection_id, "i": export_id, "root": scan.root},
             )  # fmt: skip
             if done.rowcount != 1:  # type: ignore[attr-defined]
                 raise RuntimeError(f"export {export_id} left 'validating' under us")
@@ -349,28 +359,44 @@ class ExportIngest:
         limits: ArchiveLimits,
     ) -> _Scan:
         directory = await locate_directory(src, limits)
-        scan = _Scan()
+        # pass 1 (directory only, constant memory): is everything inside one wrapper folder?
+        detector = RootDetector()
+        async for e in iter_central_directory(src, limits, directory):
+            detector.feed(e.name, e.is_dir)
+        scan = _Scan(root=detector.root())
         batch: list[dict[str, Any]] = []
         async for e in iter_central_directory(src, limits, directory):
-            placement = classify(e.name, e.is_dir)
+            rel = relative(e.name, scan.root)
+            junk = is_junk(e.name)
+            placement = Placement("unknown") if junk or rel is None else classify(rel, e.is_dir)
             scan.entries += 1
             scan.kinds[placement.kind] += 1
-            if placement.kind == "metadata":
-                if e.name in KNOWN_METADATA:
-                    scan.metadata[e.name] = e
+            if e.name_encoding not in (NameEncoding.ASCII, NameEncoding.UTF8):
+                scan.encodings[e.name_encoding.value] += 1
+                sample = scan.encoding_samples.setdefault(e.name_encoding.value, [])
+                if len(sample) < SAMPLE:
+                    sample.append(e.name)
+            if junk:
+                scan.junk += 1
+                if len(scan.junk_sample) < SAMPLE:
+                    scan.junk_sample.append(e.name)
+            if placement.kind == "metadata" and rel is not None:
+                if rel in KNOWN_METADATA:
+                    scan.metadata[rel] = e
                 else:
                     scan.unrecognised_metadata_count += 1
                     if len(scan.unrecognised_metadata) < SAMPLE:
                         scan.unrecognised_metadata.append(e.name)
             elif placement.kind == "unknown":
-                scan.nested_metadata |= nested_metadata(e.name)
+                scan.nested_metadata |= rel is not None and not junk and nested_metadata(rel)
                 if len(scan.unknown) < SAMPLE:
                     scan.unknown.append(e.name)
             batch.append(
                 {"idx": e.index, "name": e.name, "folded": fold_name(e.name), "kind": placement.kind,
                  "folder": placement.folder, "day": placement.hint_day, "method": e.method,
                  "crc": e.crc32, "csize": e.compressed_size, "usize": e.uncompressed_size,
-                 "offset": e.local_header_offset}
+                 "offset": e.local_header_offset, "raw": e.raw_name,
+                 "encoding": e.name_encoding.value}
             )  # fmt: skip
             if len(batch) >= self.settings.export_entry_batch:
                 await self._insert_entries(tenant_id, export_id, batch)
@@ -397,11 +423,12 @@ class ExportIngest:
                     text(
                         "INSERT INTO export_entries (tenant_id, export_id, idx, name, folded_name, kind,"
                         " folder, hint_day, method, crc32, compressed_size, uncompressed_size,"
-                        " local_header_offset)"
+                        " local_header_offset, raw_name, name_encoding)"
                         " SELECT CAST(:t AS uuid), CAST(:e AS uuid), * FROM unnest(CAST(:idx AS bigint[]), CAST(:name AS text[]),"
                         " CAST(:folded AS text[]), CAST(:kind AS text[]), CAST(:folder AS text[]),"
                         " CAST(:day AS date[]), CAST(:method AS smallint[]), CAST(:crc AS bigint[]),"
-                        " CAST(:csize AS bigint[]), CAST(:usize AS bigint[]), CAST(:offset AS bigint[]))"
+                        " CAST(:csize AS bigint[]), CAST(:usize AS bigint[]), CAST(:offset AS bigint[]),"
+                        " CAST(:raw AS bytea[]), CAST(:encoding AS text[]))"
                         " ON CONFLICT (export_id, idx) DO NOTHING"
                     ),
                     {"t": tenant_id, "e": export_id, **cols},
@@ -545,6 +572,12 @@ class ExportIngest:
                 "sample": scan.unrecognised_metadata,
             },
             "metadata_files": sorted(scan.metadata),
+            "root_prefix": scan.root,
+            "os_metadata_entries": {"count": scan.junk, "sample": scan.junk_sample},
+            "name_encodings": {
+                enc: {"count": n, "sample": scan.encoding_samples[enc]}
+                for enc, n in sorted(scan.encodings.items())
+            },
             "conversations": conversations,
             "invalid_metadata_records": records["invalid_records"],
             "folders_without_conversation": orphan_folders,
