@@ -15,5 +15,6 @@
 | 0011 | Thread replies in range whose parent is out of range (**proposed**) |
 | 0012 | Temporal workflow design: fan-out, continue-as-new, errors, cancellation, versioning |
 | 0013 | API authentication and authorization: tenant > client > matter > workspace, scoped roles |
+| 0014 | Slack export ingestion: lock-first upload, entries verifiable in the zip, hostile-archive limits, archive-relative completeness (**proposed**) |
 
 New ADRs: copy the structure (Status / Context / Decision / Consequences). Superseded ADRs are kept and marked.
