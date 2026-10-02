@@ -72,5 +72,7 @@ def test_every_sweep_has_a_sane_interval() -> None:
         "sweep_anchors",
         "reconcile_token_refreshes",
         "sweep_stale_uploads",
+        "extend_retention",
     }
-    assert all(timedelta(minutes=1) <= s.every <= timedelta(hours=1) for s in SWEEPS)
+    # retention extension works against a 60-day floor: every 6 hours is plenty
+    assert all(timedelta(minutes=1) <= s.every <= timedelta(hours=6) for s in SWEEPS)

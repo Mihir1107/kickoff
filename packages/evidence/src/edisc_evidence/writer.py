@@ -283,7 +283,7 @@ class EvidenceWriter:
             return None
         if row.sha256 != sha256:
             raise EvidenceIntegrityError(f"{key}: registry sha256 != {sha256}")
-        await self._extend_retention(
+        await self.extend_retention(
             tenant_id, row.id, key, row.version_id, row.retain_until, retain
         )
         return WrittenEvidence(row.id, key, sha256, size, row.version_id, deduplicated=True)
@@ -347,7 +347,7 @@ class EvidenceWriter:
         if row.state == "complete":
             if row.sha256 != sha256:
                 raise EvidenceIntegrityError(f"{key}: registry sha256 != {sha256}")
-            await self._extend_retention(
+            await self.extend_retention(
                 tenant_id, row.id, key, row.version_id, row.retain_until, retain
             )
             return WrittenEvidence(row.id, key, sha256, size, row.version_id, deduplicated=True)
@@ -565,7 +565,7 @@ class EvidenceWriter:
         return VerifyResult(evidence_id, (digest, size) == (row.sha256, row.size_bytes), shadows)
 
     # ------------------------------------------------------------------ retention
-    async def _extend_retention(
+    async def extend_retention(
         self,
         tenant_id: uuid.UUID,
         evidence_id: uuid.UUID,
@@ -573,10 +573,12 @@ class EvidenceWriter:
         version_id: str,
         current: datetime,
         wanted: datetime,
-    ) -> None:
-        """Extend-only, and only below the floor (``extension_needed``)."""
-        if wanted <= current or not extension_needed(self._settings, current, wanted):
-            return
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Extend-only, and only below the floor (``extension_needed``). True if it extended."""
+        if wanted <= current or not extension_needed(self._settings, current, wanted, now=now):
+            return False
         try:
             await self._s3.put_object_retention(
                 Bucket=self._bucket,
@@ -601,6 +603,7 @@ class EvidenceWriter:
                 ),
                 {"r": wanted, "id": evidence_id},
             )
+        return True
 
     # ------------------------------------------------------------------ registry
     async def _register(

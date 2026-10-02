@@ -8,11 +8,12 @@ from datetime import datetime
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, ResourcesDep
 from edisc_api.authz import TENANT, P, Scope, authorize, perm, visible_ids
-from edisc_api.errors import not_found, unprocessable
+from edisc_api.errors import conflict, not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, page_of
 from edisc_core.ids import new_id
 from edisc_core.time import UtcDatetime, utc_now
@@ -34,6 +35,7 @@ class ClientOut(Strict):
     name: str
     is_default: bool
     created_at: datetime
+    closed_at: datetime | None
 
 
 class MatterIn(Strict):
@@ -47,6 +49,7 @@ class MatterOut(Strict):
     name: str
     retention_until: datetime
     created_at: datetime
+    closed_at: datetime | None
 
 
 class WorkspaceIn(Strict):
@@ -58,6 +61,28 @@ class WorkspaceOut(Strict):
     matter_id: uuid.UUID
     name: str
     created_at: datetime
+
+
+CLIENT_ONE = "SELECT id, name, is_default, created_at, closed_at FROM clients WHERE id = :i"
+MATTER_ONE = (
+    "SELECT id, client_id, name, retention_until, created_at, closed_at FROM matters WHERE id = :i"
+)
+
+
+async def ensure_client_open(s: AsyncSession, client_id: uuid.UUID) -> None:
+    closed = (
+        await s.execute(text("SELECT closed_at FROM clients WHERE id = :i"), {"i": client_id})
+    ).scalar_one_or_none()
+    if closed is not None:
+        raise conflict("the client is closed")
+
+
+async def ensure_matter_open(s: AsyncSession, matter_id: uuid.UUID) -> None:
+    closed = (
+        await s.execute(text("SELECT closed_at FROM matters WHERE id = :i"), {"i": matter_id})
+    ).scalar_one_or_none()
+    if closed is not None:
+        raise conflict("the matter is closed")
 
 
 # ------------------------------------------------------------------ clients
@@ -73,7 +98,7 @@ async def create_client(
             await s.execute(
                 text(
                     "INSERT INTO clients (id, tenant_id, name) VALUES (:i, :t, :n)"
-                    " RETURNING id, name, is_default, created_at"
+                    " RETURNING id, name, is_default, created_at, closed_at"
                 ),
                 {"i": new_id(), "t": caller.tenant_id, "n": body.name},
             )
@@ -96,7 +121,7 @@ async def list_clients(
         rows = (
             await s.execute(
                 text(
-                    "SELECT id, name, is_default, created_at FROM clients"
+                    "SELECT id, name, is_default, created_at, closed_at FROM clients"
                     " WHERE (CAST(:after AS uuid) IS NULL OR id > :after)"
                     " AND (CAST(:all AS boolean) OR id = ANY(:ids)) ORDER BY id LIMIT :n"
                 ),
@@ -117,7 +142,7 @@ async def get_client(client_id: uuid.UUID, caller: CallerDep, res: ResourcesDep)
         await authorize(s, caller, P.CLIENT_READ, Scope("client", client_id))
         row = (
             await s.execute(
-                text("SELECT id, name, is_default, created_at FROM clients WHERE id = :i"),
+                text(CLIENT_ONE),
                 {"i": client_id},
             )
         ).one()
@@ -136,11 +161,12 @@ async def create_matter(
         raise unprocessable("retention_until must be in the future")
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await authorize(s, caller, P.MATTER_CREATE, Scope("client", client_id))
+        await ensure_client_open(s, client_id)
         row = (
             await s.execute(
                 text(
                     "INSERT INTO matters (id, tenant_id, client_id, name, retention_until)"
-                    " VALUES (:i, :t, :c, :n, :r) RETURNING id, client_id, name, retention_until, created_at"
+                    " VALUES (:i, :t, :c, :n, :r) RETURNING id, client_id, name, retention_until, created_at, closed_at"
                 ),
                 {
                     "i": new_id(),
@@ -191,7 +217,7 @@ async def list_matters(
         rows = (
             await s.execute(
                 text(
-                    "SELECT id, client_id, name, retention_until, created_at FROM matters WHERE client_id = :c"
+                    "SELECT id, client_id, name, retention_until, created_at, closed_at FROM matters WHERE client_id = :c"
                     " AND (CAST(:after AS uuid) IS NULL OR id > :after)"
                     " AND (CAST(:all AS boolean) OR id = ANY(:ids)) ORDER BY id LIMIT :n"
                 ),
@@ -213,13 +239,81 @@ async def get_matter(matter_id: uuid.UUID, caller: CallerDep, res: ResourcesDep)
         await authorize(s, caller, P.MATTER_READ, Scope("matter", matter_id))
         row = (
             await s.execute(
-                text(
-                    "SELECT id, client_id, name, retention_until, created_at FROM matters WHERE id = :i"
-                ),
+                text(MATTER_ONE),
                 {"i": matter_id},
             )
         ).one()
     return MatterOut(**row._mapping)
+
+
+# ------------------------------------------------------------------ closing (retention ownership, ADR 0002)
+@router.post(
+    "/matters/{matter_id}/close", response_model=MatterOut, openapi_extra=perm(P.MATTER_CREATE)
+)
+async def close_matter(
+    matter_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
+) -> MatterOut:
+    """Irreversible: no new jobs; the retention-extension job stops extending this matter's evidence,
+    which then expires on schedule. Running jobs must be finished or cancelled first."""
+    async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        await authorize(s, caller, P.MATTER_CREATE, Scope("matter", matter_id))
+        await ensure_matter_open(s, matter_id)
+        running: int = (
+            await s.execute(
+                text(
+                    "SELECT count(*) FROM collection_jobs WHERE matter_id = :m"
+                    " AND status IN ('pending', 'running', 'paused_awaiting_reauth')"
+                ),
+                {"m": matter_id},
+            )
+        ).scalar_one()
+        if running:
+            raise conflict(f"{running} job(s) of this matter are still running")
+        await s.execute(
+            text("UPDATE matters SET closed_at = now(), closed_by = :by WHERE id = :i"),
+            {"by": caller.actor, "i": matter_id},
+        )
+        await audit.record(
+            s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="matter_closed",
+            payload={"matter_id": str(matter_id)}, request_id=rid,
+        )  # fmt: skip
+        row = (await s.execute(text(MATTER_ONE), {"i": matter_id})).one()
+    await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
+    return MatterOut(**row._mapping)
+
+
+@router.post(
+    "/clients/{client_id}/close", response_model=ClientOut, openapi_extra=perm(P.CLIENT_CREATE)
+)
+async def close_client(
+    client_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
+) -> ClientOut:
+    """Irreversible: its matters must be closed first. Its validated exports stop being extended."""
+    async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        await authorize(s, caller, P.CLIENT_CREATE, Scope("client", client_id))
+        await ensure_client_open(s, client_id)
+        row = (await s.execute(text(CLIENT_ONE), {"i": client_id})).one()
+        if row.is_default:
+            raise conflict("the default client cannot be closed")
+        open_matters: int = (
+            await s.execute(
+                text("SELECT count(*) FROM matters WHERE client_id = :c AND closed_at IS NULL"),
+                {"c": client_id},
+            )
+        ).scalar_one()
+        if open_matters:
+            raise conflict(f"{open_matters} matter(s) of this client are still open")
+        await s.execute(
+            text("UPDATE clients SET closed_at = now(), closed_by = :by WHERE id = :i"),
+            {"by": caller.actor, "i": client_id},
+        )
+        await audit.record(
+            s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="client_closed",
+            payload={"client_id": str(client_id)}, request_id=rid,
+        )  # fmt: skip
+        row = (await s.execute(text(CLIENT_ONE), {"i": client_id})).one()
+    await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
+    return ClientOut(**row._mapping)
 
 
 # ------------------------------------------------------------------ workspaces (modelled; no features yet)

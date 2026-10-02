@@ -72,6 +72,8 @@ class Client(Base):
     name: Mapped[str] = mapped_column(Text)
     is_default: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    closed_at: Mapped[datetime | None] = mapped_column(TZ)
+    closed_by: Mapped[str | None] = mapped_column(Text)
 
 
 class Matter(Base):
@@ -88,6 +90,8 @@ class Matter(Base):
     name: Mapped[str] = mapped_column(Text)
     retention_until: Mapped[datetime] = mapped_column(TZ)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    closed_at: Mapped[datetime | None] = mapped_column(TZ)
+    closed_by: Mapped[str | None] = mapped_column(Text)
 
 
 class Connection(Base):

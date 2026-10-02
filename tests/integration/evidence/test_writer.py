@@ -513,10 +513,10 @@ async def test_racing_retention_extensions_never_fail_or_shorten(
             )
         ).scalar_one()
     later, latest = current + timedelta(seconds=30), current + timedelta(seconds=60)
-    await writer._extend_retention(
+    await writer.extend_retention(
         ctx.tenant_id, written.evidence_id, written.storage_key, written.version_id, current, latest
     )
-    await writer._extend_retention(
+    await writer.extend_retention(
         ctx.tenant_id, written.evidence_id, written.storage_key, written.version_id, current, later
     )
     stored = await s3.get_object_retention(

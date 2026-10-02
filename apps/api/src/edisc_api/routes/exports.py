@@ -39,6 +39,7 @@ from edisc_api.auth import Caller
 from edisc_api.authz import TENANT, P, Permission, Scope, authorize, perm, permissions, roles_at
 from edisc_api.errors import ApiError, conflict, forbidden, not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, page_of
+from edisc_api.routes.hierarchy import ensure_client_open
 from edisc_core.ids import new_id
 from edisc_db.session import tenant_tx
 from edisc_worker.contracts import EXPORTS_QUEUE, ExportRef, export_workflow_id
@@ -209,6 +210,7 @@ async def create_export(
     limits = {**defaults, **overrides}
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await authorize(s, caller, P.CONNECTION_MANAGE, Scope("client", client_id))
+        await ensure_client_open(s, client_id)
         if overrides and P.TENANT_ADMIN not in permissions(await roles_at(s, caller, [TENANT])):
             raise forbidden("overriding archive limits needs a tenant admin")
     if body.size_bytes > limits["max_archive_bytes"]:

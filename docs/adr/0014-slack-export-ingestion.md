@@ -235,8 +235,9 @@ An export has no server-side counts. Completeness is checked against the archive
 - **Metadata files** are streamed element by element (`edisc_core.jsonstream`, element cap
   `EDISC_EXPORT_MAX_JSON_ELEMENT_BYTES`). An unparseable conversation metadata file rejects the archive
   (`metadata_invalid`); an archive without any conversation metadata file is `not_a_slack_export`.
-- **Retention:** the export is not tied to a matter when uploaded, so it gets the rolling window. Jobs
-  that use it must extend it like any dedup hit (M14.5).
+- **Retention:** the export belongs to its client, not a matter. It is locked with the rolling window,
+  and once validated the retention-extension job keeps it above the floor while the client is open
+  (ADR 0002 "Who owns retention"). Jobs that use it extend it further through their matter.
 - **Audit events (tenant stream):** `export_upload_started` and `export_limits_overridden` (uploader),
   `export_upload_completed` (uploader), `export_uploaded`, `export_rejected` / `export_validated` and
   `export_upload_reopened` (actor `system:export-ingest`, uploader named in the payload).

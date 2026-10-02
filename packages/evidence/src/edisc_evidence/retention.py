@@ -16,10 +16,14 @@ from edisc_core.time import ensure_utc, utc_now
 
 
 def effective_retain_until(
-    settings: Settings, matter_retention_until: datetime | None = None
+    settings: Settings,
+    matter_retention_until: datetime | None = None,
+    *,
+    now: datetime | None = None,
 ) -> datetime:
-    """Retain-until for a new object: rolling window, capped by the matter's date, then the local/ci cap."""
-    now = utc_now()
+    """Retain-until for a new object: rolling window, capped by the matter's date, then the local/ci cap.
+    ``now`` is for the extension job's simulated-time tests; production passes nothing."""
+    now = ensure_utc(now) if now is not None else utc_now()
     target = now + timedelta(days=settings.evidence_retention_window_days)
     if matter_retention_until is not None:
         matter_until = ensure_utc(matter_retention_until)
@@ -43,7 +47,9 @@ def effective_retain_until(
     return target
 
 
-def extension_needed(settings: Settings, current: datetime, target: datetime) -> bool:
+def extension_needed(
+    settings: Settings, current: datetime, target: datetime, *, now: datetime | None = None
+) -> bool:
     """Should a dedup hit extend ``current`` to ``target``? Only when the remaining retention has
     dropped below the floor (default 60 days of a 90-day window): then it is extended to the target.
 
@@ -51,7 +57,8 @@ def extension_needed(settings: Settings, current: datetime, target: datetime) ->
     matters that end sooner and the local/test overrides. Above the floor nothing is called, so routine
     duplicates cost no ``PutObjectRetention``."""
     need = min(
-        utc_now() + timedelta(days=settings.evidence_retention_extend_floor_days),
+        (ensure_utc(now) if now is not None else utc_now())
+        + timedelta(days=settings.evidence_retention_extend_floor_days),
         ensure_utc(target),
     )
     return ensure_utc(current) < need

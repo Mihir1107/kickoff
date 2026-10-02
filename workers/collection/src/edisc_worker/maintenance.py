@@ -29,6 +29,7 @@ from types_aiobotocore_s3 import S3Client
 
 from edisc_core.settings import Settings
 from edisc_custody.recovery import sweep_stale_uploads
+from edisc_custody.retention_extension import extend_retention
 from edisc_custody.sweeper import sweep_anchors
 from edisc_db.connection_tokens import reconcile_token_refreshes
 from edisc_worker.contracts import MAINTENANCE_QUEUE
@@ -46,6 +47,7 @@ SWEEPS = (
     Sweep("sweep-anchors", "sweep_anchors", timedelta(minutes=5)),
     Sweep("reconcile-token-refreshes", "reconcile_token_refreshes", timedelta(minutes=10)),
     Sweep("sweep-stale-uploads", "sweep_stale_uploads", timedelta(hours=1)),
+    Sweep("extend-retention", "extend_retention", timedelta(hours=6)),
 )
 
 
@@ -77,8 +79,24 @@ class MaintenanceActivities:
         )
         return {"jobs": result.jobs}
 
+    @activity.defn(name="extend_retention")
+    async def extend_retention(self) -> dict[str, Any]:
+        result = await extend_retention(
+            self.sweeper_sessions, self.sessions, self.s3, self.settings, tenant_id=self.tenant_id
+        )
+        return {
+            "tenants": result.tenants,
+            "examined": dict(result.examined),
+            "extended": dict(result.extended),
+        }
+
     def all(self) -> list[Any]:
-        return [self.sweep_anchors, self.reconcile_token_refreshes, self.sweep_stale_uploads]
+        return [
+            self.sweep_anchors,
+            self.reconcile_token_refreshes,
+            self.sweep_stale_uploads,
+            self.extend_retention,
+        ]
 
 
 def schedule_for(sweep: Sweep, queue: str) -> Schedule:

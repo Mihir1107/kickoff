@@ -125,10 +125,28 @@ lock and a copy.
 ### Retention: rolling window, extended while the matter is active
 - Retain-until on write = `min(matter.retention_until, now + EDISC_EVIDENCE_RETENTION_WINDOW_DAYS)`,
   default **90 days**, never the full matter retention upfront.
-- A **matter-level extension job** pushes retention forward while the matter is active (backlog,
-  **required before production**). When the matter closes, extension stops and objects expire on
-  schedule. A client's destruction request at close can then be honoured once the window lapses;
-  locking for years upfront would make it unfulfillable.
+- A **retention-extension job** pushes retention forward while an owner is active (amended
+  2026-10-02, implemented: `edisc_custody.retention_extension`, maintenance schedule `extend-retention`,
+  every 6 hours). When the owner closes, extension stops and objects expire on schedule. A client's
+  destruction request at close can then be honoured once the window lapses; locking for years upfront
+  would make it unfulfillable.
+- **Who owns retention (amended 2026-10-02):**
+
+  | Evidence | Owner | Kept locked while | Target |
+  |---|---|---|---|
+  | A job's objects (pages, files, seals, job-stream anchors) | the job's matter | the matter is open and its `retention_until` has not passed | `min(now + window, matter.retention_until)` |
+  | Any object behind an item a job linked (dedup across matters) | every matter whose jobs link it | any of them is active | the latest of those matters' dates, capped by `now + window` |
+  | A validated Slack export (client-level, ADR 0014) | its client | the client is open (`clients.closed_at` is null) | `now + window` |
+
+  Matters and clients are closed explicitly (`POST /v1/matters/{id}/close`,
+  `POST /v1/clients/{id}/close`; migration 0019): irreversible, audited, no new jobs, matters or exports
+  afterwards; a client closes only once its matters are closed, and the default client never closes.
+  Rejected exports and unvalidated uploads have no owner and lapse with their initial window.
+  The job uses the same floor/target rule as dedup hits, never shortens, writes one
+  `audit.retention_extended` event per tenant and run, and is tested over 400 simulated days
+  (`tests/integration/custody/test_retention_extension.py`).
+- Not covered yet: tenant-stream audit anchors (no matter, no client) still rely on their initial
+  window; see docs/BACKLOG.md.
 - **Extension floor (amended 2026-10-01):** a dedup hit extends an object only when its remaining
   retention has dropped below `EDISC_EVIDENCE_RETENTION_EXTEND_FLOOR_DAYS` (default 60 of the 90-day
   window), and then to the rolling target. Invariant: retention never drops below

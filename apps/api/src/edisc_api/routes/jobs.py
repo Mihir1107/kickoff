@@ -28,6 +28,7 @@ from edisc_api.auth import Caller
 from edisc_api.authz import P, Permission, Scope, authorize, perm
 from edisc_api.errors import conflict, not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, decode_text, encode_text, page_of
+from edisc_api.routes.hierarchy import ensure_matter_open
 from edisc_connectors_base.types import CollectionScope, ThreadParentPolicy
 from edisc_core.canonical import canonical_json
 from edisc_core.ids import new_id
@@ -305,6 +306,7 @@ async def create_job(
     job_id = new_id()
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await authorize(s, caller, P.JOB_START, Scope("matter", matter_id))
+        await ensure_matter_open(s, matter_id)
         conn = (
             await s.execute(
                 text(

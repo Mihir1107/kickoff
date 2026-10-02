@@ -28,7 +28,7 @@ history.
 - the audit-burst measurement;
 - the anchor-storm fix (migration 0017).
 
-**Migrations at head:** 0018.
+**Migrations at head:** 0019.
 
 **Not done in Phase 1:** the 1M-message soak. Laptop disk is too small (~15 GB free; it needs ~21 GB). It is
 in the backlog for a cloud VM: `scripts/resume_soak.py --messages 1000000 --kills 10`.
@@ -56,13 +56,15 @@ Done:
   overrides, `ExportIngestWorkflow` (hash, lock, R7 rejection, streaming validation, tier detection,
   findings, credential-less `slack_export` connection), package `edisc_connector_slack_export.layout`.
 
+- **Retention extension job** (before M15, per review): matter evidence and validated exports of open
+  clients, matter/client closing (migration 0019), ADR 0002 "Who owns retention".
+
 Next, in order:
 1. **M14.4** `slack_export` dialect in the dummy generator writing a real zip from the oracle (public-only
    and full); re-measure range requests per 1,000 entries on it (docs/runs).
 2. **M14.5** the connector (units = day files, message day from `ts`, filename date as a hint, R4),
    `archive_entry` evidence rows, normalizer dialect (URL query strings stripped, `register_secret`),
-   `matched_against_archive` and `completed_against_archive`, file downloads via `slack_export.file`;
-   jobs extend the export zip's retention.
+   `matched_against_archive` and `completed_against_archive`, file downloads via `slack_export.file`.
 3. **M14.6** `edisc-verify` package format /2 (zip carried, entries verified offline).
 4. **M14.7** crash matrix during ingestion, real-export fixtures when provided, docs.
 
