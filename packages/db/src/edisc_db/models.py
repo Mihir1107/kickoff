@@ -696,3 +696,24 @@ class ExportConversation(Base):
     folder: Mapped[str] = mapped_column(Text)
     name: Mapped[str | None] = mapped_column(Text)
     metadata_entry: Mapped[str] = mapped_column(Text)
+
+
+class RetentionGap(Base):
+    __tablename__ = "retention_gaps"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "evidence_object_id"],
+            ["evidence_objects.tenant_id", "evidence_objects.id"],
+        ),
+        Index(None, "tenant_id", "owner_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    evidence_object_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    owner_type: Mapped[str] = mapped_column(Text)
+    owner_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    unprotected_from: Mapped[datetime] = mapped_column(TZ)
+    unprotected_until: Mapped[datetime] = mapped_column(TZ)
+    outcome: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)

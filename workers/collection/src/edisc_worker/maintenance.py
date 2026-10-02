@@ -88,10 +88,23 @@ class MaintenanceActivities:
             "tenants": result.tenants,
             "examined": dict(result.examined),
             "extended": dict(result.extended),
+            "gaps": dict(result.gaps),
         }
+
+    @activity.defn(name="extend_retention_tenant")
+    async def extend_retention_tenant(self, tenant_id: str) -> dict[str, Any]:
+        result = await extend_retention(
+            self.sweeper_sessions,
+            self.sessions,
+            self.s3,
+            self.settings,
+            tenant_id=uuid.UUID(tenant_id),
+        )
+        return {"extended": dict(result.extended), "gaps": dict(result.gaps)}
 
     def all(self) -> list[Any]:
         return [
+            self.extend_retention_tenant,
             self.sweep_anchors,
             self.reconcile_token_refreshes,
             self.sweep_stale_uploads,

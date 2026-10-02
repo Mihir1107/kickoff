@@ -139,8 +139,19 @@ lock and a copy.
   | A validated Slack export (client-level, ADR 0014) | its client | the client is open (`clients.closed_at` is null) | `now + window` |
 
   Matters and clients are closed explicitly (`POST /v1/matters/{id}/close`,
-  `POST /v1/clients/{id}/close`; migration 0019): irreversible, audited, no new jobs, matters or exports
-  afterwards; a client closes only once its matters are closed, and the default client never closes.
+  `POST /v1/clients/{id}/close`; migration 0019): audited, no new jobs, matters or exports afterwards; a
+  client closes only once its matters are closed, and the default client never closes. A matter cannot
+  close while jobs run, and, **once legal hold exists, a matter under hold cannot close**.
+- **Reopening (amended 2026-10-02, migration 0021):** closing is reversible by a tenant admin
+  (`POST .../reopen`, audited with who closed it and when; a matter whose retention date has passed is
+  reopened with a new one, never a shorter one; a matter reopens only under an open client). Extension
+  resumes at once (a `TenantRetentionWorkflow` run is started). Evidence whose retention **lapsed while
+  closed** is re-locked if the pinned version still exists; one that is gone raises an
+  `evidence_missing` alert. Either way the **unprotected window is recorded, never hidden**: a
+  `retention_gaps` row per object (lapsed retain-until to re-lock time, outcome, owner), readable at
+  `GET /v1/{matters|clients}/{id}/retention-gaps`, and one `audit.retention_gap` custody event per run
+  committing to all rows (counts, earliest start, end, SHA-256 over the rows). The collection report
+  (M16) carries the same rows. Any lapse the job finds, whatever the cause, is recorded the same way.
   Rejected exports and unvalidated uploads have no owner and lapse with their initial window.
   The job uses the same floor/target rule as dedup hits, never shortens, writes one
   `audit.retention_extended` event per tenant and run, and is tested over 400 simulated days

@@ -34,6 +34,7 @@ from edisc_worker.workflows import (
     CollectUnitWorkflow,
     ExportIngestWorkflow,
     MaintenanceWorkflow,
+    TenantRetentionWorkflow,
 )
 
 log = get_logger("edisc_worker")
@@ -93,7 +94,7 @@ async def run(
                 Worker(
                     client,
                     task_queue=MAINTENANCE_QUEUE,
-                    workflows=[MaintenanceWorkflow],
+                    workflows=[MaintenanceWorkflow, TenantRetentionWorkflow],
                     activities=sweeps.all(),
                 )
             )

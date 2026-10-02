@@ -28,7 +28,7 @@ history.
 - the audit-burst measurement;
 - the anchor-storm fix (migration 0017).
 
-**Migrations at head:** 0020.
+**Migrations at head:** 0021.
 
 **Not done in Phase 1:** the 1M-message soak. Laptop disk is too small (~15 GB free; it needs ~21 GB). It is
 in the backlog for a cloud VM: `scripts/resume_soak.py --messages 1000000 --kills 10`.
@@ -63,6 +63,9 @@ Done:
   ZIP writer) with real-world variants (macOS re-zip, wrapper folder, ZIP64, data descriptors, name
   encodings), all accepted and reported; raw name bytes stored (migration 0020); range reads measured
   (docs/runs/2026-10-02-export-range-reads.md).
+
+- **Reversible closing** (review 2026-10-02): tenant-admin reopen, immediate re-lock of lapsed evidence,
+  `retention_gaps` + `audit.retention_gap` (migration 0021).
 
 Next, in order:
 1. **M14.5** the connector (units = day files, message day from `ts`, filename date as a hint, R4),

@@ -384,3 +384,20 @@ class ExportIngestWorkflow:
             return locked
         result: dict[str, Any] = await workflow.execute_activity("validate_export", ref, **options)
         return result
+
+
+@workflow.defn(name="TenantRetentionWorkflow")
+class TenantRetentionWorkflow:
+    """One retention-extension run for one tenant, started when a matter or client is reopened so that
+    lapsed evidence is re-locked (and the gap recorded) now, not at the next scheduled sweep."""
+
+    @workflow.run
+    async def run(self, tenant_id: str) -> dict[str, Any]:
+        result: dict[str, Any] = await workflow.execute_activity(
+            "extend_retention_tenant",
+            tenant_id,
+            result_type=dict[str, Any],
+            start_to_close_timeout=timedelta(minutes=30),
+            retry_policy=RetryPolicy(maximum_attempts=5, maximum_interval=timedelta(minutes=1)),
+        )
+        return result

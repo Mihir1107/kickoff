@@ -12,7 +12,11 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - **[required before production]** Bucket policy denying `s3:PutObject` without `If-None-Match` on anchor/evidence prefixes, and denying `s3:DeleteObject` (delete markers) for the app identity.
 - Anchor the exported package manifest to WORM at export time so the manifest hash itself is attested.
 - **[with Phase 2 bulk export ingestion]** Custody lock-narrowing reorder (deferred FK, `append_batch` last), then re-measure. Per-unit chains stay deferred (docs/runs/2026-09-30-custody-contention.md).
-- Destruction workflow after matter close + retention lapse (verified deletion of every version, custody events, certificate of destruction).
+- **[required before production]** Post-close destruction workflow: after a matter (or client) is closed
+  and every object's retention has expired, destroy the evidence deliberately (every version, verified
+  gone), record each destruction in custody, and issue a certificate of destruction listing what was
+  destroyed (evidence ids, hashes, keys, versions) and when. Must refuse anything still referenced by an
+  open matter or client, or under legal hold.
 - AWS optimization for files > 5 GB: verify UploadPartCopy destinations by comparing the SHA-256 composite against our own per-range composite instead of a full re-read (ADR 0002).
 - **[required before production]** Staging bucket: encrypted at rest (SSE-KMS), least-privilege access (the app may write/read/delete only its own staging prefix; nothing else may read it), alerting on objects older than the 1-day expiry.
 - **[required before production]** On AWS, verify whether CopyObject honours `If-None-Match`; either use it for WORM promotion or confirm it stays covered by the advisory lock + registry + HEAD guard (it is not honoured by MinIO; ADR 0002).
