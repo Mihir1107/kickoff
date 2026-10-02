@@ -188,6 +188,122 @@ report → download, with the audit trail checked. Plus accessibility checks (ax
 
 Out of scope for M17 (backlog): admin screens for IdPs and roles (API-only for now), theming, i18n.
 
+### M17 backend (PROPOSED 2026-10-03, amended after review; not implemented)
+The frontend now exists as a Vite + React single-page app (`apps/web`, built elsewhere, on its own
+branch), not Next.js. So there is no separate BFF server: **the API itself holds the session**, which
+keeps decision 7 (server-side sessions, httpOnly cookies, CSRF, revocation, no tokens in the browser).
+ADR 0016 records this before code.
+
+**1. Session auth (ADR 0016).**
+- **Login:** `GET /v1/auth/login` starts OIDC authorization code + PKCE with the tenant's IdP (tenant from
+  the Host subdomain, as everywhere). `GET /v1/auth/callback` exchanges the code server-side, checks
+  state, nonce and audience, resolves the active principal (same rules as bearer auth), and creates a
+  session. The IdP tokens are used once and never stored or sent to the browser. A dev login exists only
+  where the dev IdP is allowed (local/test/ci).
+- **Cookie:** `__Host-edisc_session`: random 256-bit id, httpOnly, Secure, SameSite=Strict, Path=/, no
+  Domain attribute. The `__Host-` prefix makes it host-only, so it is scoped to exactly the tenant
+  subdomain and never sent to another tenant. The short-lived login state cookie (PKCE verifier, state)
+  is `__Host-edisc_login`, SameSite=Lax, because the IdP's redirect back is a cross-site navigation that
+  a Strict cookie would not survive. It is deleted at the callback.
+- **Server-side sessions:** a `sessions` table (RLS) storing the SHA-256 of the id, never the id itself,
+  plus tenant, principal, created, last seen, absolute expiry (e.g. 12 h) and idle expiry (e.g. 30 min),
+  revoked at/by, and user agent. Every request checks the row. Expiry and revocation take effect at once.
+- **CSRF:** `GET /v1/auth/csrf` returns a token bound to the session (HMAC of the session id with a
+  server key). Every state-changing request (POST/PUT/PATCH/DELETE) authenticated by the cookie must send
+  it in `X-CSRF-Token`, and its `Origin` must be the tenant host; otherwise 403. Bearer-token callers
+  (service principals, scripts) are exempt, because no ambient credential is involved.
+- **Logout and revocation:** `POST /v1/auth/logout` revokes the current session and clears the cookie.
+  `GET /v1/me/sessions` and `POST /v1/me/sessions/{id}/revoke` let a user see and end their own sessions.
+  Tenant admins get `POST /v1/principals/{id}/sessions/revoke`, and deactivating a principal revokes all
+  of its sessions. All of these are audited.
+- **Session fixation:** a fresh session id is issued at every successful login (and at
+  re-authentication). Any id the browser held before is never promoted to an authenticated session.
+- **Recent sign-in for sensitive actions:**
+  - Covered actions: close and reopen (matters, clients), export limit overrides, role assignment
+    changes, and session revocation.
+  - These need an authentication no older than `EDISC_API_REAUTH_MAX_AGE_SECONDS` (e.g. 10 min,
+    recorded on the session as `authenticated_at`).
+  - Otherwise the API answers 401 `reauth_required`, and the UI sends the user through the IdP again
+    (`prompt=login`, `max_age`).
+  - The audit event records the authentication time.
+- **The caller dependency** accepts either a bearer token or a session cookie. A request carrying both
+  is rejected (400) before either is evaluated, so a stray cookie can never stand in for a token or the
+  reverse. Auth-failure throttling applies to the login and callback endpoints too.
+
+**2. Permissions for the UI.**
+- `GET /v1/me/permissions`: the caller's effective permissions per scope (tenant, and every client,
+  matter and workspace where they hold a role), computed by `authz.py` itself.
+- `GET /v1/roles`: the role matrix (role → permissions), generated from `ROLE_PERMISSIONS`. It is never
+  hand-written, so the UI cannot drift from what the API enforces. The UI uses both only to show or hide
+  controls; the API still authorizes every call.
+
+**3. Missing endpoints.**
+- `GET /v1/jobs`: tenant-wide, cursor-paginated, limited to what the caller can see (visible matters).
+  Filters: status, clean basis, client, matter, connection, source, created/finished range.
+- `GET /v1/jobs/{id}/custody/events`: the job's custody events by seq (cursor), with type, actor, time,
+  hashes and payload. Payloads never carry secrets (they never did), so nothing extra needs redacting;
+  needs `custody.read`.
+- `GET /v1/connections/{id}/directory?kind=channels|custodians`: what the job wizard's scope picker
+  needs. It **serves a stored snapshot and never calls the source on a request**.
+  - A background job (maintenance schedule, plus one run when a connection is created or
+    re-authorized) refreshes the snapshot through the rate limiter, via a new connector method.
+    Live connectors list conversations and users; the export connector reads `export_conversations`
+    and `users.json` once.
+  - The response carries the snapshot's capture time (`captured_at`) and whether a refresh is running.
+    An empty snapshot says "not captured yet", never "no channels".
+  - Cursor-paginated; needs `job.start` on a matter of the client, or `connection.read`.
+- `GET /v1/groups` (and `GET /v1/groups/{id}/members`): `tenant.admin`, paginated.
+
+**4. Live updates: Server-Sent Events.**
+- `GET /v1/jobs/{id}/stream` (`text/event-stream`, needs `job.read`, cookie or bearer).
+  - Events: `job` (status, clean, clean basis, caveat, unit counts by status and recon status) and
+    `unit` (units that changed).
+  - Each event has an id. A reconnect with `Last-Event-ID` resumes with a fresh snapshot.
+  - Heartbeat comments every 15 s; the stream closes after the job is sealed.
+- **One source per job, fanned out:** one poll per job per API process (about once a second, only while
+  it has subscribers), or Postgres LISTEN/NOTIFY published by the pipeline. Each change is fanned out to
+  every subscriber of that job, so 100 open browser tabs cost one query a second, not 100. The wire
+  format does not depend on which of the two is used.
+- **Re-checked continuously:** at every heartbeat the stream re-validates its session (not expired, not
+  revoked, principal active) and the caller's `job.read` on the job's matter. On revocation or a lost
+  permission it sends a final `revoked` event and closes.
+- **No proxy buffering:** `Cache-Control: no-cache, no-transform`, `X-Accel-Buffering: no`,
+  `Connection: keep-alive`, and no compression on the stream.
+- Limits: a cap on concurrent streams per principal (429 above it) and a maximum stream lifetime, after
+  which the client reconnects.
+- **Fallback:** if the stream fails or a proxy buffers it, the client polls `GET /v1/jobs/{id}` (and
+  `/units`) every 5 s. The UI behaves the same either way.
+
+**5. A stable OpenAPI spec.**
+- `make openapi` writes `docs/api/openapi.json` from the app (sorted, deterministic) and it is committed.
+- CI fails if the committed spec differs from the generated one, so every API change shows up in review.
+- CI also enforces **additive-only** changes: a breaking-change diff tool (e.g. `oasdiff breaking`)
+  compares the generated spec with the committed one on the base branch and fails on any breaking change
+  (removed path, operation or field, new required field, narrowed type or enum). An intended break needs
+  `/v2` or an explicit, reviewed allow-list entry.
+- Every route gets a stable `operationId`. The spec carries `x-permission` per route (already present)
+  and the error schema.
+- Version rule: within `/v1`, only additive changes. A removal or a change of meaning needs `/v2` or a
+  deprecation period.
+- The frontend generates its types from this file (e.g. `openapi-typescript`) instead of the
+  hand-mirrored `src/api/types.ts`, in the frontend's branch.
+
+**Tests.**
+- Session lifecycle: login, idle and absolute expiry, logout, admin revocation, deactivation. The cookie
+  carries the right flags and never reaches another tenant's subdomain.
+- The session id changes at login (a pre-set id is never accepted). Sensitive actions are refused with
+  an old authentication and allowed after re-authentication. Cookie plus bearer on one request is a 400.
+- CSRF refused without the token, with a token from another session, or with a foreign Origin; bearer
+  requests unaffected. No token or session id appears in any response body (the existing credential scan).
+- `/me/permissions` and `/roles` derived from `authz.py`: a test changes a role and the endpoint follows.
+- Jobs list visibility per role.
+- SSE: snapshot, then changes, resume with `Last-Event-ID`, the per-principal cap, closing after the
+  seal, and the polling fallback. N subscribers to one job cause one DB poll. A revoked session or a
+  removed role closes an open stream at the next heartbeat. The no-buffering headers are present.
+- Directory: requests never reach the source (connector call counter), `captured_at` is returned, and
+  the refresh goes through the limiter.
+- The OpenAPI drift check.
+
 ---
 
 ## Decisions (2026-10-02)
