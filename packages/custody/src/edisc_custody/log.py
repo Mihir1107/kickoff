@@ -17,6 +17,7 @@ Verify path
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid
@@ -133,12 +134,14 @@ async def append(
         or event_type in LIFECYCLE_EVENTS
         or seq - head.last_anchored_seq >= anchor_every
     )
+    lifecycle = event_type in LIFECYCLE_EVENTS
     await session.execute(
         text(
             "UPDATE custody_chain_heads SET last_seq = :seq, last_hash = :h, anchor_due = :due,"
+            " pending_lifecycle_seq = CASE WHEN :lc THEN :seq ELSE pending_lifecycle_seq END,"
             " updated_at = now() WHERE stream_id = :s"
         ),
-        {"seq": seq, "h": event_hash, "due": due, "s": stream_id},
+        {"seq": seq, "h": event_hash, "due": due, "lc": lifecycle, "s": stream_id},
     )
     return AppendedEvent(event_id, stream_id, seq, event_hash, due)
 
@@ -207,49 +210,123 @@ async def anchor_if_due(
     tenant_id: uuid.UUID,
     stream_id: uuid.UUID,
     force: bool = False,
+    wait: bool = True,
 ) -> str | None:
-    """Seal the current head to WORM if due (or ``force``). Returns the anchor key, or None."""
+    """Seal the current head to WORM if due (or ``force``). A forced call that finds a live claim waits
+    for it when ``wait`` (seal), else skips (sweeper: the live claimer finishes the job). Returns the newest anchor key written (or,
+    when forced and the head is already anchored, that anchor's key), else None.
+
+    Coalesced: a writer must win an atomic claim on the head to anchor; concurrent writers skip instead
+    of each writing an anchor (the "anchor storm"). The claimer keeps anchoring while the stream stays
+    due (bounded), so a burst ends with its last due point anchored. A claim older than
+    ``custody_anchor_claim_timeout_seconds`` is abandoned and taken over (the anchor sweeper covers a
+    claimer that was killed mid-anchor)."""
+    newest: str | None = None
+    # a non-forced call drains every due point (a burst's writers skip while one holds the claim);
+    # each round advances the anchored seq, so this ends; the cap only guards against a stuck head
+    for _ in range(1000 if not force else 1):
+        key = await _anchor_once(
+            sessions, s3, settings, tenant_id, stream_id, force=force, waiting=not wait
+        )
+        if key is None:
+            break
+        newest = key
+    return newest
+
+
+async def _claim(
+    sessions: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    tenant_id: uuid.UUID,
+    stream_id: uuid.UUID,
+    *,
+    force: bool,
+) -> Any:
     async with tenant_tx(sessions, tenant_id) as session:
-        head = (
+        return (
             await session.execute(
+                # the claimed seq is the next DUE POINT, not the moving head: the next lifecycle event or
+                # the next interval boundary (forced: the head). So a burst gets one anchor per due point.
                 text(
-                    "SELECT last_seq, last_hash, last_anchored_seq, anchor_due FROM custody_chain_heads"
-                    " WHERE stream_id = :s"
+                    "UPDATE custody_chain_heads SET anchoring_since = now(), anchoring_seq = CASE"
+                    "   WHEN CAST(:force AS boolean) THEN last_seq"
+                    "   WHEN pending_lifecycle_seq > last_anchored_seq"
+                    "     THEN LEAST(pending_lifecycle_seq, last_anchored_seq + :every, last_seq)"
+                    "   ELSE LEAST(last_seq, last_anchored_seq + :every) END"
+                    " WHERE stream_id = :s AND last_seq > 0 AND last_seq > last_anchored_seq"
+                    " AND (CAST(:force AS boolean) OR anchor_due)"
+                    " AND (anchoring_seq IS NULL OR anchoring_since < now() - make_interval(secs => :stale))"
+                    " RETURNING anchoring_seq"
                 ),
-                {"s": stream_id},
+                {
+                    "s": stream_id,
+                    "force": force,
+                    "every": settings.custody_anchor_every_n_batches,
+                    "stale": settings.custody_anchor_claim_timeout_seconds,
+                },
             )
         ).first()
-        if head is None or head.last_seq == 0:
+
+
+async def _anchor_once(
+    sessions: async_sessionmaker[AsyncSession],
+    s3: S3Client,
+    settings: Settings,
+    tenant_id: uuid.UUID,
+    stream_id: uuid.UUID,
+    *,
+    force: bool,
+    waiting: bool = False,
+) -> str | None:
+    claimed = await _claim(sessions, settings, tenant_id, stream_id, force=force)
+    if claimed is None:
+        if not force or waiting:
             return None
-        if not (head.anchor_due or force):
-            return None
-        retain_until, job_id = await _anchor_retain_until(session, settings, stream_id)
-        key = anchor_key(str(tenant_id), str(stream_id), head.last_seq)
-        body = anchor_document(
-            tenant_id=str(tenant_id),
-            stream_id=str(stream_id),
-            seq=head.last_seq,
-            event_hash=head.last_hash,
+        return await _forced_without_claim(sessions, s3, settings, tenant_id, stream_id)
+    seq: int = claimed.anchoring_seq
+    try:
+        async with tenant_tx(sessions, tenant_id) as session:
+            head_hash: str = (
+                await session.execute(
+                    text("SELECT event_hash FROM custody_events WHERE stream_id = :s AND seq = :q"),
+                    {"s": stream_id, "q": seq},
+                )
+            ).scalar_one()
+            retain_until, job_id = await _anchor_retain_until(session, settings, stream_id)
+            key = anchor_key(str(tenant_id), str(stream_id), seq)
+            body = anchor_document(
+                tenant_id=str(tenant_id), stream_id=str(stream_id), seq=seq, event_hash=head_hash
+            )
+            # the anchor's hash is known before the object exists: persisted with the row (provenance)
+            await session.execute(
+                text(
+                    "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind, retain_until,"
+                    " source_sha256, source_hash_origin)"
+                    " VALUES (:id, :t, :j, :k, 'anchor', :r, :h, 'collection') ON CONFLICT (storage_key) DO NOTHING"
+                ),
+                {
+                    "id": new_id(),
+                    "t": tenant_id,
+                    "j": job_id,
+                    "k": key,
+                    "r": retain_until,
+                    "h": hashlib.sha256(body).hexdigest(),
+                },
+            )
+        stored = await put_immutable(
+            s3, bucket=settings.s3_evidence_bucket, key=key, body=body, retain_until=retain_until
         )
-        # the anchor's hash is known before the object exists: persisted with the row (provenance)
-        await session.execute(
-            text(
-                "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind, retain_until,"
-                " source_sha256, source_hash_origin)"
-                " VALUES (:id, :t, :j, :k, 'anchor', :r, :h, 'collection') ON CONFLICT (storage_key) DO NOTHING"
-            ),
-            {
-                "id": new_id(),
-                "t": tenant_id,
-                "j": job_id,
-                "k": key,
-                "r": retain_until,
-                "h": hashlib.sha256(body).hexdigest(),
-            },
-        )
-    stored = await put_immutable(
-        s3, bucket=settings.s3_evidence_bucket, key=key, body=body, retain_until=retain_until
-    )
+    except Exception:
+        # an ordinary failure releases the claim at once (a kill leaves it to the timeout + sweeper)
+        async with tenant_tx(sessions, tenant_id) as session:
+            await session.execute(
+                text(
+                    "UPDATE custody_chain_heads SET anchoring_seq = NULL, anchoring_since = NULL"
+                    " WHERE stream_id = :s AND anchoring_seq = :seq"
+                ),
+                {"s": stream_id, "seq": seq},
+            )
+        raise
     async with tenant_tx(sessions, tenant_id) as session:
         await session.execute(
             text(
@@ -258,15 +335,56 @@ async def anchor_if_due(
             ),
             {"h": stored.sha256, "n": stored.size, "v": stored.version_id, "k": key},
         )
+        # still due afterwards only if the head ran a full interval past this anchor, or a lifecycle
+        # event after it is not covered yet; the claim is released only if it is still ours
         await session.execute(
             text(
                 "UPDATE custody_chain_heads SET last_anchored_seq = GREATEST(last_anchored_seq, :seq),"
-                " anchor_due = CASE WHEN last_seq = :seq THEN false ELSE anchor_due END"
+                " anchor_due = (last_seq - GREATEST(last_anchored_seq, :seq) >= :every)"
+                "   OR (pending_lifecycle_seq > GREATEST(last_anchored_seq, :seq)),"
+                " anchoring_since = CASE WHEN anchoring_seq = :seq THEN NULL ELSE anchoring_since END,"
+                " anchoring_seq = CASE WHEN anchoring_seq = :seq THEN NULL ELSE anchoring_seq END"
                 " WHERE stream_id = :s"
             ),
-            {"seq": head.last_seq, "s": stream_id},
+            {"seq": seq, "every": settings.custody_anchor_every_n_batches, "s": stream_id},
         )
     return key
+
+
+async def _forced_without_claim(
+    sessions: async_sessionmaker[AsyncSession],
+    s3: S3Client,
+    settings: Settings,
+    tenant_id: uuid.UUID,
+    stream_id: uuid.UUID,
+) -> str | None:
+    """A forced anchor (seal, sweeper) that could not claim: either the head is already anchored (return
+    that anchor), or another writer is anchoring; wait for it (bounded by the claim timeout) and retry."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + settings.custody_anchor_claim_timeout_seconds + 5
+    while True:
+        async with tenant_tx(sessions, tenant_id) as session:
+            head = (
+                await session.execute(
+                    text(
+                        "SELECT last_seq, last_anchored_seq, anchoring_seq FROM custody_chain_heads"
+                        " WHERE stream_id = :s"
+                    ),
+                    {"s": stream_id},
+                )
+            ).first()
+        if head is None or head.last_seq == 0:
+            return None
+        if head.last_anchored_seq == head.last_seq:
+            return anchor_key(str(tenant_id), str(stream_id), head.last_seq)
+        if loop.time() > deadline:
+            raise TimeoutError(f"stream {stream_id}: anchoring claim held past its timeout")
+        await asyncio.sleep(0.1)
+        key = await _anchor_once(
+            sessions, s3, settings, tenant_id, stream_id, force=True, waiting=True
+        )
+        if key is not None:
+            return key
 
 
 async def seal_job_chain(

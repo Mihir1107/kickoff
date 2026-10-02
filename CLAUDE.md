@@ -109,7 +109,8 @@ make worker / api       # Temporal worker (+ maintenance queue and sweeper sched
   reverts are observed; derived records go to `item_derivations` per normalizer version. Download a page's files
   (`file_refs`) before normalizing it. Tests compare against the oracle in `tests/integration/normalizer/oracle.py`.
 - Custody (`edisc_custody`): call `append`/`append_batch` INSIDE the tenant transaction; after commit call
-  `anchor_if_due` (WORM anchor of the head). Lifecycle events and every N events are anchored; `seal_job_chain` at
+  `anchor_if_due` (coalesced: an atomic claim on the head, one anchor per due point, ADR 0003 amendment; never
+  anchor by writing the head without the claim). Lifecycle events and every N events are anchored; `seal_job_chain` at
   finalize; `sweep_anchors` (periodic) seals overdue/abandoned streams. `verify_chain` (DB) and `edisc-verify` (offline package, ADR 0008) share `ChainVerifier`. Anchors are always
   listed from S3 versions, never from the DB. Merkle = RFC 6962, leaves ordered by idempotency_key.
 - Keep `edisc_custody.package`/`cli`/`chain`/`merkle` free of DB and cloud imports (a test enforces it).

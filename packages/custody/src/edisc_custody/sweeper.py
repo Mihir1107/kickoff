@@ -61,7 +61,13 @@ async def sweep_anchors(
     for row in rows:
         try:
             key = await anchor_if_due(
-                sessions, s3, settings, tenant_id=row.tenant_id, stream_id=row.stream_id, force=True
+                sessions,
+                s3,
+                settings,
+                tenant_id=row.tenant_id,
+                stream_id=row.stream_id,
+                force=True,
+                wait=False,  # a live claim is someone else's anchor in progress; a stale one is taken over
             )
         except Exception as exc:  # noqa: BLE001 - collected and re-raised below, never swallowed
             exc.add_note(f"sweeping stream {row.stream_id} of tenant {row.tenant_id}")

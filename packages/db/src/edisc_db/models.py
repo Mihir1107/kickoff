@@ -306,6 +306,9 @@ class CustodyChainHead(Base):
     updated_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     last_anchored_seq: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
     anchor_due: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    anchoring_seq: Mapped[int | None] = mapped_column(BigInteger)
+    anchoring_since: Mapped[datetime | None] = mapped_column(TZ)
+    pending_lifecycle_seq: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
 
 
 class Item(Base):

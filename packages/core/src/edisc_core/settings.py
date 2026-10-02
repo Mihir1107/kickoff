@@ -128,6 +128,11 @@ class Settings(BaseSettings):
         description="Seconds-level cap for EPHEMERAL TEST stacks only (env test/ci); refused anywhere else.",
     )
 
+    custody_anchor_claim_timeout_seconds: float = Field(
+        default=60,
+        gt=0,
+        description="An anchoring claim older than this is abandoned (killed writer) and may be taken over.",
+    )
     custody_anchor_every_n_batches: int = Field(
         default=8, ge=1, description="Seal the chain head to WORM at least every N batch events."
     )

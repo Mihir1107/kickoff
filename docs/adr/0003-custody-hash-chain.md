@@ -101,3 +101,17 @@ violated:
   anchor: at most N−1 batch events, and never past a lifecycle event or finalize. For abandoned
   streams, the window is bounded by the sweeper's idle window plus its schedule interval.
 - − Anchor time is attested only by S3 metadata. RFC 3161 trusted timestamps are in the backlog.
+
+## Amendment (2026-10-02): coalesced anchoring
+Measured an "anchor storm": under concurrency every writer anchored while `anchor_due` stayed set, giving
+360–454 anchors for 771 events (docs/runs/2026-10-01-audit-burst.md). Now:
+- **Atomic claim.** A writer anchors only if it wins a claim on the head (`anchoring_seq`,
+  `anchoring_since`; migration 0017).
+- **Due points.** The claimed seq is the next due point: the pending lifecycle event (`pending_lifecycle_seq`)
+  or `last_anchored_seq + N`. A forced anchor (seal) claims the head.
+- **Draining.** The claimer drains all due points; other writers skip.
+- **Failures.** An ordinary failure releases the claim. A claim older than
+  `EDISC_CUSTODY_ANCHOR_CLAIM_TIMEOUT_SECONDS` is abandoned and taken over (the sweeper does not wait on a
+  live claim; it takes over a stale one).
+- **Result.** One anchor per due point. Consecutive anchors are at most N apart and lifecycle events are
+  anchored themselves. At quiescence the tail is shorter than N, and the idle-tail sweeper seals that.

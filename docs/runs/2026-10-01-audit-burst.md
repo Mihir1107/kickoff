@@ -73,3 +73,39 @@ numbers:
 Revisit it if A is in and a real burst profile shows head contention above about 15%.
 
 The audit append (about 10 ms unshared) is otherwise cheap next to the download it records.
+
+## After the fix (2026-10-02): coalesced anchors, one per due point (migration 0017)
+
+**How it works now:**
+- A writer must win an atomic claim on the head to anchor. Other writers skip instead of all anchoring.
+- The claim targets the next **due point**: the next interval boundary (every N events) or the pending
+  lifecycle event, never the moving head.
+- The claimer drains every due point before returning. A claim older than
+  `EDISC_CUSTODY_ANCHOR_CLAIM_TIMEOUT_SECONDS` (60) is taken over; the sweeper does this for a claimer killed
+  mid-anchor. An ordinary failure releases the claim immediately.
+
+| Concurrency | Mode | req/s before fix | req/s after fix |
+|---:|---|---:|---:|
+| 50 | audited (production) | 97 | **124** |
+| 50 | audited_shared_stream_no_anchor | 134 | 149 |
+| 200 | audited (production) | 117 | **166** |
+| 200 | audited_shared_stream_no_anchor | 161 | 195 |
+
+(Absolute numbers drift between runs on this laptop; compare within a column.)
+
+**Results:**
+- Anchors: **116 for the 928 events the audited mode anchored = one per 8 events exactly**, down from
+  360–454 for 771 before.
+- The remaining unanchored tail comes from the measurement modes that deliberately skip anchoring; the
+  sweeper covers it.
+- The remaining audited cost (about 15%) is the S3 PUT of one anchor every 8 events, plus one claim
+  attempt per request.
+- Per-matter or per-day audit streams stay unnecessary.
+
+**Tests** (`tests/integration/custody/test_anchor_claims.py`):
+- 200 concurrent writers produce one anchor per due point. The gap between anchors is never more than N,
+  the lifecycle event is itself anchored, and the quiescent tail is under N. Mutation-checked: without the
+  claim, 46 anchors were written for 200 events.
+- A fresh claim blocks the sweeper; a stale claim is taken over.
+- An ordinary failure releases the claim.
+- The 50k SIGKILL acceptance run passes with the new anchoring (81 s).

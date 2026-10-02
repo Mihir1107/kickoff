@@ -190,12 +190,38 @@ Out of scope for M17 (backlog): admin screens for IdPs and roles (API-only for n
 
 ---
 
-## Decisions needed before starting
-1. M14: entry provenance. Reference into the locked zip (proposed) or copy each day file.
-2. M14: reconciliation status for archive-verified units (`archive_matched` vs `matched` + report note).
-3. M14: the Slack Developer Program sandbox and a real export. I need you to provide it.
-4. M15: run Relativity's validator in CI in addition to the JSON schema, licence permitting?
-5. M15: who may create renders (new `export.create` permission: matter_manager only, or also reviewer)?
-6. M16: is a PDF report required (it adds a renderer dependency), or are HTML + JSON enough?
-7. M17: BFF with server-side sessions (proposed) or SPA with in-memory tokens?
-8. Prerequisite: do anchor coalescing (audit-burst option A) first?
+## Decisions (2026-10-02)
+1. **Export entries:** referenced inside the locked zip by (zip evidence id, pinned VersionId, entry path).
+   - The SHA-256 of the **decompressed** entry bytes is recorded, plus the zip's CRC-32 for the entry.
+   - `edisc-verify` must extract and verify entries from the zip offline. The custody package therefore
+     carries the zip (or the referenced zip objects).
+2. **Reconciliation:** a new status `matched_against_archive`.
+   - The report must state that completeness is relative to the provided export, and that the export's
+     own completeness against the source is NOT verified.
+   - It is never presented as equivalent to a live `matched`; it is not "clean" in the API's `clean` flag.
+3. **Real exports:** you will provide a Developer Program sandbox export and a free-plan workspace export.
+   Until then, build against the format docs and the dummy (`slack_export` dialect). Both become fixtures
+   when they arrive.
+4. **Relativity RSMF validator:** run it in CI in addition to the schema check, only if its licence permits.
+   Terms found (2026-10-02):
+   - **Validator SDK** (`Relativity.RSMFU.Validator.SDK` 2.4.0 on NuGet, .NET Standard 2.0 / .NET
+     Framework 4.6.2) is proprietary. "This software may only be used by persons authorized to use …
+     Relativity under a valid license agreement with Relativity ODA LLC." It forbids reverse engineering
+     and copying.
+     - It is usable in our CI only if the organisation holds a Relativity licence (please confirm).
+     - It must stay in a private CI image, never redistributed or shipped.
+   - **Sample repo** `relativitydev/rsmf-validator-samples` is BSD-3-Clause (kCura LLC, 2016). Its bundled
+     Relativity DLLs are under a separate commercial agreement.
+   - **Schema** `RSMFManifestSchema/rsmf_schema_2_0_0.json` is in that BSD-3 repo, so we can vendor it
+     with the licence notice.
+   - Plan: vendor the schema now. Add the containerized validator only after the licence is confirmed.
+5. **Renders:** RSMF creation is limited to `matter_manager` and `tenant_admin` (new permission
+   `export.create`) and is audited. Reviewers get previews only.
+6. **PDF report:** required. It is rendered from the same HTML template with fixed metadata (creation date,
+   producer, document id from the report hash inputs) so output is byte-reproducible. It is hashed and
+   recorded as a custody event like the HTML and JSON versions.
+7. **UI auth:** backend-for-frontend with server-side sessions, httpOnly SameSite cookies, CSRF protection
+   and server-side session revocation. No tokens in the browser.
+8. **Anchor storm:** fixed first (migration 0017; docs/runs/2026-10-01-audit-burst.md, "After the fix").
+## Open decisions (none blocking M14)
+- Confirm the Relativity licence, before adding the RSMF validator to CI (M15).

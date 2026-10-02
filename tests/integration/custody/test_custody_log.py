@@ -115,7 +115,8 @@ async def test_anchor_due_flag_survives_a_crash_before_anchoring(
         app_sessions, s3, settings, tenant_id=job.tenant_id, stream_id=job.job_id
     )
     assert key is not None
-    assert key.endswith("0000000000000002.json")
+    # anchored at its due point, the lifecycle event (seq 1); seq 2 is within the anchoring interval
+    assert key.endswith("0000000000000001.json")
     async with tenant_tx(app_sessions, job.tenant_id) as s:
         row = (
             await s.execute(
@@ -125,13 +126,17 @@ async def test_anchor_due_flag_survives_a_crash_before_anchoring(
                 {"j": job.job_id},
             )
         ).one()
-    assert (row.last_anchored_seq, row.anchor_due) == (2, False)
-    # anchoring the same head again is an idempotent no-op on WORM
+    assert (row.last_anchored_seq, row.anchor_due) == (1, False)
+    # a forced anchor (seal) covers the head; forcing again is an idempotent no-op on WORM
+    head_key = await anchor_if_due(
+        app_sessions, s3, settings, tenant_id=job.tenant_id, stream_id=job.job_id, force=True
+    )
+    assert head_key is not None and head_key.endswith("0000000000000002.json")
     assert (
         await anchor_if_due(
             app_sessions, s3, settings, tenant_id=job.tenant_id, stream_id=job.job_id, force=True
         )
-        == key
+        == head_key
     )
 
 
