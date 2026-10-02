@@ -655,7 +655,7 @@ class ExportIngest:
                         continue
                     batch.append(
                         {"cid": rec.conversation_id, "kind": rec.kind, "folder": rec.folder,
-                         "name": rec.name, "entry": filename}
+                         "name": rec.name, "entry": filename, "team": rec.team_id}
                     )  # fmt: skip
                     if len(batch) >= self.settings.export_entry_batch:
                         counts["duplicates"] += await self._insert_conversations(
@@ -682,9 +682,9 @@ class ExportIngest:
                 await s.execute(
                     text(
                         "INSERT INTO export_conversations (tenant_id, export_id, conversation_id, kind,"
-                        " folder, name, metadata_entry) SELECT CAST(:t AS uuid), CAST(:e AS uuid), * FROM unnest("
-                        " CAST(:cid AS text[]), CAST(:kind AS text[]), CAST(:folder AS text[]),"
-                        " CAST(:name AS text[]), CAST(:entry AS text[]))"
+                        " folder, name, metadata_entry, team_id) SELECT CAST(:t AS uuid), CAST(:e AS uuid), *"
+                        " FROM unnest(CAST(:cid AS text[]), CAST(:kind AS text[]), CAST(:folder AS text[]),"
+                        " CAST(:name AS text[]), CAST(:entry AS text[]), CAST(:team AS text[]))"
                         " ON CONFLICT (export_id, conversation_id) DO NOTHING RETURNING 1"
                     ),
                     {"t": tenant_id, "e": export_id, **cols},
@@ -715,6 +715,15 @@ class ExportIngest:
                     {"e": export_id},
                 )
             ).scalar_one()
+            teams = (
+                await s.execute(
+                    text(
+                        "SELECT count(DISTINCT team_id) AS teams, count(*) FILTER (WHERE team_id IS NULL)"
+                        " AS without FROM export_conversations WHERE export_id = :e"
+                    ),
+                    {"e": export_id},
+                )
+            ).one()
         return {
             "entries_by_kind": dict(scan.kinds),
             "unknown_entries": {"count": scan.kinds["unknown"], "sample": scan.unknown},
@@ -725,6 +734,9 @@ class ExportIngest:
             "metadata_files": sorted(scan.metadata),
             "root_prefix": scan.root,
             "workspace_id": scan.workspace,
+            # items are namespaced by the conversation's own team where its record names one, else by
+            # workspace_id (ADR 0014 section 7; confirm on real export for Enterprise Grid)
+            "conversation_teams": {"distinct": teams.teams, "without_team": teams.without},
             "messages": scan.messages,
             "threaded_messages": scan.threaded,
             "ts_outside_hint_day": {"count": scan.anomalies, "sample": scan.anomaly_sample},

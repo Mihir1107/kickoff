@@ -16,8 +16,10 @@ interprets them (``dialect = "export"``).
   the ``ts`` of the thread's messages in it (``select``).
 - **Files**: the export only links them. Links carry access tokens: they are registered as secrets,
   never logged, never stored outside the evidence, never passed to Temporal (only file ids are). Every
-  download takes a ``slack_export.file`` rate-limit token. An expired, revoked or unreachable link is a
-  ``FileUnavailableError`` with its reason: a recorded file gap, never a stall.
+  request (every redirect hop) takes a ``slack_export.file`` rate-limit token. Hosts, redirects and
+  resolved addresses are checked hop by hop and the connection is pinned to the checked IP
+  (``file_links``). An expired, revoked or unreachable link is a ``FileUnavailableError`` with its
+  reason: a recorded file gap, never a stall.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ from edisc_connector_slack_export.archive_access import (
     load_export,
     read_verified,
 )
+from edisc_connector_slack_export.file_links import Resolver, download, system_resolver
 from edisc_connector_slack_export.layout import BLIND_SPOTS_ALL, BLIND_SPOTS_PUBLIC_ONLY
 from edisc_connectors_base.protocol import Limiter
 from edisc_connectors_base.ratelimit import BucketKey
@@ -66,14 +69,6 @@ from edisc_core.schemas import ScopeType
 from edisc_core.settings import Settings
 from edisc_core.time import ensure_utc
 from edisc_db.session import tenant_tx
-
-FILE_REFUSALS = {
-    401: FileUnavailableReason.PERMISSION,  # revoked
-    403: FileUnavailableReason.PERMISSION,
-    404: FileUnavailableReason.DELETED,
-    410: FileUnavailableReason.EXPIRED_URL,
-}
-
 
 MIN_SECRET_LEN = (
     12  # shorter query values are not tokens; registering them would scrub ordinary text
@@ -146,13 +141,16 @@ class SlackExportConnector:
         settings: Settings,
         limiter: Limiter,
         http: httpx.AsyncClient,
+        resolver: Resolver = system_resolver,
     ) -> None:
         self._sessions, self._s3, self._settings = sessions, s3, settings
-        self._limiter, self._http = limiter, http
+        self._limiter, self._http, self._resolver = limiter, http, resolver
         # file id -> export link, filled while a batch is read and used right after by the same
         # activity (the pipeline downloads a batch's files before normalizing it). Never persisted;
         # bounded (oldest dropped first).
         self._links: OrderedDict[tuple[uuid.UUID, str], str] = OrderedDict()
+        # (export, conversation) -> team: immutable once the export is validated
+        self._teams: OrderedDict[tuple[uuid.UUID, str], str | None] = OrderedDict()
 
     # ------------------------------------------------------------------ helpers
     @staticmethod
@@ -206,6 +204,22 @@ class SlackExportConnector:
         if len(rows) != 1:
             raise InvalidCursorError(f"{unit.unit_key}: {len(rows)} day files (expected one)")
         return rows[0]
+
+    async def item_workspace(self, conn: Connection, conversation_id: str) -> str:
+        """The conversation's own team when its metadata record names one (Enterprise Grid: one export,
+        many workspaces), else the export's workspace (users.json). Never per message: a shared
+        channel's messages carry their senders' teams *(confirm on real export)*."""
+        key = (self._export_id(conn), conversation_id)
+        if key not in self._teams:
+            rows = await self._entry_rows(
+                conn,
+                "SELECT team_id FROM export_conversations WHERE export_id = :e AND conversation_id = :c",
+                {"e": key[0], "c": conversation_id},
+            )
+            self._teams[key] = rows[0].team_id if rows else None
+            while len(self._teams) > MAX_LINKS:
+                self._teams.popitem(last=False)
+        return self._teams[key] or conn.workspace_id
 
     async def expected_count(self, conn: Connection, unit: WorkUnit) -> int | None:
         """The number of elements in the day file (counted at validation); None if it did not parse."""
@@ -389,27 +403,14 @@ class SlackExportConnector:
         if link is None:  # hidden, external or tombstoned files have no link in the export
             body = json.dumps({"ok": False, "error": "no_link_in_export"}).encode()
             raise FileUnavailableError(file_ref, FileUnavailableReason.EXTERNAL_OR_HIDDEN, body)
-        parts = urlsplit(link)
-        if (
-            parts.scheme != "https"
-            or (parts.hostname or "") not in self._settings.export_file_hosts
-        ):
-            body = json.dumps({"ok": False, "error": "file_host_not_allowed"}).encode()
-            raise FileUnavailableError(file_ref, FileUnavailableReason.EXTERNAL_OR_HIDDEN, body)
         key = BucketKey(conn.tenant_id, self.source, conn.workspace_id, "file")
-        await self._limiter.acquire(key)
-        try:
-            async with self._http.stream("GET", link, follow_redirects=False) as resp:
-                reason = FILE_REFUSALS.get(resp.status_code)
-                if 300 <= resp.status_code < 400:  # a login redirect: the link's token expired
-                    reason = FileUnavailableReason.EXPIRED_URL
-                elif reason is None and resp.status_code >= 400:
-                    reason = FileUnavailableReason.UNREACHABLE
-                if reason is not None:
-                    body = json.dumps({"ok": False, "status": resp.status_code}).encode()
-                    raise FileUnavailableError(file_ref, reason, body)
-                async for chunk in resp.aiter_bytes(1 << 16):
-                    yield chunk
-        except httpx.TransportError as exc:  # never logs the URL: only the error type
-            body = json.dumps({"ok": False, "error": type(exc).__name__}).encode()
-            raise FileUnavailableError(file_ref, FileUnavailableReason.UNREACHABLE, body) from None
+        async for chunk in download(
+            self._http,
+            link,
+            file_ref,
+            hosts=self._settings.export_file_hosts,
+            max_redirects=self._settings.export_file_max_redirects,
+            resolver=self._resolver,
+            before_request=lambda: self._limiter.acquire(key),
+        ):
+            yield chunk

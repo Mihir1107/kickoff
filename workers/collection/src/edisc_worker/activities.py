@@ -25,6 +25,7 @@ from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 from types_aiobotocore_s3 import S3Client
 
+from edisc_connector_dummy.guard import ensure_dummy_permitted
 from edisc_connectors_base.protocol import Connector
 from edisc_connectors_base.types import Connection
 from edisc_core.settings import Settings
@@ -104,6 +105,9 @@ class Activities:
     connectors: Mapping[str, Connector]
     temporal: Client | None = None  # for the in-flight backstop (describe children)
     hooks: CrashHooks = field(default_factory=CrashHooks)
+
+    def __post_init__(self) -> None:
+        ensure_dummy_permitted(self.settings.env, self.connectors)
 
     # ------------------------------------------------------------------ helpers
     async def _context(

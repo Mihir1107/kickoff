@@ -146,8 +146,17 @@ namespace of what was collected (`Connector.item_source`), not the connector tha
   dummy source, whose two dialects simulate the Slack Web API. The same message collected via the API
   and via an export is ONE item with one version when its fingerprint matches (tested: one dummy dataset
   collected both ways gives zero new items on the second job).
-- Message ids stay `{workspace}/{channel}/{ts}`; for an export the workspace is the team id found in
-  its `users.json`, so it matches the live connection's workspace.
+- Message ids stay `{workspace}/{channel}/{ts}`. The workspace is per CONVERSATION
+  (`Connector.item_workspace`): the connection's workspace, except where one connection spans several
+  teams. For an export it is the team named by the conversation's own metadata record
+  (`context_team_id`, else `team_id`/`team`), falling back to the most common team in `users.json`
+  only when the record names none. Never the sender's team on a message. *(Confirm on real export for
+  Enterprise Grid.)* The live Slack connector must use the same rule (`context_team_id` from
+  `conversations.info`) so Grid identities agree across sources.
+- The dummy connector shares the `slack` namespace, so it is refused outside `EDISC_ENV`
+  local/test/ci (`edisc_connector_dummy.guard`): not wired into the API or a worker, and the
+  connection-create and job-start routes refuse it. Otherwise synthetic items could take the keys of
+  real Slack messages.
 - `collection_jobs.connector_version` and the custody `job_started` payload still name the connector.
 
 ## Consequences

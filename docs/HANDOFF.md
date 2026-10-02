@@ -70,9 +70,16 @@ Done:
 - **M14.5** export collection: connector, `archive_entry` evidence, export dialect, thread index,
   file links (rate-limited, host allowlist, gaps with reasons), `matched_against_archive` /
   `completed_against_archive` with the caveat in the API; cross-source identity (`item_source`).
+  Review fixes (2026-10-03): file links follow redirects with per-hop allowlist, resolved-address
+  checks and IP pinning (`file_links`); item workspace per conversation for Grid (migration 0023,
+  `Connector.item_workspace`); dummy connector refused outside local/test/ci (`edisc_connector_dummy.guard`).
+  `apps/web/` (Vite scaffold, not created by this session) is untracked and unrun until its origin
+  is confirmed.
 
 Next, in order:
-1. **M14.6** `edisc-verify` package format /2 (zip carried, entries verified offline).
+1. **M14.6** `edisc-verify` package format /2, entries verified offline. Two modes for the zip:
+   embedded in the package, or referenced by SHA-256 with `edisc-verify --archive <path>` (hash checked
+   first, then entries). See ADR 0014 section 2.
 2. **M14.7** crash matrix during ingestion, real-export fixtures when provided, docs.
 
 ## Gotchas learned (read before changing things)

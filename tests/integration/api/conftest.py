@@ -4,7 +4,9 @@ except the external identity provider's JWKS endpoint where a test needs an HTTP
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import secrets
+import socket
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -24,6 +26,7 @@ from edisc_api.admin import onboard_tenant
 from edisc_api.app import Resources, create_app
 from edisc_api.auth import DEV_ISSUER, DEV_JWKS, Authenticator, JwksCache, dev_token
 from edisc_connector_dummy.connector import DummyConnector
+from edisc_connector_slack_export import file_links
 from edisc_connector_slack_export.connector import SlackExportConnector
 from edisc_connectors_base.ratelimit import RateLimiter
 from edisc_core.envelope import SecretBox
@@ -278,9 +281,23 @@ class FileHost:
         return httpx.Response(200, content=self.dataset.file_bytes(file_id))
 
 
+FILE_HOST_IP = ipaddress.ip_address(
+    "93.184.215.14"
+)  # any global address: never dialled (MockTransport)
+
+
+async def fake_dns(host: str, port: int) -> list[file_links.IPAddress]:
+    """Export file hosts are fake (``.test``); links resolve to a global address."""
+    if host.endswith(".test"):
+        return [FILE_HOST_IP]
+    raise socket.gaierror(socket.EAI_NONAME, "unknown host")
+
+
 def export_connector(api: Api, host: FileHost) -> SlackExportConnector:
     http = httpx.AsyncClient(transport=httpx.MockTransport(host.handler))
-    return SlackExportConnector(api.sessions, api.s3, api.settings, api.resources.limiter, http)
+    return SlackExportConnector(
+        api.sessions, api.s3, api.settings, api.resources.limiter, http, resolver=fake_dns
+    )
 
 
 @contextlib.asynccontextmanager

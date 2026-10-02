@@ -709,6 +709,7 @@ class ExportConversation(Base):
     folder: Mapped[str] = mapped_column(Text)
     name: Mapped[str | None] = mapped_column(Text)
     metadata_entry: Mapped[str] = mapped_column(Text)
+    team_id: Mapped[str | None] = mapped_column(Text)
 
 
 class RetentionGap(Base):

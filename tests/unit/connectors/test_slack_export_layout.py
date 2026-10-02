@@ -60,6 +60,23 @@ def test_conversation_records() -> None:
         assert conversation_record("channel", bad) is None, bad
 
 
+@pytest.mark.parametrize(
+    ("element", "team"),
+    [
+        ({"id": "C1", "name": "g"}, None),
+        ({"id": "C1", "name": "g", "context_team_id": "T2", "team_id": "T3"}, "T2"),
+        ({"id": "C1", "name": "g", "team_id": "T3", "team": "T4"}, "T3"),
+        ({"id": "C1", "name": "g", "team": "E1"}, "E1"),
+        ({"id": "C1", "name": "g", "team": {"id": "T5"}}, None),  # not a team id
+        ({"id": "C1", "name": "g", "context_team_id": "", "team": "T6"}, "T6"),
+        ({"id": "C1", "name": "g", "team_id": "T/../x"}, None),  # never a path segment
+    ],
+)
+def test_conversation_team(element: dict[str, object], team: str | None) -> None:
+    rec = conversation_record("channel", element)
+    assert rec is not None and rec.team_id == team
+
+
 def test_tier_detection() -> None:
     public = detect_tier(
         {"users.json", "channels.json"}, nested_metadata_seen=False, declared_plan=None

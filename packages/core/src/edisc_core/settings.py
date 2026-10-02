@@ -143,6 +143,13 @@ class Settings(BaseSettings):
         description="hosts export file links may be downloaded from (https only); anything else is a "
         "recorded file gap, never a request (exports are attacker-influenced: no SSRF)",
     )
+    export_file_max_redirects: int = Field(
+        default=5,
+        ge=0,
+        le=10,
+        description="redirects followed for an export file link; every hop must pass the host, https "
+        "and resolved-address checks",
+    )
     export_complete_wait_seconds: float = Field(
         default=20,
         ge=0,

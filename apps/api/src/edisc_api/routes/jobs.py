@@ -29,6 +29,7 @@ from edisc_api.authz import P, Permission, Scope, authorize, perm
 from edisc_api.errors import conflict, not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, decode_text, encode_text, page_of
 from edisc_api.routes.hierarchy import ensure_matter_open
+from edisc_connector_dummy.guard import source_permitted
 from edisc_connector_slack_export.archive_access import open_archive_entry
 from edisc_connectors_base.types import CollectionScope, ThreadParentPolicy
 from edisc_core.canonical import canonical_json
@@ -355,7 +356,7 @@ async def create_job(
         if conn.status != "active":
             raise conflict(f"connection is {conn.status}")
         connector = res.connectors.get(conn.source)
-        if connector is None:
+        if connector is None or not source_permitted(res.settings.env, conn.source):
             raise unprocessable(f"no connector for {conn.source}")
         if connector.archive_backed and any(sc.type != "channel" for sc in body.scopes):
             raise unprocessable(

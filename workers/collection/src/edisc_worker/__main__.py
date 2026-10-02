@@ -21,6 +21,11 @@ from temporalio.worker import Worker
 from types_aiobotocore_s3 import S3Client
 
 from edisc_connector_dummy.connector import DummyConnector
+from edisc_connector_dummy.guard import (
+    DummyNotPermittedError,
+    dummy_permitted,
+    ensure_dummy_permitted,
+)
 from edisc_connector_slack_export.connector import SlackExportConnector
 from edisc_connectors_base.protocol import Connector
 from edisc_connectors_base.ratelimit import RateLimiter
@@ -55,8 +60,12 @@ def build_connectors(
     settings: Settings,
     http: httpx.AsyncClient,
 ) -> dict[str, Connector]:
+    try:
+        ensure_dummy_permitted(settings.env, sources)
+    except DummyNotPermittedError as exc:
+        raise SystemExit(str(exc)) from None
     available: dict[str, Connector] = {
-        "dummy": DummyConnector(limiter),
+        **({"dummy": DummyConnector(limiter)} if dummy_permitted(settings.env) else {}),
         "slack_export": SlackExportConnector(sessions, s3, settings, limiter, http),
     }
     unknown = set(sources) - available.keys()

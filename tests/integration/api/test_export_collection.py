@@ -6,7 +6,8 @@ Postgres and MinIO. Only the external file host behind export links is faked.
 - thread context across day files under each thread-parent policy, from the validation index;
 - file links: downloaded through the limiter; expired, revoked, unreachable or foreign links become
   recorded file gaps with their reason, never a stall;
-- R4: a message whose ts is not on its file's day is placed by its ts and reported as an anomaly.
+- R4: a message whose ts is not on its file's day is placed by its ts and reported as an anomaly;
+- Grid: items are namespaced by their conversation's own team, not by users.json.
 """
 
 from __future__ import annotations
@@ -196,11 +197,11 @@ def _msg(ts: str, text_: str, thread_ts: str | None = None, **extra: Any) -> dic
     return {**m, **extra}
 
 
-def _zip(files: dict[str, Any]) -> bytes:
+def _zip(files: dict[str, Any], channels: list[dict[str, Any]] | None = None) -> bytes:
     buf = io.BytesIO()
     zw = ZipWriter(buf)
     zw.add("users.json", json.dumps([{"id": "U1", "team_id": "T1", "name": "u"}]).encode())
-    zw.add("channels.json", json.dumps([{"id": "C1", "name": "general"}]).encode())
+    zw.add("channels.json", json.dumps(channels or [{"id": "C1", "name": "general"}]).encode())
     for name, messages in files.items():
         zw.add(name, json.dumps(messages).encode())
     zw.close()
@@ -277,6 +278,8 @@ async def test_file_links_become_recorded_gaps_never_stalls(api: Api, tenant: Te
         _msg(_ts(5, 11), "revoked", files=[file("FREV")]),
         _msg(_ts(5, 12), "host down", files=[file("FDOWN")]),
         _msg(_ts(5, 13), "foreign host", files=[file("FEVIL", "http://169.254.169.254")]),
+        _msg(_ts(5, 15), "redirected", files=[file("FHOP")]),
+        _msg(_ts(5, 16), "redirected inside", files=[file("FINT")]),
         _msg(
             _ts(5, 14), "no link", files=[{"id": "FHIDDEN", "name": "x", "mimetype": "text/plain"}]
         ),
@@ -289,6 +292,15 @@ async def test_file_links_become_recorded_gaps_never_stalls(api: Api, tenant: Te
             if request.url.path.startswith("/FOK/"):
                 self.requests.append("FOK")
                 return httpx.Response(200, content=b"abc")
+            if request.url.path.startswith("/FHOP/"):  # an allowed chain: two hops, then the file
+                self.requests.append(request.url.path)
+                hop = int(request.url.params.get("hop", "0"))
+                if hop < 2:
+                    return httpx.Response(302, headers={"location": f"/FHOP/x?hop={hop + 1}"})
+                return httpx.Response(200, content=b"hop")
+            if request.url.path.startswith("/FINT/"):
+                self.requests.append("FINT")
+                return httpx.Response(302, headers={"location": "https://127.0.0.1/FINT"})
             return host.handler(request)
 
     served = Served()
@@ -307,7 +319,7 @@ async def test_file_links_become_recorded_gaps_never_stalls(api: Api, tenant: Te
             units = (await c.get(f"/v1/jobs/{job['id']}/units")).json()["items"]
     assert job["status"] == "completed_with_gaps" and job["caveat"] is None
     unit = next(u for u in units if u["kind"] == "conversation_day")
-    assert (unit["recon_status"], unit["file_gaps"]) == ("gap", 5)
+    assert (unit["recon_status"], unit["file_gaps"]) == ("gap", 6)
     async with tenant_tx(exp.sessions, tenant.tenant_id) as s:
         reasons = dict(
             (
@@ -327,11 +339,13 @@ async def test_file_links_become_recorded_gaps_never_stalls(api: Api, tenant: Te
         "FREV": "permission",
         "FDOWN": "unreachable",
         "FEVIL": "external_or_hidden",  # never requested: not an allowed https host
+        "FINT": "expired_url",  # redirected off the allowlist: the internal address never requested
         "FHIDDEN": "external_or_hidden",
     }
-    assert stored == 1
+    assert stored == 2
     assert "FEVIL" not in host.requests and "FHIDDEN" not in host.requests
     assert served.requests.count("FOK") == 1
+    assert served.requests.count("/FHOP/x") == 2  # FHOP stored, after following both redirects
 
 
 async def test_day_anomalies_are_placed_by_ts_and_reported(api: Api, tenant: TenantCtx) -> None:
@@ -379,3 +393,38 @@ async def test_day_anomalies_are_placed_by_ts_and_reported(api: Api, tenant: Ten
             )
         ).scalar_one()
     assert (payload["basis"], payload["day_anomalies"]) == ("archive", 1)
+
+
+async def test_grid_items_are_namespaced_by_their_conversation_team(
+    api: Api, tenant: TenantCtx
+) -> None:
+    """One org export spanning workspaces: the team in each conversation's record namespaces its items
+    (users.json's majority team T1 only where a record names none). Shape *(confirm on real export)*."""
+    channels = [
+        {"id": "C1", "name": "general"},
+        {"id": "C2", "name": "eng", "context_team_id": "T2"},
+        {"id": "C3", "name": "ops", "team_id": "T3"},
+    ]
+    files = {
+        f"{name}/2026-01-05.json": [_msg(_ts(5, 9), name, team="T9")]  # the SENDER's team: ignored
+        for name in ("general", "eng", "ops")
+    }
+    async with collection_workers(api, FileHost()) as exp:
+        w = await make_world(exp, tenant)
+        async with exp.client(tenant.subdomain, tenant.token(exp.settings)) as c:
+            export = await _export_connection(c, w.client, _zip(files, channels))
+            job = await _job(
+                c,
+                w.matter,
+                {
+                    "connection_id": export["connection_id"],
+                    "scopes": [_scope(datetime(2026, 1, 5, tzinfo=UTC), 1)],
+                },
+            )
+    assert export["workspace_id"] == "T1"
+    assert export["findings"]["conversation_teams"] == {"distinct": 2, "without_team": 1}
+    assert await _linked(exp, tenant, job["id"], in_scope=True) == {
+        f"T1/C1/{_ts(5, 9)}",
+        f"T2/C2/{_ts(5, 9)}",
+        f"T3/C3/{_ts(5, 9)}",
+    }

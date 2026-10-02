@@ -210,6 +210,9 @@ class DummyConnector:
             return None  # transient: a fresh URL works in the next collection
         return reason
 
+    async def item_workspace(self, conn: Connection, conversation_id: str) -> str:
+        return conn.workspace_id
+
     async def expected_count(self, conn: Connection, unit_: WorkUnit) -> int | None:
         self._check_auth(conn)
         ds, epoch = self.dataset(conn)

@@ -146,6 +146,13 @@ class ConversationRecord:
     kind: str
     folder: str
     name: str | None
+    team_id: str | None  # the conversation's own team (Grid); None = the export's workspace
+
+
+# Where a conversation record names its team, first match wins *(confirm on real export: Enterprise
+# Grid org exports; standard exports usually carry none)*. ``context_team_id`` is what the Web API
+# returns for the team a conversation is accessed from, so export and API identities agree.
+TEAM_FIELDS = ("context_team_id", "team_id", "team")
 
 
 def conversation_record(kind: str, element: Any) -> ConversationRecord | None:
@@ -162,7 +169,11 @@ def conversation_record(kind: str, element: Any) -> ConversationRecord | None:
     folder = cid if kind == "dm" else name
     if not folder or "/" in folder or folder in (".", ".."):
         return None
-    return ConversationRecord(cid, kind, folder, name)
+    team = next(
+        (v for f in TEAM_FIELDS if isinstance(v := element.get(f), str) and v and "/" not in v),
+        None,
+    )
+    return ConversationRecord(cid, kind, folder, name, team)
 
 
 @dataclass(frozen=True)

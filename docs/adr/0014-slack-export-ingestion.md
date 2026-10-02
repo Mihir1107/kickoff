@@ -77,9 +77,15 @@ checked against them.
   fragment. The normalizer is unchanged apart from the export dialect (§7).
 - **Offline verification, package format `edisc-custody-package/2`.** The verifier accepts /1 and /2.
   - `evidence.jsonl` carries the archive fields.
-  - With objects included, `objects/` holds the zip itself (once, by SHA-256).
+  - Two modes for the zip (an export can be ~200 GB, too large to embed every time; decided 2026-10-03):
+    - **embedded:** `objects/` holds the zip itself (once, by SHA-256);
+    - **referenced:** the package records the zip's SHA-256, size and name only, and `edisc-verify`
+      takes the archive from an external path (`--archive <path>`, repeatable for several archives).
+      It hashes the file first and refuses on a mismatch, before reading any entry; then verifies
+      entries offline exactly as for an embedded zip. Without `--archive`, a referenced archive is
+      reported as unverified (never as verified).
   - For each `archive_entry`, `edisc-verify`:
-    1. checks the zip's SHA-256;
+    1. checks the zip's SHA-256 (embedded object or `--archive` file);
     2. finds the entry by exact path in the central directory, rejecting duplicates;
     3. checks the CRC-32 recorded at collection against the central directory;
     4. decompresses under the same limits (§3) and checks the CRC-32 and the recorded decompressed
@@ -266,16 +272,29 @@ small ZIP writer because `zipfile` cannot produce unflagged UTF-8 names or force
   scopes are refused at job creation.
 - **Validation also indexes** (one pass, local-header order, element by element): per day file its
   element count, hint-day anomalies and parse errors (`export_day_files`), every threaded message with
-  its entry and array index (`export_threads`), and the workspace (team id) from `users.json`.
+  its entry and array index (`export_threads`), the export's workspace (most common team id in
+  `users.json`), and each conversation's own team (`export_conversations.team_id`, from
+  `context_team_id`, else `team_id`/`team` in its record; findings `conversation_teams`). Items are
+  namespaced by the conversation's team, else the export's workspace (ADR 0004 amendment; *confirm on
+  real export* for Enterprise Grid).
 - **Thread context across day files:** the same policy rules as the Web API (replies here with a parent
   before the range: the parent or the whole thread; parents here with replies after the range: the
   whole thread), resolved through `export_threads`. A context batch is the other day file's entry with
   `select` = the thread members' `ts`; only those become items, with their real array index as path.
 - **Files:** links are downloaded through the `slack_export.file` bucket, https only and only from
-  `EDISC_EXPORT_FILE_HOSTS` (default `files.slack.com`: an attacker-made export must not make us fetch
-  internal addresses). Refusals become recorded file gaps with a reason: 3xx or 410 `expired_url`,
-  401/403 `permission`, 404 `deleted`, other errors or no answer `unreachable` (retried
-  `EDISC_FILE_RETRY_ATTEMPTS` times, then recorded), no link or a foreign host `external_or_hidden`.
+  `EDISC_EXPORT_FILE_HOSTS` (default `files.slack.com`, default port: an attacker-made export must not
+  make us fetch internal addresses). Redirects are followed up to `EDISC_EXPORT_FILE_MAX_REDIRECTS` (5),
+  every hop re-checked against the same rules. Every hop's host is resolved and every address must be
+  global unicast (no private, loopback, link-local, shared, reserved, multicast or unspecified ranges,
+  so no metadata endpoints; IPv4-mapped/6to4/Teredo judged as IPv4). The connection goes to the checked
+  IP with `Host` and TLS SNI/certificate on the hostname, so a second DNS answer cannot rebind it
+  (`edisc_connector_slack_export.file_links`). Refusals become recorded file gaps with a reason: 410 or
+  a redirect to a host/scheme/port that is not allowed `expired_url` (Slack sends an expired token to
+  its login page; the target is never requested; *confirm on real export*), 401/403 `permission`,
+  404 `deleted`, an allowed host resolving to a disallowed address `external_or_hidden` (never
+  requested), other statuses, no DNS answer, no connection or too many redirects `unreachable`
+  (retried `EDISC_FILE_RETRY_ATTEMPTS` times, then recorded), no link or a foreign host
+  `external_or_hidden`. Every hop takes a rate-limit token.
   Link tokens are registered as secrets; Temporal carries file ids only.
 - **R4 anomalies** are counted per unit (`day_anomalies`, in the API and the `unit_reconciled`
   custody event) and listed at validation (`ts_outside_hint_day`).

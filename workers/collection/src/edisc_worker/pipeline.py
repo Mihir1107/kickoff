@@ -745,11 +745,14 @@ class Pipeline:
         )
         await self.hooks.hit("after_evidence")
 
+        conversation = None if directory or unit is None else unit.conversation_id
         ctx = scope.context(
             tenant_id,
             self.connector.item_source,
-            conn.workspace_id,
-            None if directory or unit is None else unit.conversation_id,
+            conn.workspace_id
+            if conversation is None
+            else await self.connector.item_workspace(conn, conversation),
+            conversation,
             None if directory or unit is None else unit.day,
             self.connector.dialect,
         )
@@ -778,7 +781,7 @@ class Pipeline:
                 subjects = message_page_subjects(batch.body, ctx=ctx)
                 if current.pages_done == 0 and batch.kind is BatchKind.HISTORY:
                     subjects = subjects | {
-                        access_subject(conn.workspace_id, ctx.conversation_id or "")
+                        access_subject(ctx.workspace_id, ctx.conversation_id or "")
                     }
                 prior = await load_prior(
                     s, tenant_id=tenant_id, source=ctx.source, subjects=subjects
@@ -933,7 +936,7 @@ class Pipeline:
         ctx = scope.context(
             tenant_id,
             self.connector.item_source,
-            conn.workspace_id,
+            await self.connector.item_workspace(conn, row.conversation_id),
             row.conversation_id,
             row.day,
             self.connector.dialect,
@@ -949,7 +952,7 @@ class Pipeline:
             ).one()
             if locked.recon_status == "access_lost" or locked.status == "done":
                 return
-            sid = access_subject(conn.workspace_id, row.conversation_id)
+            sid = access_subject(ctx.workspace_id, row.conversation_id)
             prior = await load_prior(s, tenant_id=tenant_id, source=ctx.source, subjects=[sid])
             items = access_lost(
                 ctx=ctx,
@@ -1034,6 +1037,7 @@ class Pipeline:
                 )
                 fragment = messages_fragment_hash(body)
             last_page = (fragment, EvidenceRef(row.last_page_evidence_id, key))
+            workspace = await self.connector.item_workspace(conn, row.conversation_id)
         async with tenant_tx(self.sessions, tenant_id) as s:
             locked = (
                 await s.execute(
@@ -1050,7 +1054,7 @@ class Pipeline:
                 ctx = scope.context(
                     tenant_id,
                     self.connector.item_source,
-                    conn.workspace_id,
+                    workspace,
                     row.conversation_id,
                     row.day,
                     self.connector.dialect,

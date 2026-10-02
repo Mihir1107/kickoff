@@ -72,6 +72,10 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   entries of the locked zip (`archive_entry` evidence, never a copy); items use `item_source = "slack"`
   so exports and live API collections share identities (ADR 0004 amendment). Never `git checkout` a
   file to undo a mutation check: restore from a copy (uncommitted work is lost otherwise).
+- File links only through `edisc_connector_slack_export.file_links` (allowlist + https re-checked per
+  redirect hop, resolved addresses must be global, connection pinned to the checked IP).
+- Item workspace is per conversation (`Connector.item_workspace`; exports: the conversation record's
+  team, else users.json). The dummy connector is refused outside local/test/ci (`edisc_connector_dummy.guard`).
 - Layout/tier rules: `edisc_connector_slack_export.layout`. Format details marked *(confirm on real
   export)* in ADR 0014 stay provisional until the real exports are fixtures.
 

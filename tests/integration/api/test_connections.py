@@ -12,11 +12,13 @@ import pytest
 from sqlalchemy import text
 from temporalio.worker import Worker
 
+from edisc_core.settings import Environment
 from edisc_core.time import utc_now
 from edisc_db.session import tenant_tx
 
 from ..worker.conftest import FAST, WORKFLOWS, queue, spec
 from .conftest import SECRETS, Api, TenantCtx, add_principal, secret
+from .test_jobs import make_world
 
 
 async def _client_and_matter(api: Api, t: TenantCtx) -> tuple[str, str]:
@@ -219,3 +221,31 @@ async def test_the_response_scanner_itself_catches_a_leak() -> None:
     ) as c:
         with pytest.raises(AssertionError, match="leaked a credential"):
             await c.get("http://x/")
+
+
+@pytest.mark.parametrize("env", [Environment.STAGING, Environment.PRODUCTION])
+async def test_the_dummy_connector_is_refused_outside_disposable_environments(
+    api: Api, tenant: TenantCtx, env: Environment
+) -> None:
+    """The dummy shares the slack identity namespace (ADR 0004): outside local/test/ci it gets no
+    connection and starts no job, even with a connector wired and a connection left from before."""
+    w = await make_world(api, tenant)  # created while the stack is a test stack
+    real = api.resources.settings
+    api.resources.settings = real.model_copy(update={"env": env})
+    try:
+        async with api.client(tenant.subdomain, tenant.token(api.settings)) as c:
+            r = await c.post(f"/v1/clients/{w.client}/connections", json=_connection_body())
+            assert (r.status_code, r.json()["detail"]) == (422, "unknown source dummy")
+            r = await c.post(f"/v1/matters/{w.matter}/jobs", json=w.job_body())
+            assert (r.status_code, r.json()["detail"]) == (422, "no connector for dummy")
+    finally:
+        api.resources.settings = real
+    async with tenant_tx(api.sessions, tenant.tenant_id) as s:
+        counts = (
+            await s.execute(
+                text(
+                    "SELECT (SELECT count(*) FROM connections), (SELECT count(*) FROM collection_jobs)"
+                )
+            )
+        ).one()
+    assert tuple(counts) == (1, 0)

@@ -41,6 +41,11 @@ class Connector(Protocol):
         """Units of work = (conversation_id, UTC day) inside the scope."""
         ...
 
+    async def item_workspace(self, conn: Connection, conversation_id: str) -> str:
+        """The workspace namespacing this conversation's item identities (ADR 0004): the connection's
+        workspace, or the conversation's own team where one connection spans several (Grid exports)."""
+        ...
+
     async def expected_count(self, conn: Connection, unit: WorkUnit) -> int | None:
         """Distinct messages the SOURCE says exist in the unit; None if it cannot say (reported as such)."""
         ...

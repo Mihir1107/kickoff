@@ -26,6 +26,7 @@ from edisc_api.auth import Caller
 from edisc_api.authz import P, Permission, Scope, authorize, perm
 from edisc_api.errors import not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, page_of
+from edisc_connector_dummy.guard import source_permitted
 from edisc_connectors_base.types import Connection
 from edisc_core.ids import new_id
 from edisc_core.redaction import register_secret
@@ -124,7 +125,7 @@ async def create_connection(
     rid: RequestIdDep,
 ) -> ConnectionOut:
     connector = res.connectors.get(body.source)
-    if connector is None:
+    if connector is None or not source_permitted(res.settings.env, body.source):
         raise unprocessable(f"unknown source {body.source}")
     if connector.archive_backed:  # its connection is created by validating an upload (ADR 0014)
         raise unprocessable(f"{body.source} connections come from uploads: POST .../exports")

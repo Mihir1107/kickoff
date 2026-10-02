@@ -20,6 +20,7 @@ from edisc_api.auth import Authenticator, AuthError, Caller, JwksCache
 from edisc_api.client_ip import client_ip
 from edisc_api.errors import ApiError
 from edisc_connector_dummy.connector import DummyConnector
+from edisc_connector_dummy.guard import dummy_permitted, ensure_dummy_permitted
 from edisc_connector_slack_export.connector import SlackExportConnector
 from edisc_connectors_base.protocol import Connector
 from edisc_connectors_base.ratelimit import RateLimiter
@@ -45,6 +46,9 @@ class Resources:
     connectors: Mapping[str, Connector]
     redis: aioredis.Redis | None = None  # auth-failure throttling (None: not throttled, tests only)
 
+    def __post_init__(self) -> None:
+        ensure_dummy_permitted(self.settings.env, self.connectors)
+
 
 @contextlib.asynccontextmanager
 async def build_resources(settings: Settings) -> AsyncIterator[Resources]:
@@ -68,7 +72,7 @@ async def build_resources(settings: Settings) -> AsyncIterator[Resources]:
                 SecretBox(LocalKmsClient(settings)),
                 Authenticator(settings, sessions, JwksCache(settings, http)),
                 {
-                    "dummy": DummyConnector(limiter),
+                    **({"dummy": DummyConnector(limiter)} if dummy_permitted(settings.env) else {}),
                     "slack_export": SlackExportConnector(sessions, s3, settings, limiter, http),
                 },
                 redis,
