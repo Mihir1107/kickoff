@@ -107,6 +107,19 @@ class Settings(BaseSettings):
         ge=0,
         description="Files up to this size skip staging: hashed in memory, PUT straight to WORM (ADR 0002 amendment). 0 disables.",
     )
+    # Slack export ingestion (ADR 0014): archive limits; a tenant admin may override them per upload
+    export_max_archive_bytes: int = Field(default=200 * 10**9, ge=1)
+    export_max_entries: int = Field(default=20_000_000, ge=1)
+    export_max_entry_bytes: int = Field(default=1 << 30, ge=1)
+    export_max_total_bytes: int = Field(default=2 * 10**12, ge=1)
+    export_max_total_ratio: int = Field(default=100, ge=1)
+    export_max_entry_ratio: int = Field(default=200, ge=1)
+    export_ratio_floor_bytes: int = Field(default=1 << 20, ge=0)
+    export_max_name_bytes: int = Field(default=1024, ge=16)
+    export_read_window_bytes: int = Field(
+        default=8 << 20, ge=1 << 16, description="sequential range-read window (ADR 0014 R6)"
+    )
+    export_upload_part_min_bytes: int = Field(default=8 << 20, ge=5 << 20)
     evidence_file_concurrency: int = Field(
         default=4,
         ge=1,
