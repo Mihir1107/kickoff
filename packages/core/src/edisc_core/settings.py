@@ -120,6 +120,29 @@ class Settings(BaseSettings):
         default=8 << 20, ge=1 << 16, description="sequential range-read window (ADR 0014 R6)"
     )
     export_upload_part_min_bytes: int = Field(default=8 << 20, ge=5 << 20)
+    export_upload_part_max_bytes: int = Field(
+        default=64 << 20,
+        ge=5 << 20,
+        description="largest upload part; the API buffers one part per request to hash it",
+    )
+    export_entry_batch: int = Field(
+        default=5000, ge=1, description="directory entries written per transaction"
+    )
+    export_max_json_element_bytes: int = Field(
+        default=16 << 20,
+        ge=1024,
+        description="largest single element of a metadata JSON array (streamed element by element)",
+    )
+    export_upload_ttl_days: int = Field(
+        default=7,
+        ge=1,
+        description="an export upload must complete within this; must match the staging lifecycle rule for exports/",
+    )
+    export_complete_wait_seconds: float = Field(
+        default=20,
+        ge=0,
+        description="how long POST .../complete waits for the hash-and-lock step before answering 202",
+    )
     evidence_file_concurrency: int = Field(
         default=4,
         ge=1,
@@ -238,6 +261,10 @@ class Settings(BaseSettings):
         if self.evidence_small_file_max_bytes > self.evidence_part_size_bytes:
             raise ValueError(
                 "EDISC_EVIDENCE_SMALL_FILE_MAX_BYTES must not exceed EDISC_EVIDENCE_PART_SIZE_BYTES"
+            )
+        if self.export_upload_part_min_bytes > self.export_upload_part_max_bytes:
+            raise ValueError(
+                "EDISC_EXPORT_UPLOAD_PART_MIN_BYTES must not exceed EDISC_EXPORT_UPLOAD_PART_MAX_BYTES"
             )
         if self.evidence_retention_override_days is not None and not self.env.is_disposable:
             raise ValueError(

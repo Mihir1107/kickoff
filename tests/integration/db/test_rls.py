@@ -21,6 +21,9 @@ COPY_OVERRIDES = {
     "work_unit_scopes": "'scope_id', gen_random_uuid()",
     "group_members": "'id', gen_random_uuid()",
     "api_idempotency": "'key', gen_random_uuid()::text",
+    "export_upload_parts": "'export_id', gen_random_uuid()",
+    "export_entries": "'export_id', gen_random_uuid()",
+    "export_conversations": "'export_id', gen_random_uuid()",
 }
 UPDATABLE = {
     "matters": "name",
@@ -31,6 +34,8 @@ UPDATABLE = {
     "work_units": "cursor",
     "custody_chain_heads": "last_hash",
     "token_refresh_journal": "state",
+    "slack_exports": "updated_at",
+    "export_upload_parts": "updated_at",
 }
 
 

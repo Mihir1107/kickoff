@@ -116,7 +116,9 @@ def create_app(settings: Settings, resources: Resources | None = None) -> FastAP
 
     @app.exception_handler(ApiError)
     async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
-        return JSONResponse({"error": exc.code, "detail": exc.detail}, status_code=exc.status)
+        return JSONResponse(
+            {"error": exc.code, "detail": exc.detail, **exc.extra}, status_code=exc.status
+        )
 
     from edisc_api.routes import register
 

@@ -30,9 +30,17 @@ checked against them.
   - The client uploads parts with `PUT /v1/exports/{id}/parts/{n}` (≥ 8 MiB except the last, each with a
     `Content-Digest: sha-256=…` header that we verify per part), then calls
     `POST /v1/exports/{id}/complete`.
-  - Parts go into an S3 multipart upload in the **staging** bucket. The session (upload id, part
-    numbers, part digests) lives in a new `export_uploads` table, so uploads resume across client and API
-    restarts. Nothing touches local disk.
+  - Parts go into an S3 multipart upload in the **staging** bucket under `exports/{tenant}/{export}`.
+    The session lives in `slack_exports`, and the parts (number, size, our SHA-256, ETag) in
+    `export_upload_parts`, so uploads resume across client and API restarts. A part may be re-sent until
+    completion. Nothing touches local disk; the API holds one part (≤ 64 MiB) per request in memory.
+  - Staged exports live under their own lifecycle rule (`exports/`, 7 days, `EDISC_EXPORT_UPLOAD_TTL_DAYS`),
+    since a large upload can take more than the staging bucket's usual day.
+  - Completion checks the parts (numbered 1..n, each but the last ≥ the minimum, sum = declared size) and
+    that the store still holds exactly the recorded parts; then a Temporal workflow (`exports` queue)
+    hashes, locks and validates. `complete` answers 202 with the export, waiting briefly
+    (`EDISC_EXPORT_COMPLETE_WAIT_SECONDS`) for the lock step so a declared-hash mismatch comes back as
+    the 422 directly; if hashing takes longer, a later `complete` or `GET` reports it.
 - **On complete,** the existing large-file evidence path (ADR 0002) runs, unchanged:
   1. one streaming pass over the staged object computes **our** SHA-256 and size (bounded memory);
   2. the result must match the declared size;
@@ -211,6 +219,27 @@ An export has no server-side counts. Completeness is checked against the archive
     collection of the same message dedupe), and get a new fingerprint version where not.
 - **The dummy generator gets a `slack_export` dialect** that writes a real zip from the oracle (public-only
   and full variants, including DMs and group DMs), so oracle-exact tests run on export data.
+
+### Implementation notes (M14.3)
+- **Tables (migration 0018):** `slack_exports` (status `uploading → locking → validating → ready |
+  rejected`; `locking → uploading` only before anything is locked, when the store refused the parts),
+  `export_upload_parts`, `export_entries` (the central directory, one row per entry) and
+  `export_conversations`. A trigger keeps the declared columns and the locked archive immutable and the
+  final states final; the directory tables are append-only.
+- **Duplicate names at 20M entries:** `export_entries` has a unique `(export_id, folded_name)`; the
+  validation pass inserts in batches and a violation is the `duplicate_name` rejection. Nothing holds
+  the directory in memory.
+- **Overlap at validation** is a lower bound (local header ≥ previous header start + 30 + compressed
+  size, checked in SQL over the offsets). The exact check (with names and extra fields) runs on every
+  read through `open_entry(data_end_limit=...)`.
+- **Metadata files** are streamed element by element (`edisc_core.jsonstream`, element cap
+  `EDISC_EXPORT_MAX_JSON_ELEMENT_BYTES`). An unparseable conversation metadata file rejects the archive
+  (`metadata_invalid`); an archive without any conversation metadata file is `not_a_slack_export`.
+- **Retention:** the export is not tied to a matter when uploaded, so it gets the rolling window. Jobs
+  that use it must extend it like any dedup hit (M14.5).
+- **Audit events (tenant stream):** `export_upload_started` and `export_limits_overridden` (uploader),
+  `export_upload_completed` (uploader), `export_uploaded`, `export_rejected` / `export_validated` and
+  `export_upload_reopened` (actor `system:export-ingest`, uploader named in the payload).
 
 ## Consequences
 - Plus: the uploaded bytes are locked and hashed before any parsing. Every item traces to an entry

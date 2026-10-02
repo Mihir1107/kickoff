@@ -219,6 +219,37 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
             principal,
             ids["job"],
         )
+        # Slack exports (migration 0018)
+        client = await conn.fetchval("SELECT id FROM clients WHERE is_default")
+        export = new_id()
+        await conn.execute(
+            "INSERT INTO slack_exports (id, tenant_id, client_id, declared_size, limits, staging_key,"
+            " created_by) VALUES ($1, $2, $3, 10, '{}', $4, 'seed')",
+            export,
+            t,
+            client,
+            f"exports/{t}/{export}",
+        )
+        await conn.execute(
+            "INSERT INTO export_upload_parts (tenant_id, export_id, part_number, size_bytes, sha256, etag)"
+            " VALUES ($1, $2, 1, 10, $3, 'e')",
+            t,
+            export,
+            HEX,
+        )
+        await conn.execute(
+            "INSERT INTO export_entries (tenant_id, export_id, idx, name, folded_name, kind, method,"
+            " crc32, compressed_size, uncompressed_size, local_header_offset)"
+            " VALUES ($1, $2, 0, 'users.json', 'users.json', 'metadata', 0, 0, 2, 2, 0)",
+            t,
+            export,
+        )
+        await conn.execute(
+            "INSERT INTO export_conversations (tenant_id, export_id, conversation_id, kind, folder,"
+            " metadata_entry) VALUES ($1, $2, 'C1', 'channel', 'general', 'channels.json')",
+            t,
+            export,
+        )
     return Seeded(
         t,
         ids["matter"],
@@ -267,5 +298,9 @@ TENANT_TABLES = [
     "role_assignments",
     "api_idempotency",
     "work_unit_scopes",
+    "slack_exports",
+    "export_upload_parts",
+    "export_entries",
+    "export_conversations",
 ]
 ALL_TABLES = ["tenants", *TENANT_TABLES]

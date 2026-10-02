@@ -3,9 +3,28 @@
     {
       "ID": "expire-staging-objects",
       "Status": "Enabled",
-      "Filter": {},
-      "Expiration": { "Days": 1 },
-      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+      "Filter": {
+        "Prefix": "t/"
+      },
+      "Expiration": {
+        "Days": 1
+      },
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 1
+      }
+    },
+    {
+      "ID": "expire-staged-exports",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "exports/"
+      },
+      "Expiration": {
+        "Days": 7
+      },
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 7
+      }
     }
   ]
 }

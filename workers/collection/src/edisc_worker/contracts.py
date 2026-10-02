@@ -19,6 +19,11 @@ def task_queue(source: str) -> str:
 
 
 MAINTENANCE_QUEUE = "maintenance"
+EXPORTS_QUEUE = "exports"  # Slack export hash-lock-validate (ADR 0014)
+
+
+def export_workflow_id(export_id: str) -> str:
+    return f"export-{export_id}"
 
 
 def unit_workflow_id(job_id: str, unit_key: str) -> str:
@@ -90,6 +95,18 @@ class RunConfig:
             retry_max_seconds=settings.activity_retry_max_seconds,
             max_attempts=settings.activity_max_attempts,
         )
+
+
+@dataclass(frozen=True)
+class ExportRef:
+    """One uploaded export to hash, lock and validate. Timeouts come from settings via the API."""
+
+    tenant_id: str
+    export_id: str
+    heartbeat_timeout_seconds: float = 60
+    retry_initial_seconds: float = 1
+    retry_max_seconds: float = 60
+    max_attempts: int = 25
 
 
 @dataclass(frozen=True)

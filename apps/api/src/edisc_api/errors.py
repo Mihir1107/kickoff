@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 
 class ApiError(Exception):
-    def __init__(self, status: int, code: str, detail: str = "") -> None:
+    def __init__(
+        self, status: int, code: str, detail: str = "", extra: dict[str, Any] | None = None
+    ) -> None:
         super().__init__(f"{status} {code}: {detail}")
         self.status, self.code, self.detail = status, code, detail
+        self.extra = extra or {}  # further non-secret fields of the error body
 
 
 def not_found(what: str = "not found") -> ApiError:

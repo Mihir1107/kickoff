@@ -3,7 +3,8 @@
 # - Evidence bucket: Object Lock (only possible at creation). A bucket default COMPLIANCE retention is a
 #   safety net (DEFAULT_RETENTION_DAYS; 0 = none, used by the ephemeral test stack whose objects carry
 #   seconds-level per-object retention). The evidence writer always sets an explicit retain-until.
-# - Staging bucket: NO lock, objects expire after 1 day.
+# - Staging bucket: NO lock. Objects under t/ expire after 1 day; uploaded Slack exports under exports/
+#   after 7 days (EDISC_EXPORT_UPLOAD_TTL_DAYS; a large upload may take more than a day, ADR 0014).
 # - Local / test / ci only: lifecycle expiry on the evidence bucket so objects are actually REMOVED once
 #   their retention lapses (Object Lock only blocks deletion; it never deletes). Never in production:
 #   infra/aws/*.json has no expiration rule for evidence.
@@ -18,7 +19,7 @@ fi
 mc retention info --default "local/$BUCKET" || true
 mc mb --ignore-existing "local/$STAGING_BUCKET"
 # import replaces the whole lifecycle configuration, so re-running never duplicates rules
-echo '{"Rules":[{"ID":"expire-staging-objects","Status":"Enabled","Filter":{"Prefix":""},"Expiration":{"Days":1}}]}' \
+echo '{"Rules":[{"ID":"expire-staging-objects","Status":"Enabled","Filter":{"Prefix":"t/"},"Expiration":{"Days":1}},{"ID":"expire-staged-exports","Status":"Enabled","Filter":{"Prefix":"exports/"},"Expiration":{"Days":7}}]}' \
   | mc ilm import "local/$STAGING_BUCKET"
 case "${EDISC_ENV:-production}" in
   local|test|ci)

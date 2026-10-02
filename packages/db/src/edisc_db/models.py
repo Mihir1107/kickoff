@@ -21,6 +21,7 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     MetaData,
+    SmallInteger,
     Text,
     UniqueConstraint,
     Uuid,
@@ -582,3 +583,109 @@ class WorkUnitScope(Base):
     job_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     unit_key: Mapped[str] = mapped_column(Text, primary_key=True)
     scope_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+
+
+class SlackExport(Base):
+    __tablename__ = "slack_exports"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),
+        ForeignKeyConstraint(["tenant_id", "client_id"], ["clients.tenant_id", "clients.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "evidence_object_id"],
+            ["evidence_objects.tenant_id", "evidence_objects.id"],
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "connection_id"], ["connections.tenant_id", "connections.id"]
+        ),
+        Index(None, "tenant_id", "client_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    client_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'uploading'"))
+    reject_reason: Mapped[str | None] = mapped_column(Text)
+    reject_detail: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    declared_size: Mapped[int] = mapped_column(BigInteger)
+    declared_sha256: Mapped[str | None] = mapped_column(Text)
+    declared_plan: Mapped[str | None] = mapped_column(Text)
+    limits: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    staging_key: Mapped[str] = mapped_column(Text)
+    upload_id: Mapped[str | None] = mapped_column(Text)
+    sha256: Mapped[str | None] = mapped_column(Text)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    evidence_object_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    version_id: Mapped[str | None] = mapped_column(Text)
+    entry_count: Mapped[int | None] = mapped_column(BigInteger)
+    detected_tier: Mapped[str | None] = mapped_column(Text)
+    tier_confirmed: Mapped[bool | None] = mapped_column(Boolean)
+    findings: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'"))
+    connection_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    created_by: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    updated_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    locked_at: Mapped[datetime | None] = mapped_column(TZ)
+    validated_at: Mapped[datetime | None] = mapped_column(TZ)
+
+
+class ExportUploadPart(Base):
+    __tablename__ = "export_upload_parts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "export_id"], ["slack_exports.tenant_id", "slack_exports.id"]
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    export_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    part_number: Mapped[int] = mapped_column(Integer, primary_key=True)
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    sha256: Mapped[str] = mapped_column(Text)
+    etag: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    updated_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+
+
+class ExportEntry(Base):
+    __tablename__ = "export_entries"
+    __table_args__ = (
+        UniqueConstraint("export_id", "folded_name"),
+        ForeignKeyConstraint(
+            ["tenant_id", "export_id"], ["slack_exports.tenant_id", "slack_exports.id"]
+        ),
+        Index(None, "export_id", "kind", "folder"),
+        Index(None, "export_id", "local_header_offset"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    export_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    idx: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(Text)
+    folded_name: Mapped[str] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(Text)
+    folder: Mapped[str | None] = mapped_column(Text)
+    hint_day: Mapped[date | None] = mapped_column(Date)
+    method: Mapped[int] = mapped_column(SmallInteger)
+    crc32: Mapped[int] = mapped_column(BigInteger)
+    compressed_size: Mapped[int] = mapped_column(BigInteger)
+    uncompressed_size: Mapped[int] = mapped_column(BigInteger)
+    local_header_offset: Mapped[int] = mapped_column(BigInteger)
+
+
+class ExportConversation(Base):
+    __tablename__ = "export_conversations"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "export_id"], ["slack_exports.tenant_id", "slack_exports.id"]
+        ),
+        Index(None, "export_id", "folder"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    export_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    kind: Mapped[str] = mapped_column(Text)
+    folder: Mapped[str] = mapped_column(Text)
+    name: Mapped[str | None] = mapped_column(Text)
+    metadata_entry: Mapped[str] = mapped_column(Text)

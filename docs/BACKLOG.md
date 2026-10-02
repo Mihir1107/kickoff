@@ -37,3 +37,11 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - Page-object compression (option 3), once real Slack exports are available to measure the ratio.
 - Tenant-defined custom roles (ADR 0013 decision b: fixed roles for v1).
 - Audit of metadata reads (job status, lists, reconciliation, custody results); content reads are audited (ADR 0013 d).
+- Slack exports (ADR 0014): a sweeper that ends export uploads left `uploading` past
+  `EDISC_EXPORT_UPLOAD_TTL_DAYS` (status `expired`, custody event, multipart upload aborted). Today a part
+  sent after expiry gets 410 and the row stays `uploading`.
+- Slack exports: MinIO aborts incomplete multipart uploads after its own `stale_uploads_expiry` (24 h) and
+  ignores the lifecycle abort rule, so locally an upload must finish within a day; on AWS the `exports/`
+  rule allows 7 days.
+- Slack exports: `export_entries` costs ~150 bytes/row (3 GB at 20M entries). If very large exports become
+  common, store only day files and unknown entries per row and keep counts for the rest.

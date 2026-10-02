@@ -11,6 +11,7 @@ dependencies = [
     "edisc-connectors-base",
     "edisc-connector-dummy",
     "edisc-connector-slack",
+    "edisc-connector-slack-export",
     "edisc-connector-teams",
     "edisc-normalizer",
     "edisc-renderers",
@@ -47,6 +48,7 @@ members = [
     "packages/connectors/base",
     "packages/connectors/dummy",
     "packages/connectors/slack",
+    "packages/connectors/slack_export",
     "packages/connectors/teams",
     "packages/normalizer",
     "packages/renderers",
@@ -62,6 +64,7 @@ edisc-custody = { workspace = true }
 edisc-connectors-base = { workspace = true }
 edisc-connector-dummy = { workspace = true }
 edisc-connector-slack = { workspace = true }
+edisc-connector-slack-export = { workspace = true }
 edisc-connector-teams = { workspace = true }
 edisc-normalizer = { workspace = true }
 edisc-renderers = { workspace = true }
@@ -103,6 +106,7 @@ mypy_path = [
     "packages/connectors/base/src",
     "packages/connectors/dummy/src",
     "packages/connectors/slack/src",
+    "packages/connectors/slack_export/src",
     "packages/connectors/teams/src",
     "packages/normalizer/src",
     "packages/renderers/src",

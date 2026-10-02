@@ -33,6 +33,7 @@ with workflow.unsafe.imports_passed_through():
         ChildrenRequest,
         CollectRequest,
         ErrorClass,
+        ExportRef,
         JobInput,
         JobOverview,
         JobRef,
@@ -357,4 +358,29 @@ class MaintenanceWorkflow:
             start_to_close_timeout=timedelta(minutes=30),
             retry_policy=RetryPolicy(maximum_attempts=3, maximum_interval=timedelta(minutes=1)),
         )
+        return result
+
+
+@workflow.defn(name="ExportIngestWorkflow")
+class ExportIngestWorkflow:
+    """Hash and lock an uploaded Slack export, then validate it (ADR 0014; id ``export-{export_id}``).
+    Both activities are idempotent and read their state from the DB, so a retry or a re-run after a
+    crash continues where the export is."""
+
+    @workflow.run
+    async def run(self, ref: ExportRef) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "result_type": dict[str, Any],
+            "start_to_close_timeout": timedelta(hours=12),
+            "heartbeat_timeout": timedelta(seconds=ref.heartbeat_timeout_seconds),
+            "retry_policy": RetryPolicy(
+                initial_interval=timedelta(seconds=ref.retry_initial_seconds),
+                maximum_interval=timedelta(seconds=ref.retry_max_seconds),
+                maximum_attempts=ref.max_attempts,
+            ),
+        }
+        locked: dict[str, Any] = await workflow.execute_activity("lock_export", ref, **options)
+        if locked["status"] != "validating":
+            return locked
+        result: dict[str, Any] = await workflow.execute_activity("validate_export", ref, **options)
         return result

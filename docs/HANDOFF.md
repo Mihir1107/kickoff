@@ -28,7 +28,7 @@ history.
 - the audit-burst measurement;
 - the anchor-storm fix (migration 0017).
 
-**Migrations at head:** 0017.
+**Migrations at head:** 0018.
 
 **Not done in Phase 1:** the 1M-message soak. Laptop disk is too small (~15 GB free; it needs ~21 GB). It is
 in the backlog for a cloud VM: `scripts/resume_soak.py --messages 1000000 --kills 10`.
@@ -47,25 +47,24 @@ in the backlog for a cloud VM: `scripts/resume_soak.py --messages 1000000 --kill
 3. Product-owner confirmation of ADR 0013 decisions (a) and (c).
 4. A cloud VM for the 1M soak.
 
-## Next milestone: M14, Slack export ingestion (`docs/plans/phase-2.md`)
-Start with **ADR 0014**. Decisions already taken:
-- entries are referenced inside the locked zip (VersionId + entry path), hashed over the decompressed bytes,
-  with the zip CRC-32 recorded;
-- `edisc-verify` must extract and verify entries offline;
-- a new recon status `matched_against_archive`, never "clean", and the report states it is relative to the
-  export.
+## Current milestone: M14, Slack export ingestion (ADR 0014, accepted with R1-R7)
+Done:
+- **M14.1** hardened streaming ZIP reader `edisc_custody.archive`, property-based fuzzing (R1, R5).
+- **M14.2** pinned-version S3 range source with coalesced reads (R6; 0.8 requests per 1,000 entries).
+- **M14.3** migration 0018 (`slack_exports`, `export_upload_parts`, `export_entries`,
+  `export_conversations`), upload API with Content-Digest parts and audited tenant-admin limit
+  overrides, `ExportIngestWorkflow` (hash, lock, R7 rejection, streaming validation, tier detection,
+  findings, credential-less `slack_export` connection), package `edisc_connector_slack_export.layout`.
 
-Suggested order:
-1. ADR 0014.
-2. Upload endpoint (resumable chunks into the evidence writer, zip hashed and locked first, audit event).
-3. Seekable S3 range reader and zip parsing with CRC checks and zip-bomb, traversal and duplicate guards.
-4. `slack_export` dialect in the dummy generator (oracle tests).
-5. The connector (enumerate from `channels.json` / `groups.json` / `dms.json` / `mpims.json` and day files).
-6. Normalizer support.
-7. `archive_entry` evidence and `edisc-verify`.
-8. The recon status.
-9. Crash matrix.
-10. Real-export fixtures when available.
+Next, in order:
+1. **M14.4** `slack_export` dialect in the dummy generator writing a real zip from the oracle (public-only
+   and full); re-measure range requests per 1,000 entries on it (docs/runs).
+2. **M14.5** the connector (units = day files, message day from `ts`, filename date as a hint, R4),
+   `archive_entry` evidence rows, normalizer dialect (URL query strings stripped, `register_secret`),
+   `matched_against_archive` and `completed_against_archive`, file downloads via `slack_export.file`;
+   jobs extend the export zip's retention.
+3. **M14.6** `edisc-verify` package format /2 (zip carried, entries verified offline).
+4. **M14.7** crash matrix during ingestion, real-export fixtures when provided, docs.
 
 ## Gotchas learned (read before changing things)
 

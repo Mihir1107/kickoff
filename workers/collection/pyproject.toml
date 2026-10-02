@@ -5,6 +5,7 @@ description = "Temporal collection workers."
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "edisc-connector-dummy",
+    "edisc-connector-slack-export",
     "edisc-connectors-base",
     "edisc-core",
     "edisc-custody",
@@ -22,6 +23,7 @@ edisc-custody = { workspace = true }
 edisc-normalizer = { workspace = true }
 edisc-connectors-base = { workspace = true }
 edisc-connector-dummy = { workspace = true }
+edisc-connector-slack-export = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

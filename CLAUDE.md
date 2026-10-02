@@ -42,7 +42,7 @@ make test               # unit tests
 make test-integration   # FRESH ephemeral stack (-p edisc-test, .env.test, other ports), tests, then down -v
 make test-env-up / test-integration-only / test-env-down   # keep the test stack up while iterating
                         # up/up-ci/test targets refuse below MIN_FREE_GB (15) free disk
-make worker / api       # Temporal worker (+ maintenance queue and sweeper schedules) / API
+make worker / api       # Temporal worker (+ maintenance queue, sweeper schedules, exports queue) / API
 ```
 
 ## API (M13, ADR 0013)
@@ -59,6 +59,17 @@ make worker / api       # Temporal worker (+ maintenance queue and sweeper sched
 - Credentials only through `edisc_db.connection_tokens`; the API test suite scans every response for
   every credential it handed in.
 - Nothing is deleted: memberships and role assignments are ended (`removed_at` / `revoked_at`).
+
+## Slack exports (M14, ADR 0014)
+- Upload: `POST /v1/clients/{c}/exports` → `PUT /v1/exports/{id}/parts/{n}` (Content-Digest sha-256) →
+  `POST .../complete`. The `ExportIngestWorkflow` (queue `exports`, `edisc_worker.exports`) hashes the staged
+  object, locks it (`EvidenceWriter.lock_staged`), audits, then validates the central directory of the
+  LOCKED version. A declared SHA-256 mismatch rejects before any parsing (R7).
+- Zip parsing only through `edisc_custody.archive` (pure, fuzzed; R5). Entries are read in local-header
+  order through `CoalescingSource` (R6). Limits come from the export row (`slack_exports.limits`), never
+  straight from settings: a tenant admin may override them per upload (audited).
+- Layout/tier rules: `edisc_connector_slack_export.layout`. Format details marked *(confirm on real
+  export)* in ADR 0014 stay provisional until the real exports are fixtures.
 
 ## Conventions
 - Python 3.12, `uv` only (no pip). Add deps with `uv add --package <member> <dep>`.

@@ -7,6 +7,7 @@ members = [
     "edisc-api",
     "edisc-connector-dummy",
     "edisc-connector-slack",
+    "edisc-connector-slack-export",
     "edisc-connector-teams",
     "edisc-connectors-base",
     "edisc-core",
@@ -415,6 +416,23 @@ dependencies = [
 requires-dist = [{ name = "edisc-connectors-base", editable = "packages/connectors/base" }]
 
 [[package]]
+name = "edisc-connector-slack-export"
+version = "0.1.0"
+source = { editable = "packages/connectors/slack_export" }
+dependencies = [
+    { name = "edisc-connectors-base" },
+    { name = "edisc-core" },
+    { name = "edisc-custody" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "edisc-connectors-base", editable = "packages/connectors/base" },
+    { name = "edisc-core", editable = "packages/core" },
+    { name = "edisc-custody", editable = "packages/custody" },
+]
+
+[[package]]
 name = "edisc-connector-teams"
 version = "0.1.0"
 source = { editable = "packages/connectors/teams" }
@@ -548,6 +566,7 @@ version = "0.1.0"
 source = { editable = "workers/collection" }
 dependencies = [
     { name = "edisc-connector-dummy" },
+    { name = "edisc-connector-slack-export" },
     { name = "edisc-connectors-base" },
     { name = "edisc-core" },
     { name = "edisc-custody" },
@@ -560,6 +579,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "edisc-connector-dummy", editable = "packages/connectors/dummy" },
+    { name = "edisc-connector-slack-export", editable = "packages/connectors/slack_export" },
     { name = "edisc-connectors-base", editable = "packages/connectors/base" },
     { name = "edisc-core", editable = "packages/core" },
     { name = "edisc-custody", editable = "packages/custody" },
@@ -577,6 +597,7 @@ dependencies = [
     { name = "edisc-api" },
     { name = "edisc-connector-dummy" },
     { name = "edisc-connector-slack" },
+    { name = "edisc-connector-slack-export" },
     { name = "edisc-connector-teams" },
     { name = "edisc-connectors-base" },
     { name = "edisc-core" },
@@ -610,6 +631,7 @@ requires-dist = [
     { name = "edisc-api", editable = "apps/api" },
     { name = "edisc-connector-dummy", editable = "packages/connectors/dummy" },
     { name = "edisc-connector-slack", editable = "packages/connectors/slack" },
+    { name = "edisc-connector-slack-export", editable = "packages/connectors/slack_export" },
     { name = "edisc-connector-teams", editable = "packages/connectors/teams" },
     { name = "edisc-connectors-base", editable = "packages/connectors/base" },
     { name = "edisc-core", editable = "packages/core" },

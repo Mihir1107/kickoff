@@ -245,6 +245,25 @@ class EvidenceWriter:
         finally:
             await self._s3.delete_object(Bucket=self._settings.s3_staging_bucket, Key=staging_key)
 
+    async def lock_staged(
+        self, *, tenant_id: uuid.UUID, staging_key: str, sha256: str, size: int
+    ) -> WrittenEvidence:
+        """Lock an object that is already in the staging bucket (an uploaded export, ADR 0014). The caller
+        computed ``sha256``/``size`` by streaming the staged object; the same content-addressed key, dedup,
+        provenance and verify-after-copy rules as for large files apply. The caller deletes staging.
+        Not tied to a job or matter: retention is the rolling window; jobs that use it extend it."""
+        key = file_key(tenant_id, sha256)
+        retain = effective_retain_until(self._settings)
+        hit = await self._dedup_hit(tenant_id, key, sha256, size, retain)
+        if hit is not None:
+            return hit
+        staged = UploadResult(sha256, size, 0, None)
+
+        async def copy(retain_until: datetime) -> str:
+            return await self._copy_into_worm(staging_key, key, staged, retain_until)
+
+        return await self._materialize(tenant_id, None, key, sha256, size, retain, copy)
+
     async def _dedup_hit(
         self, tenant_id: uuid.UUID, key: str, sha256: str, size: int, retain: datetime
     ) -> WrittenEvidence | None:
@@ -272,7 +291,7 @@ class EvidenceWriter:
     async def _materialize(
         self,
         tenant_id: uuid.UUID,
-        job_id: uuid.UUID,
+        job_id: uuid.UUID | None,
         key: str,
         sha256: str,
         size: int,
@@ -296,7 +315,7 @@ class EvidenceWriter:
     async def _materialize_locked(
         self,
         tenant_id: uuid.UUID,
-        job_id: uuid.UUID,
+        job_id: uuid.UUID | None,
         key: str,
         sha256: str,
         size: int,
