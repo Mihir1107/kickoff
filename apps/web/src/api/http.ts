@@ -1,26 +1,19 @@
+import { AUTH, SOURCE_FLOWS } from "./auth";
 import { ApiError, type ApiClient, type PageQuery } from "./client";
-import type { SessionOut } from "./types";
+import type { CsrfOut } from "./types";
 
 /**
- * The real client. Authentication is a server-side session: an HttpOnly cookie set by the backend's
- * login flow. The browser never holds a token, so nothing here reads, stores or sends one.
+ * The real client. Authentication is the API's server-side session (ADR 0016; M17 plan, section 1):
+ * an httpOnly `__Host-` cookie set by the API's login callback. The browser never holds a token, so
+ * nothing here reads, stores or sends one. Route names and codes live in `auth.ts`.
  *
- * - Every request sends cookies (`credentials: "include"`).
- * - Every state-changing request (anything but GET/HEAD/OPTIONS) sends the session's CSRF token in
- *   `X-CSRF-Token`. The token comes from GET /v1/session and is cached for the page's lifetime; a 403
- *   `csrf_invalid` refreshes it once and retries.
- * - Same origin: the tenant comes from the page's Host subdomain (ADR 0013), never from the client.
- *
- * The session routes are a proposal until the backend ships them (src/api/pending.ts).
+ * - Every request sends cookies (`credentials: "include"`); same origin, so the tenant comes from the
+ *   page's Host subdomain (ADR 0013) and the browser's Origin header is the tenant host, as the API checks.
+ * - Every state-changing request sends `X-CSRF-Token`, fetched from GET /v1/auth/csrf and cached for the
+ *   page's lifetime (a new login is a full navigation, so a new session always gets a new token).
+ * - 401 `reauth_required` (sensitive actions with an old sign-in) → `onReauthRequired`: the user goes
+ *   through the IdP again and comes back. Any other 401 → `onUnauthenticated` (sign in).
  */
-export const SESSION = {
-  path: "/session",
-  loginPath: "/auth/login", // GET, redirects to the tenant's IdP; returns to `return_to` (same origin)
-  logoutPath: "/auth/logout", // POST, CSRF-protected
-  csrfHeader: "X-CSRF-Token",
-  csrfErrorCode: "csrf_invalid",
-} as const;
-
 const SAFE = new Set(["GET", "HEAD", "OPTIONS"]);
 
 interface ErrorBody {
@@ -28,16 +21,11 @@ interface ErrorBody {
   detail?: string;
 }
 
-export function createHttpClient(opts: { base?: string; onUnauthenticated?: () => void } = {}): ApiClient {
+export function createHttpClient(
+  opts: { base?: string; onUnauthenticated?: () => void; onReauthRequired?: () => void } = {},
+): ApiClient {
   const base = opts.base ?? "/v1";
-  let csrf: Promise<string | null> | null = null;
-
-  async function fetchSession(): Promise<SessionOut> {
-    const res = await fetch(base + SESSION.path, { credentials: "include", headers: { accept: "application/json" } });
-    if (!res.ok) throw await toError(res);
-    return (await res.json()) as SessionOut;
-  }
-  const csrfToken = () => (csrf ??= fetchSession().then((s) => s.csrf_token, (e: unknown) => { csrf = null; throw e; }));
+  let csrf: Promise<string> | null = null;
 
   async function toError(res: Response): Promise<ApiError> {
     let body: ErrorBody = {};
@@ -49,12 +37,16 @@ export function createHttpClient(opts: { base?: string; onUnauthenticated?: () =
     return new ApiError(res.status, body.error ?? "http_error", body.detail ?? res.statusText, res.headers.get("x-request-id"));
   }
 
-  async function call<T>(method: string, path: string, init: { body?: unknown; headers?: Record<string, string>; raw?: BodyInit } = {}, retried = false): Promise<T> {
+  async function fetchCsrf(): Promise<string> {
+    const res = await fetch(base + AUTH.csrfPath, { credentials: "include", headers: { accept: "application/json" } });
+    if (!res.ok) throw await toError(res);
+    return ((await res.json()) as CsrfOut).csrf_token;
+  }
+  const csrfToken = () => (csrf ??= fetchCsrf().catch((e: unknown) => { csrf = null; throw e; }));
+
+  async function call<T>(method: string, path: string, init: { body?: unknown; headers?: Record<string, string>; raw?: BodyInit } = {}): Promise<T> {
     const headers: Record<string, string> = { accept: "application/json", ...init.headers };
-    if (!SAFE.has(method)) {
-      const token = await csrfToken();
-      if (token) headers[SESSION.csrfHeader] = token;
-    }
+    if (!SAFE.has(method)) headers[AUTH.csrfHeader] = await csrfToken();
     let body: BodyInit | undefined = init.raw;
     if (init.body !== undefined) {
       headers["content-type"] = "application/json";
@@ -63,16 +55,18 @@ export function createHttpClient(opts: { base?: string; onUnauthenticated?: () =
     const res = await fetch(base + path, { method, headers, body, credentials: "include" });
     if (res.ok) return res.status === 204 ? (undefined as T) : ((await res.json()) as T);
     const err = await toError(res);
-    if (res.status === 403 && err.code === SESSION.csrfErrorCode && !retried) {
-      csrf = null; // rotated or expired: fetch a fresh one and try once more
-      return call<T>(method, path, init, true);
-    }
     if (res.status === 401) {
       csrf = null;
-      opts.onUnauthenticated?.();
+      if (err.code === AUTH.reauthRequired) opts.onReauthRequired?.();
+      else opts.onUnauthenticated?.();
     }
     throw err;
   }
+
+  // The plan does not yet say how /auth/login learns where to return or that a sign-in is a
+  // re-authentication; `return_to` and `reauth=1` are proposals until ADR 0016 fixes them.
+  const loginUrl = (returnTo: string, reauth = false) =>
+    `${base}${AUTH.loginPath}?return_to=${encodeURIComponent(returnTo)}${reauth ? "&reauth=1" : ""}`;
 
   const qs = (q?: PageQuery) => {
     const p = new URLSearchParams();
@@ -85,10 +79,16 @@ export function createHttpClient(opts: { base?: string; onUnauthenticated?: () =
   const post = <T>(path: string, body?: unknown, headers?: Record<string, string>) => call<T>("POST", path, { body, headers });
 
   return {
-    session: () => fetchSession(),
-    loginUrl: (returnTo) => `${base}${SESSION.loginPath}?return_to=${encodeURIComponent(returnTo)}`,
+    loginUrl,
+    startInstall: (clientId, source, connectionId) =>
+      post((source === "slack" ? SOURCE_FLOWS.slackInstall : SOURCE_FLOWS.teamsConsent)(clientId), connectionId ? { connection_id: connectionId } : {}),
+    // The token is only ever in this request body: not logged, not cached, not retried by this client.
+    submitSlackToken: (clientId, token, connectionId) =>
+      connectionId
+        ? call("PUT", SOURCE_FLOWS.replaceToken(connectionId), { body: { token } })
+        : post(SOURCE_FLOWS.slackToken(clientId), { token }),
     logout: async () => {
-      await post<void>(SESSION.logoutPath);
+      await post<void>(AUTH.logoutPath);
       csrf = null;
     },
     me: () => get("/me"),

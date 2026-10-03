@@ -14,7 +14,7 @@ import { StatusPill } from "@/components/ui/StatusPill";
 import { useToast } from "@/components/ui/Toast";
 import { ago, utc } from "@/lib/format";
 import { connectionStatus } from "@/lib/status";
-import { SourceGlyph } from "./ClientDetail";
+import { SourceGlyph } from "@/components/connect/SourceGlyph";
 import { JobRow } from "./JobRow";
 
 export function MatterDetail() {

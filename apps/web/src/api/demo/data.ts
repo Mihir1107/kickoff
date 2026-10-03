@@ -412,7 +412,6 @@ const PERMS = [
 ];
 const READ_MATTER = ["matter.read", "workspace.read", "job.read", "client.read"];
 export const roleMatrix: RoleMatrixOut = {
-  permissions: PERMS.map((name) => ({ name, audited: name === "evidence.read" })),
   roles: [
     { name: "tenant_admin", permissions: PERMS },
     { name: "client_admin", permissions: ["client.read", "connection.manage", "connection.read", "matter.create", "workspace.create", "job.start", "job.cancel", "job.resume", "job.rerun", "custody.read", "evidence.read", ...READ_MATTER] },

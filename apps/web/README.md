@@ -7,7 +7,8 @@ cd apps/web
 npm ci
 npm run dev          # http://localhost:5173 with demo data (dev server only)
 npm run typecheck
-npm run lint         # ESLint + WCAG AA contrast check
+npm run lint         # ESLint + WCAG AA contrast check (static)
+npm run e2e          # Playwright: pixel contrast audit, reduced motion, auth/credential contract
 npm run build        # production build: always the real API, refuses demo mode
 npm run gen:api      # regenerate openapi.json + src/api/schema.gen.ts from the FastAPI app (needs uv)
 npm run check:api    # what CI runs: regenerate, fail if either file differs from the commit
@@ -16,7 +17,7 @@ npm run check:api    # what CI runs: regenerate, fail if either file differs fro
 ## Pages
 | Route | What it shows | API routes |
 |---|---|---|
-| `/login` | Sign-in hand-off to the backend's session flow | proposed `/auth/login`, `/session` |
+| `/login` | Sign-in hand-off to the API's session flow (M17) | `/auth/login`, `/auth/csrf`, `/me` |
 | `/` | Command Center: in-flight jobs, clean-completion rate, jobs needing attention | rollup (see gaps) |
 | `/clients`, `/clients/:id` | Clients; matters, connections (re-auth, disable), Slack exports | `/clients…`, `…/connections`, `…/exports`, `…/close` |
 | `/matters/:id` | Jobs, retention window, workspaces, usable connections | `/matters/{m}…` |
@@ -41,17 +42,38 @@ Contracts the UI needs that the backend has not shipped are in `src/api/pending.
 When a route lands, delete its type there and alias the generated one in `types.ts`.
 
 ## Authentication: server-side sessions, no tokens in the browser
-`src/api/http.ts`:
-- every request sends cookies (`credentials: "include"`); the session cookie is HttpOnly and set by the backend;
-- every state-changing request (not GET/HEAD/OPTIONS) sends `X-CSRF-Token`, taken from `GET /v1/session`
-  and cached; a `403 csrf_invalid` refreshes it once and retries;
-- a 401 clears the cached CSRF token and sends the user to `/login`;
-- sign-in navigates to `GET /v1/auth/login?return_to=…` (the backend runs the IdP flow); sign-out is
-  `POST /v1/auth/logout`.
+The M17 backend plan (`docs/plans/phase-2.md`, "M17 backend" §1, ADR 0016) is the source of truth. Every
+route name and code lives in one place: `AUTH` in `src/api/auth.ts`.
+- Sign-in: a full navigation to `GET /v1/auth/login` (OIDC code + PKCE, run by the API). The IdP returns to
+  `GET /v1/auth/callback`, which the API handles. It sets the httpOnly `__Host-edisc_session` cookie,
+  which this code never reads.
+- Every request sends cookies (`credentials: "include"`). There are no bearer tokens anywhere in the client.
+- Every state-changing request sends `X-CSRF-Token` from `GET /v1/auth/csrf` (cached for the page).
+  Same origin, so the browser's `Origin` is the tenant host, as the API checks.
+- `401 reauth_required` (sensitive actions with an old sign-in) sends the user straight back through the
+  IdP, then to the same page. Any other 401 shows the sign-in page.
+- Sign-out: `POST /v1/auth/logout`.
+- **Open in the plan:** how `/auth/login` learns the return path and that a sign-in is a re-authentication.
+  The client sends `return_to` and `reauth=1`. The body of `/auth/csrf` is assumed to be `{csrf_token}`.
 
-These route names, the header and the error code are **proposals** (constants in `SESSION`,
-`src/api/http.ts`). Align them with the backend when it ships the session endpoints.
-Same origin (Vite proxy in dev, one host in production), so the cookie needs no CORS and no `SameSite=None`.
+## Connecting sources: who handles credentials
+| Source | How it connects | Credential in the browser |
+|---|---|---|
+| Slack (distributed app) | `POST …/connections/slack/install`, then follow the returned URL (OAuth v2) | never |
+| Microsoft Teams | `POST …/connections/teams/consent`, then follow the returned URL (admin consent) | never |
+| Slack internal app | `POST …/connections/slack/token` (replace: `PUT /connections/{id}/token`) | yes, once |
+| Slack export | upload, then validation of the locked archive | never |
+
+- Routes come from the M17 plan, §6 (install flows) and §7 (internal-app exception), in `SOURCE_FLOWS`
+  (`src/api/auth.ts`). The plan does not fix three details, so they are assumptions in `pending.ts`:
+  the answer's field (`authorize_url`), how a re-authorization names its connection (`connection_id`),
+  and the token body (`{token}`). The page follows only an `https:` install URL.
+- The internal-app token is held only in an unnamed, uncontrolled password input: never React state, query
+  cache, storage, URL or logs. It is read once at submit, sent in the request body, and the field is cleared
+  on success. There is no workspace-id field: the API learns the team id from Slack's `auth.test`.
+- Re-authorizing a connection uses the same modal, offering only that source's methods.
+- `e2e/contract/connect-source.spec.ts` asserts all of this against the real HTTP client, using an
+  opaque canary token.
 
 ## Demo mode is dev-only
 `npm run dev` uses demo data (`src/api/demo/`) unless `VITE_API_MODE=http`. Three guards keep it out of production:
@@ -68,27 +90,45 @@ Same origin (Vite proxy in dev, one host in production), so the cookie needs no 
    subdomain (ADR 0013). Override the target with `EDISC_API_ORIGIN`.
 3. Until the session endpoints exist, live mode cannot sign in. Use demo mode.
 
+## End-to-end suite (M17)
+`npm run e2e` runs Playwright (`playwright.config.ts`, `e2e/`); CI runs it in the `web` job.
+- `ui` project (demo data): `a11y/contrast.spec.ts` measures WCAG contrast on rendered pixels across every
+  page, and `a11y/reduced-motion.spec.ts` checks the reduced-motion gates, both with the preference set
+  and without it.
+- `contract` project: the real HTTP client with `/v1` intercepted. It checks the session cookie mode,
+  the CSRF header, `reauth_required`, the install redirect, and where a credential may appear.
+- **Not yet what plan §8 asks for:**
+  - The plan runs the suite against the REAL API and stack. The `contract` project stubs `/v1` because
+    the M17 endpoints do not exist; it should become real-stack flows when they do.
+  - The plan's contrast audit covers light and dark themes and UI components (3:1). There is only a dark
+    theme (theming is out of M17 scope), and the audit checks text only, not borders, icons or focus
+    rings yet.
+  - axe checks are not added yet.
+- When the M17 backend lands: set `E2E_BASE_URL` to a tenant host on the live stack and add the plan's
+  flows (sign-in, dummy connection, collection, live status, report, audited download, export path).
+
 ## Accessibility
 - **Reduced motion** (`src/lib/motion.ts`): with `prefers-reduced-motion: reduce`, every framer-motion
   animation completes instantly (no blur or slide transitions, rings, morphs). These are removed: the cursor
   spotlight, rolling numbers, the chain verification sweep, SMIL pulses and the login hash rain. CSS
   keyframes and transitions are neutralised in `index.css`. Each item was verified in a browser with the
   preference emulated, and the reverse checked with it off.
-- **Contrast**: WCAG 2.1 AA (4.5:1 body text, 3:1 large). The glass panels are translucent, so text was
-  measured in rendered pixels: for each of 1,672 text runs on 12 pages, the background was sampled from a
-  text-hidden screenshot (95th-percentile luminance under the text's own boxes). Result: zero failures.
-  The lightest panel background behind body text was rgb(35,48,52). `scripts/check-contrast.mjs`
-  (part of `npm run lint`) keeps it that way: every `text-white/N` and text colour token must reach 4.5:1
-  against rgb(38,50,54). Decorative elements below that must carry `aria-hidden` on the same line.
+- **Contrast**: WCAG 2.1 AA (4.5:1 body text, 3:1 large). The glass panels are translucent, so
+  `e2e/a11y/contrast.spec.ts` measures rendered pixels. For every visible text run (clipped to its scroll
+  containers), the background is the 95th-percentile luminance under the text's own boxes in a
+  text-hidden screenshot. The lightest panel background behind body text was rgb(35,48,52).
+  `scripts/check-contrast.mjs` (in `npm run lint`) is the fast static guard: every `text-white/N` and text
+  colour token must reach 4.5:1 against rgb(38,50,54). Decorative elements below that must carry
+  `aria-hidden` on the same line.
 
 ## API gaps (demo-only features today)
 | UI feature | What the API would need |
 |---|---|
-| Sign-in, CSRF | `GET /session`, `GET /auth/login`, `POST /auth/logout` (see above) |
+| Sign-in, CSRF, re-auth | M17 §1: `/auth/login`, `/auth/callback`, `/auth/csrf`, `/auth/logout` |
 | Sidebar identity, role matrix | `GET /me/permissions`, `GET /roles` (`pending.ts` has the proposed shapes) |
 | Dashboard, Collections, palette | a tenant-wide jobs list (today `useRollup` walks clients, then matters, then jobs: N+1) |
 | Custody chain blocks | `GET /jobs/{id}/custody/events` |
 | Channel/custodian picker and names | a per-connection directory (the wizard accepts typed ids without it) |
 | Group names in Access | `GET /groups` (only POST exists) |
 | Live updates | SSE/WebSocket (today: polling every 2–4 s while a job or export is active) |
-| Connection install | an OAuth install flow, so source tokens never pass through the browser form |
+| OAuth source install, internal-app token | M17 §6 and §7 (`SOURCE_FLOWS`) |

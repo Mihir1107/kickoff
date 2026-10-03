@@ -34,7 +34,9 @@ function HashRain() {
 
 export function Login() {
   const nav = useNavigate();
-  const from = (useLocation().state as { from?: string } | null)?.from ?? "/";
+  // Only a same-site path may be a return target: never an absolute or protocol-relative URL.
+  const raw = new URLSearchParams(useLocation().search).get("from") ?? "/";
+  const from = raw.startsWith("/") && !raw.startsWith("//") && !raw.startsWith("/\\") ? raw : "/";
   const [busy, setBusy] = useState(false);
   // Live: the tenant IS this page's subdomain (ADR 0013); switching tenant means opening another address.
   const [host, setHost] = useState(() => (API_MODE === "http" ? window.location.hostname.split(".")[0] ?? "" : "halcyon"));

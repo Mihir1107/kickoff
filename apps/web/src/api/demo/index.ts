@@ -147,26 +147,39 @@ const idempotency = new Map<string, string>();
 export function createDemoClient(): ApiClient {
   registerNames(directory);
   const api: ApiClient = {
-    async session() {
-      await latency();
-      return { authenticated: true, csrf_token: "demo", principal_id: ME_ACTOR.split(":")[1]!, display_name: "Priya Raman", email: "priya.raman@halcyon-legal.com" };
-    },
     loginUrl: (returnTo) => returnTo, // demo: no IdP, signing in just enters the app
+    // Demo stand-ins for the server-side flows (M17 plan sections 6 and 7).
+    async startInstall(clientId, source) {
+      await latency();
+      connections.push({
+        id: uuid7(Date.now()), client_id: clientId, source, external_org_id: source === "teams" ? "contoso.onmicrosoft.com" : "T09DEMOINSTALL",
+        status: "active", plan_tier: null, granted_scopes: source === "teams" ? ["ChannelMessage.Read.All", "Chat.Read.All"] : ["channels:history", "users:read"],
+        created_at: now(), updated_at: now(),
+      });
+      return { authorize_url: `/clients/${clientId}?tab=connections&installed=${source}` }; // same origin: no provider in demo
+    },
+    async submitSlackToken(clientId, _token, connectionId) {
+      await latency(); // the demo keeps nothing of the token
+      if (connectionId) {
+        const x = find(connections, connectionId, "connection");
+        Object.assign(x, { status: "active", updated_at: now() });
+        return x;
+      }
+      const x = { id: uuid7(Date.now()), client_id: clientId, source: "slack", external_org_id: "T0INTERNALAPP", status: "active", plan_tier: null, granted_scopes: ["channels:history", "groups:history", "users:read"], created_at: now(), updated_at: now() };
+      connections.push(x);
+      return x;
+    },
     async logout() {},
     async myPermissions() {
       await latency();
-      return {
-        principal_id: ME_ACTOR.split(":")[1]!, display_name: "Priya Raman", kind: "user",
-        assignments: [{ role: "tenant_admin", scope_type: "tenant", scope_id: null, via_group: null }],
-        tenant_permissions: roleMatrix.roles[0]!.permissions,
-      };
+      return { scopes: [{ scope_type: "tenant", scope_id: null, permissions: roleMatrix.roles[0]!.permissions }] };
     },
     async roleMatrix() { await latency(); return roleMatrix; },
     async directory() { await latency(); return directory; },
     async listGroups() { await latency(); return groups; },
     async me() {
       await latency();
-      return { principal_id: ME_ACTOR.split(":")[1]!, kind: "user", subject: "00u8priya2r4m4n", issuer: "https://login.halcyon-legal.com" };
+      return { principal_id: ME_ACTOR.split(":")[1]!, kind: "user", subject: "priya.raman@halcyon-legal.com", issuer: "https://login.halcyon-legal.com" };
     },
 
     async listClients(q) { await latency(); return page(clients, q); },

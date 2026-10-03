@@ -5,7 +5,6 @@ import type { Page } from "./types";
 /** Query keys mirror the URL so invalidation reads like the API. */
 export const qk = {
   me: ["me"] as const,
-  session: ["session"] as const,
   myPermissions: ["me", "permissions"] as const,
   roles: ["roles"] as const,
   directory: (c: string) => ["connections", c, "directory"] as const,
@@ -42,7 +41,6 @@ async function all<T>(fetchPage: (cursor: string | null) => Promise<Page<T>>): P
 
 const ACTIVE = new Set(["pending", "running"]);
 
-export const useSession = () => useQuery({ queryKey: qk.session, queryFn: () => api.session(), staleTime: 60_000, retry: false });
 export const useMyPermissions = () => useQuery({ queryKey: qk.myPermissions, queryFn: () => api.myPermissions(), staleTime: 60_000 });
 export const useRoleMatrix = () => useQuery({ queryKey: qk.roles, queryFn: () => api.roleMatrix(), staleTime: Infinity });
 /** Optional route (no backend yet): `data` stays undefined and `available` is false in http mode. */
@@ -51,7 +49,7 @@ export const useDirectory = (connectionId: string | undefined) => ({
   ...useQuery({ queryKey: qk.directory(connectionId ?? ""), queryFn: () => api.directory!(connectionId!), enabled: !!connectionId && !!api.directory }),
 });
 export const useGroups = () => useQuery({ queryKey: qk.groups, queryFn: () => api.listGroups!(), enabled: !!api.listGroups });
-export const useMe = () => useQuery({ queryKey: qk.me, queryFn: () => api.me(), staleTime: Infinity });
+export const useMe = () => useQuery({ queryKey: qk.me, queryFn: () => api.me(), staleTime: 60_000, retry: false });
 export const useClients = () => useQuery({ queryKey: qk.clients, queryFn: () => all((cursor) => api.listClients({ cursor, limit: 200 })) });
 export const useClient = (id: string) => useQuery({ queryKey: qk.client(id), queryFn: () => api.getClient(id) });
 export const useMatters = (c: string | undefined) =>

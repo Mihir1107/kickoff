@@ -11,6 +11,7 @@ import type {
   ExportOut,
   GroupIn,
   GroupOut,
+  InstallStartOut,
   JobIn,
   JobOut,
   MatterIn,
@@ -24,7 +25,6 @@ import type {
   ReauthIn,
   ReconciliationOut,
   RoleMatrixOut,
-  SessionOut,
   UnitOut,
   VerifyOut,
   WorkspaceIn,
@@ -42,15 +42,17 @@ export interface PageQuery {
  * Optional methods have no backend route yet (pending.ts): the UI degrades when they are undefined.
  */
 export interface ApiClient {
-  /** Proposed GET /v1/session. */
-  session(): Promise<SessionOut>;
-  /** Where to send the browser to sign in (server-side session; the backend redirects to the IdP). */
-  loginUrl(returnTo: string): string;
+  /** GET /v1/auth/login (M17): the API runs the IdP flow and sets the session cookie. `reauth` for sensitive actions. */
+  loginUrl(returnTo: string, reauth?: boolean): string;
+  /** M17 §6: start a server-side install (Slack) or admin consent (Teams); the caller then navigates to the URL. */
+  startInstall(clientId: string, source: "slack" | "teams", connectionId?: string): Promise<InstallStartOut>;
+  /** M17 §7: the Slack internal-app token, once (create) or as a replacement (`connectionId`). Write-only. */
+  submitSlackToken(clientId: string, token: string, connectionId?: string): Promise<ConnectionOut>;
   logout(): Promise<void>;
   me(): Promise<Me>;
-  /** Proposed GET /v1/me/permissions. */
+  /** GET /v1/me/permissions (M17 plan). */
   myPermissions(): Promise<MyPermissionsOut>;
-  /** Proposed GET /v1/roles. */
+  /** GET /v1/roles (M17 plan). */
   roleMatrix(): Promise<RoleMatrixOut>;
 
   listClients(q?: PageQuery): Promise<Page<ClientOut>>;

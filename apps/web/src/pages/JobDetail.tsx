@@ -39,7 +39,6 @@ export function JobDetail() {
   const cancel = useAction(() => api.cancelJob(id), () => [qk.job(id), ["rollup"]]);
   const rerunKey = useRef(newKey()); // reused on retry so a double click starts one job
   const rerun = useAction(() => api.rerunJob(id, rerunKey.current), () => [["rollup"]]);
-  const reauth = useAction(() => api.reauthConnection(j!.connection_id, { credentials: { access_token: "xoxp-demo" } }), () => [qk.job(id), ["rollup"]]);
 
   const totals = useMemo(() => {
     const us = units.data ?? [];
@@ -69,7 +68,7 @@ export function JobDetail() {
         subtitle={j && <>Requested {ago(j.created_at)} by <span className="font-mono text-[12px]">{j.requested_by}</span>{j.rerun_of && <> · rerun of <Link className="text-iris hover:underline" to={`/jobs/${j.rerun_of}`}>{j.rerun_of.slice(-8)}</Link></>}</>}
         actions={j && (
           <>
-            {j.status === "paused_awaiting_reauth" && <Button variant="primary" icon={<KeyRound className="size-4" />} loading={reauth.isPending} onClick={() => reauth.mutate(undefined, { onSuccess: () => toast("ok", "Connection re-authorized", "The job resumes from its last checkpoint: no gaps, no duplicates.") })}>Re-authorize & resume</Button>}
+            {j.status === "paused_awaiting_reauth" && matter.data && <Button variant="primary" icon={<KeyRound className="size-4" />} onClick={() => nav(`/clients/${matter.data!.client_id}?tab=connections&reauth=${j.connection_id}`)}>Re-authorize & resume</Button>}
             {isActive(j.status) && <Button variant="danger" icon={<Ban className="size-4" />} loading={cancel.isPending} onClick={() => cancel.mutate(undefined, { onSuccess: () => toast("info", "Job cancelled", "Committed batches stay in evidence and custody.") })}>Cancel</Button>}
             {!isActive(j.status) && <Button icon={<RotateCcw className="size-4" />} loading={rerun.isPending} onClick={() => rerun.mutate(undefined, { onSuccess: (r) => { rerunKey.current = newKey(); toast("ok", "Rerun started"); nav(`/jobs/${r.id}`); } })}>Rerun</Button>}
           </>

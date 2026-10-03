@@ -15,7 +15,7 @@ import { useToast } from "@/components/ui/Toast";
 import { newKey } from "@/lib/format";
 import { conversationName, custodianName } from "@/lib/names";
 import { connectionStatus } from "@/lib/status";
-import { SourceGlyph } from "./ClientDetail";
+import { SourceGlyph } from "@/components/connect/SourceGlyph";
 
 const STEPS = ["Matter & source", "Scopes", "Review"] as const;
 const POLICIES: { v: ThreadParentPolicy; label: string; hint: string }[] = [

@@ -12,15 +12,21 @@ import { createHttpClient } from "./http";
 const DEMO = import.meta.env.DEV && import.meta.env.VITE_API_MODE !== "http";
 export const API_MODE: "demo" | "http" = DEMO ? "demo" : "http";
 
-/** Session expired or missing: send the user to sign in again (wired by the router in main.tsx). */
-let unauthenticated = () => {};
+/** No session: show the sign-in page (wired to the router in main.tsx). */
+let unauthenticated = () => {
+  if (location.pathname !== "/login") location.assign(`/login?from=${encodeURIComponent(location.pathname + location.search)}`);
+};
 export const onUnauthenticated = (fn: () => void) => {
   unauthenticated = fn;
 };
 
 export const api: ApiClient = DEMO
   ? (await import("./demo")).createDemoClient()
-  : createHttpClient({ onUnauthenticated: () => unauthenticated() });
+  : createHttpClient({
+      onUnauthenticated: () => unauthenticated(),
+      // Sensitive action with an old sign-in: straight back through the IdP, then to this page.
+      onReauthRequired: () => window.location.assign(api.loginUrl(location.pathname + location.search, true)),
+    });
 
 export * from "./client";
 export type * from "./types";

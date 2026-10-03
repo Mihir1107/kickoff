@@ -4,7 +4,7 @@ import { Command, LogOut, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { api, API_MODE } from "@/api";
-import { useMyPermissions, useRollup, useSession } from "@/api/hooks";
+import { useMe, useMyPermissions, useRollup } from "@/api/hooks";
 import { CommandPalette } from "./CommandPalette";
 import { Logo } from "./Logo";
 import { NAV } from "./nav";
@@ -13,15 +13,16 @@ export function Shell() {
   const loc = useLocation();
   const nav = useNavigate();
   const [palette, setPalette] = useState(false);
-  const session = useSession();
+  const me = useMe();
   const perms = useMyPermissions();
-  // Server-side session: no session means sign in (the backend owns the cookie, we never see a token).
+  // Server-side session: GET /v1/me without one is a 401, which means "sign in" (we never see a token).
   useEffect(() => {
-    if ((session.data && !session.data.authenticated) || session.isError) nav("/login", { replace: true, state: { from: loc.pathname } });
-  }, [session.data, session.isError, nav, loc.pathname]);
-  const name = perms.data?.display_name ?? session.data?.display_name ?? "…";
-  const initials = name.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
-  const topRole = perms.data?.assignments[0];
+    if (me.isError) nav(`/login?from=${encodeURIComponent(loc.pathname)}`, { replace: true });
+  }, [me.isError, nav, loc.pathname]);
+  const name = me.data?.subject ?? "…";
+  const initials = name.replace(/[^a-z0-9]/gi, "").slice(0, 2).toUpperCase();
+  const scopes = perms.data?.scopes ?? [];
+  const tenantWide = scopes.some((s) => s.scope_type === "tenant" && s.permissions.length > 0);
   const rollup = useRollup();
   const live = rollup.data?.jobs.filter((j) => j.status === "running").length ?? 0;
   const attention = rollup.data?.jobs.filter((j) => j.status === "paused_awaiting_reauth" || j.status === "failed").length ?? 0;
@@ -87,7 +88,7 @@ export function Shell() {
             <div aria-hidden className="grid size-8 place-items-center rounded-full bg-[linear-gradient(135deg,#7cf5d2,#8b7cff)] text-[12px] font-semibold text-ink-950">{initials}</div>
             <div className="min-w-0 flex-1">
               <div className="truncate text-[13px]">{name}</div>
-              <div className="truncate font-mono text-[10.5px] text-white/55">{topRole ? `${topRole.role} · ${topRole.scope_type}` : perms.isError ? "roles unavailable" : "…"}</div>
+              <div className="truncate font-mono text-[10.5px] text-white/55">{perms.data ? (tenantWide ? "tenant-wide access" : `${scopes.length} scope${scopes.length === 1 ? "" : "s"}`) : perms.isError ? "permissions unavailable" : "…"}</div>
             </div>
             <button onClick={() => void api.logout().finally(() => nav("/login"))} className="focus-ring rounded-lg p-1.5 text-white/60 hover:bg-white/5 hover:text-white" title="Sign out" aria-label="Sign out"><LogOut className="size-4" /></button>
           </div>

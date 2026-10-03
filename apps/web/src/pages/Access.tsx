@@ -98,9 +98,9 @@ export function Access() {
           {matrix.data && (<table className="w-full text-[12px]">
             <thead><tr><th className="py-2 text-left font-normal text-white/60">Permission</th>{matrix.data.roles.map(({ name: r }) => <th key={r} className="px-2 py-2 font-mono text-[11px] font-normal" style={{ color: roleColor(r) }}>{r}</th>)}</tr></thead>
             <tbody>
-              {matrix.data.permissions.map(({ name: p, audited }, i) => (
+              {[...new Set(matrix.data.roles.flatMap((r) => r.permissions))].sort().map((p, i) => (
                 <motion.tr key={p} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: i * 0.025 }} className="border-t border-white/[0.05]">
-                  <td className="py-2 font-mono text-white/65">{p}{audited && <span className="ml-2 text-[10px] text-amber">audited</span>}</td>
+                  <td className="py-2 font-mono text-white/65">{p}</td>
                   {matrix.data.roles.map(({ name: r, permissions }) => (
                     <td key={r} className="px-2 py-2 text-center">
                       {permissions.includes(p) ? <motion.span initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ delay: 0.2 + i * 0.02, type: "spring" }} className="inline-grid size-5 place-items-center rounded-md" style={{ background: `${roleColor(r)}22`, color: roleColor(r) }}><Check className="size-3" strokeWidth={3} aria-hidden /><span className="sr-only">granted</span></motion.span> : <span className="text-white/55"><span aria-hidden>·</span><span className="sr-only">not granted</span></span>}

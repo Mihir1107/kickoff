@@ -77,6 +77,16 @@ jobs:
           if VITE_API_MODE=demo npm run build; then
             echo "::error::a production build accepted VITE_API_MODE=demo"; exit 1
           fi
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e  # M17 E2E suite: WCAG contrast on rendered pixels, reduced motion, session/CSRF/credential contract
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+          retention-days: 7
 
   integration:
     runs-on: ubuntu-24.04

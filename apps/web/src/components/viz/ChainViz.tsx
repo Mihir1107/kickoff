@@ -27,7 +27,7 @@ export function ChainViz({ events, verifyingTo, failedAt }: { events: CustodyEve
 
   return (
     <div>
-      <div ref={scroller} className="relative overflow-x-auto pb-4 pt-2 [mask-image:linear-gradient(90deg,transparent,#000_3%,#000_97%,transparent)]">
+      <div ref={scroller} className="relative overflow-x-auto pb-4 pt-2">
         <div className="flex items-center px-6">
           {events.map((e, i) => {
             const verified = verifyingTo >= e.seq && failedAt !== e.seq;
