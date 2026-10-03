@@ -68,17 +68,45 @@ test("OAuth sources: POST to start the flow (with CSRF), then only follow the pr
   expect(JSON.parse(mutations[0]!.body!)).toEqual({});
 });
 
-test("an install URL that is not https is never followed", async ({ page }) => {
-  await stubApi(page, {
-    [`POST /v1/clients/${CLIENT_ID}/connections/slack/install`]: () => ({ status: 200, body: { authorize_url: "javascript:alert(document.cookie)" } }),
+// ADR 0016 §5: follow only https on an exact provider host; anything else is refused and not followed.
+const FOLLOW = ["https://slack.com/oauth/v2/authorize?client_id=x&state=s", "https://login.microsoftonline.com/common/adminconsent?client_id=x&state=s"];
+const REFUSE = [
+  "http://slack.com/oauth/v2/authorize?state=s", // not TLS
+  "https://slack.com.evil.example/oauth/v2/authorize", // suffix lookalike
+  "https://evil.example/?next=https://slack.com/", // provider only in the query
+  "https://app.slack.com/oauth/v2/authorize", // subdomain: the allowlist is exact
+  "https://user:pw@slack.com/oauth/v2/authorize", // credentials in the URL
+  "https://slack.com:8443/oauth/v2/authorize", // non-default port
+  "https://login.microsoftonline.com.evil.example/common/adminconsent",
+  "javascript:alert(document.cookie)",
+  "/clients", // same origin is a demo-only stand-in, never in live mode
+];
+
+for (const url of FOLLOW) {
+  test(`install URL followed: ${url.slice(0, 48)}`, async ({ page }) => {
+    await stubApi(page, { [`POST /v1/clients/${CLIENT_ID}/connections/slack/install`]: () => ({ status: 200, body: { authorize_url: url, connection_id: "c-new" } }) });
+    await page.goto(`/clients/${CLIENT_ID}?tab=connections`);
+    await page.getByRole("button", { name: "Connect source" }).click();
+    await page.getByRole("button", { name: /Install our app/ }).click();
+    await Promise.all([page.waitForURL(url), page.getByRole("button", { name: "Continue to Slack" }).click()]);
   });
-  await page.goto(`/clients/${CLIENT_ID}?tab=connections`);
-  await page.getByRole("button", { name: "Connect source" }).click();
-  await page.getByRole("button", { name: /Install our app/ }).click();
-  await page.getByRole("button", { name: "Continue to Slack" }).click();
-  await expect(page.getByText("Unexpected install URL from the API")).toBeVisible();
-  expect(new URL(page.url()).pathname).toBe(`/clients/${CLIENT_ID}`);
-});
+}
+
+for (const url of REFUSE) {
+  test(`install URL refused: ${url.slice(0, 48)}`, async ({ page }) => {
+    await stubApi(page, { [`POST /v1/clients/${CLIENT_ID}/connections/slack/install`]: () => ({ status: 200, body: { authorize_url: url, connection_id: "c-new" } }) });
+    const navigations: string[] = [];
+    page.on("framenavigated", (f) => { if (f === page.mainFrame()) navigations.push(f.url()); });
+    await page.goto(`/clients/${CLIENT_ID}?tab=connections`);
+    await page.getByRole("button", { name: "Connect source" }).click();
+    await page.getByRole("button", { name: /Install our app/ }).click();
+    navigations.length = 0;
+    await page.getByRole("button", { name: "Continue to Slack" }).click();
+    await expect(page.getByText(/did not point to Slack, so it was not followed/)).toBeVisible();
+    expect(navigations).toEqual([]);
+    expect(new URL(page.url()).pathname).toBe(`/clients/${CLIENT_ID}`);
+  });
+}
 
 test("401 reauth_required sends the user back through the IdP", async ({ page }) => {
   await stubApi(page, {

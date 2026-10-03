@@ -4,7 +4,7 @@ import { useSyncExternalStore } from "react";
 /**
  * prefers-reduced-motion, live. When set:
  * - every framer-motion animation completes instantly (MotionGlobalConfig.skipAnimations), which
- *   removes blur/slide page transitions, rings, sparklines and layout morphs;
+ *   removes blur/slide page transitions, rings and layout morphs;
  * - components drop effects that are not framer animations: the cursor spotlight, rolling numbers,
  *   the chain verification sweep, SMIL pulses, the login hash rain (each checks useReducedMotion());
  * - CSS keyframes and transitions are neutralised by the media query in index.css.

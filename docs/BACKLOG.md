@@ -57,3 +57,4 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - Slack exports: a 5 GB streaming archive ingestion run with memory measured (ADR 0014 section 3), on the
   same cloud VM as the 1M soak (laptop disk too small to keep it next to the test stack). The reader's
   bounded memory is already tested on a 3M-entry synthetic directory and by fuzzing.
+- Web UI: real trend charts on the dashboard (live collections, open matters, conversation-days, sealed chains over time) once a history endpoint exists. The earlier sparklines plotted hard-coded sample data and were removed (2026-10-03): fake trends next to real figures are misleading in an evidence tool.

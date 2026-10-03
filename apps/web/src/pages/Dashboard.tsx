@@ -11,7 +11,6 @@ import { Skeleton } from "@/components/ui/Empty";
 import { Glass, SectionTitle } from "@/components/ui/Glass";
 import { Ring } from "@/components/ui/Ring";
 import { StatusPill } from "@/components/ui/StatusPill";
-import { Sparkline } from "@/components/viz/Sparkline";
 import { ago, shortId } from "@/lib/format";
 import { scopeName } from "@/lib/names";
 import { jobStatus } from "@/lib/status";
@@ -54,16 +53,15 @@ export function Dashboard() {
 
       <motion.div variants={stagger} initial="hidden" animate="show" className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {[
-          { label: "In flight (running + queued)", value: stats?.live.length, icon: Radar, color: "#5ad8ff", trend: [2, 3, 2, 4, 3, 5, 4, 6, 5, 7] },
-          { label: "Open matters", value: stats?.openMatters, icon: Database, color: "#8b7cff", trend: [4, 4, 5, 5, 6, 6, 7, 7, 7, 7] },
-          { label: "Conversation-days collected", value: stats?.unitsDone, icon: Activity, color: "#7cf5d2", trend: [3, 5, 4, 7, 6, 9, 8, 11, 12, 14] },
-          { label: "Chains sealed to WORM", value: stats?.sealed, icon: Fingerprint, color: "#ffc86b", trend: [1, 2, 2, 3, 4, 5, 6, 7, 8, 9] },
+          { label: "In flight (running + queued)", value: stats?.live.length, icon: Radar, color: "#5ad8ff" },
+          { label: "Open matters", value: stats?.openMatters, icon: Database, color: "#8b7cff" },
+          { label: "Conversation-days collected", value: stats?.unitsDone, icon: Activity, color: "#7cf5d2" },
+          { label: "Chains sealed to WORM", value: stats?.sealed, icon: Fingerprint, color: "#ffc86b" },
         ].map((k) => (
           <motion.div key={k.label} variants={rise}>
             <Glass className="p-5" glow={`${k.color}22`}>
               <div className="flex items-start justify-between">
                 <div className="grid size-9 place-items-center rounded-xl border border-white/10 bg-white/[0.04]" style={{ color: k.color }}><k.icon className="size-[18px]" /></div>
-                <div aria-hidden><Sparkline data={k.trend} color={k.color} width={110} height={36} /></div>
               </div>
               <div className="mt-5 text-[40px] font-light leading-none tracking-tight">{k.value === undefined ? <Skeleton className="h-10 w-20" /> : <Counter value={k.value} />}</div>
               <div className="mt-2 text-[12.5px] text-white/60">{k.label}</div>

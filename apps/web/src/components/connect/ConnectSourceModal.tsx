@@ -2,7 +2,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
 import { ArrowRight, ExternalLink, KeyRound, ShieldCheck } from "lucide-react";
 import { useRef, useState } from "react";
-import { api } from "@/api";
+import { api, API_MODE } from "@/api";
+import { providerAuthorizeUrl } from "@/api/auth";
 import { qk } from "@/api/hooks";
 import type { ConnectionOut } from "@/api/types";
 import { Button, ButtonLink } from "@/components/ui/Button";
@@ -72,9 +73,11 @@ function InstallPanel({ option, clientId, reauth }: { option: SourceOption; clie
           setBusy(true);
           try {
             const { authorize_url } = await api.startInstall(clientId, option.source === "teams" ? "teams" : "slack", reauth?.id);
-            const target = new URL(authorize_url, location.origin);
-            // Follow only a provider URL over TLS (or our own origin, as the demo does): never a downgrade or a script URL.
-            if (target.protocol !== "https:" && target.origin !== location.origin) throw new Error("Unexpected install URL from the API");
+            // Follow only https on an exact provider host (ADR 0016 §5). The demo client's same-origin stand-in
+            // is honoured only in demo mode, which does not exist in a production build.
+            const demoStandIn = API_MODE === "demo" && new URL(authorize_url, location.origin).origin === location.origin;
+            const target = demoStandIn ? new URL(authorize_url, location.origin) : providerAuthorizeUrl(authorize_url);
+            if (!target) throw new Error(`The install link did not point to ${provider}, so it was not followed. Nothing was connected.`);
             window.location.assign(target.href);
           } catch (err) {
             setBusy(false);

@@ -1,4 +1,7 @@
-import { Route, Routes } from "react-router-dom";
+import { useEffect } from "react";
+import { Route, Routes, useNavigate } from "react-router-dom";
+import { onUnauthenticated } from "@/api";
+import { ReturnNotices } from "@/components/layout/ReturnNotices";
 import { Shell } from "@/components/layout/Shell";
 import { Access } from "@/pages/Access";
 import { ClientDetail } from "@/pages/ClientDetail";
@@ -14,7 +17,17 @@ import { NewJob } from "@/pages/NewJob";
 import { NotFound } from "@/pages/NotFound";
 
 export function App() {
+  const navigate = useNavigate();
+  // No session → the sign-in page by client-side navigation, so app state (e.g. a sign-in error notice
+  // read from ?auth_error=) survives; a full reload would drop it.
+  useEffect(() => {
+    onUnauthenticated(() => {
+      if (location.pathname !== "/login") navigate(`/login?from=${encodeURIComponent(location.pathname + location.search)}`, { replace: true });
+    });
+  }, [navigate]);
   return (
+    <>
+    <ReturnNotices />
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route element={<Shell />}>
@@ -31,5 +44,6 @@ export function App() {
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>
+    </>
   );
 }

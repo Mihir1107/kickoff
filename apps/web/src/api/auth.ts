@@ -37,3 +37,26 @@ export const SOURCE_FLOWS = {
   slackCallbackPath: "/oauth/slack/callback",
   microsoftCallbackPath: "/oauth/microsoft/callback",
 } as const;
+
+/**
+ * The only hosts an install `authorize_url` may point to (ADR 0016 §5: "the page follows only an https:
+ * URL on the provider's host"). Exact hostnames: no subdomains, no lookalikes.
+ */
+export const PROVIDER_HOSTS = ["slack.com", "login.microsoftonline.com"] as const;
+
+/** The URL to navigate to, or null if it must not be followed (not https, not an exact provider host, credentials or a port). */
+export function providerAuthorizeUrl(raw: string): URL | null {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  const ok =
+    url.protocol === "https:" &&
+    (PROVIDER_HOSTS as readonly string[]).includes(url.hostname) &&
+    url.port === "" &&
+    url.username === "" &&
+    url.password === "";
+  return ok ? url : null;
+}

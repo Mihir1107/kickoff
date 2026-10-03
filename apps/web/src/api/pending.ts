@@ -42,8 +42,9 @@ export interface DirectoryOut {
 }
 
 /**
- * Answer of POST .../slack/install and .../teams/consent (M17 plan section 6): "the authorize URL".
- * The field name is not fixed by the plan; `authorize_url` is assumed.
+ * Answer of POST .../slack/install and .../teams/consent (ADR 0016 §5: `{authorize_url, connection_id}`).
+ * Not hand-patched: `connection_id` (and this whole type) comes from the generated OpenAPI types once the
+ * M17 spec lands; then this interface is deleted and types.ts aliases the generated schema.
  */
 export interface InstallStartOut {
   authorize_url: string;

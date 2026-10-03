@@ -12,7 +12,7 @@ import { createHttpClient } from "./http";
 const DEMO = import.meta.env.DEV && import.meta.env.VITE_API_MODE !== "http";
 export const API_MODE: "demo" | "http" = DEMO ? "demo" : "http";
 
-/** No session: show the sign-in page (wired to the router in main.tsx). */
+/** No session: show the sign-in page. App.tsx replaces this full-navigation fallback with a router navigation once mounted. */
 let unauthenticated = () => {
   if (location.pathname !== "/login") location.assign(`/login?from=${encodeURIComponent(location.pathname + location.search)}`);
 };

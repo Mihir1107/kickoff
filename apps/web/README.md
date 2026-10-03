@@ -51,10 +51,16 @@ route name and code lives in one place: `AUTH` in `src/api/auth.ts`.
 - Every state-changing request sends `X-CSRF-Token` from `GET /v1/auth/csrf` (cached for the page).
   Same origin, so the browser's `Origin` is the tenant host, as the API checks.
 - `401 reauth_required` (sensitive actions with an old sign-in) sends the user straight back through the
-  IdP, then to the same page. Any other 401 shows the sign-in page.
+  IdP, then to the same page. Any other 401 shows the sign-in page, by router navigation, so app state
+  survives.
+- Errors returned by redirect (`?auth_error=` after sign-in, `?install_error=` after an install) are read
+  once, removed from the URL and shown until dismissed (`ReturnNotices`). The ADR's sign-in codes have
+  their own messages. Any other code gets a generic message plus the code, and only a code-shaped value
+  (`[a-z0-9_]`, at most 40 characters) is ever echoed. ADR 0016 names no install codes yet, so all
+  install errors are generic.
 - Sign-out: `POST /v1/auth/logout`.
-- **Open in the plan:** how `/auth/login` learns the return path and that a sign-in is a re-authentication.
-  The client sends `return_to` and `reauth=1`. The body of `/auth/csrf` is assumed to be `{csrf_token}`.
+- ADR 0016 fixes the details: `return_to` (a same-origin path, validated server-side), `reauth=1`, and
+  `GET /v1/auth/csrf` → `{csrf_token}`.
 
 ## Connecting sources: who handles credentials
 | Source | How it connects | Credential in the browser |
@@ -64,10 +70,13 @@ route name and code lives in one place: `AUTH` in `src/api/auth.ts`.
 | Slack internal app | `POST …/connections/slack/token` (replace: `PUT /connections/{id}/token`) | yes, once |
 | Slack export | upload, then validation of the locked archive | never |
 
-- Routes come from the M17 plan, §6 (install flows) and §7 (internal-app exception), in `SOURCE_FLOWS`
-  (`src/api/auth.ts`). The plan does not fix three details, so they are assumptions in `pending.ts`:
-  the answer's field (`authorize_url`), how a re-authorization names its connection (`connection_id`),
-  and the token body (`{token}`). The page follows only an `https:` install URL.
+- Routes come from ADR 0016 §5–6, in `SOURCE_FLOWS` (`src/api/auth.ts`).
+- The page follows an `authorize_url` only when `providerAuthorizeUrl` accepts it: `https:` on exactly
+  `slack.com` or `login.microsoftonline.com` (`PROVIDER_HOSTS`), with no subdomain, port or credentials.
+  Anything else shows an error and is not followed. In demo mode, the demo client's same-origin stand-in is
+  allowed; demo mode does not exist in production builds.
+- The install answer's `connection_id` comes from the generated OpenAPI types once the M17 spec lands.
+  `pending.ts` is not hand-patched for it.
 - The internal-app token is held only in an unnamed, uncontrolled password input: never React state, query
   cache, storage, URL or logs. It is read once at submit, sent in the request body, and the field is cleared
   on success. There is no workspace-id field: the API learns the team id from Slack's `auth.test`.
