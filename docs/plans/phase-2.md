@@ -288,6 +288,58 @@ ADR 0016 records this before code.
 - The frontend generates its types from this file (e.g. `openapi-typescript`) instead of the
   hand-mirrored `src/api/types.ts`, in the frontend's branch.
 
+**6. Server-side install flows (no tokens in the browser).**
+- **Slack (our distributed app): OAuth v2.**
+  - `POST /v1/clients/{c}/connections/slack/install` (`connection.manage`) creates a pending install
+    with a random `state` bound to the tenant, the client, the acting session and an expiry. It
+    answers with the Slack authorize URL (scopes per tier, PKCE where Slack supports it).
+  - The browser only follows redirects. Slack redirects to `GET /v1/oauth/slack/callback` on the
+    tenant host. The API checks `state` (single use, unexpired, same session), exchanges the `code`
+    server-side (`oauth.v2.access`) and stores the tokens directly through `connection_tokens`
+    (envelope-encrypted).
+  - The connection is created with granted scopes, team id and blind spots, then the API redirects to
+    the UI's connection page. Tokens never appear in a response, a redirect URL, a log or Temporal.
+  - Re-authorization uses the same flow. Failures, denials and replays are audited without values.
+- **Microsoft Teams: admin consent.**
+  - `POST /v1/clients/{c}/connections/teams/consent` (`connection.manage`) starts the tenant-admin
+    consent URL for our multi-tenant app, with the same `state` binding.
+  - The callback `GET /v1/oauth/microsoft/callback` receives `admin_consent` and the customer's
+    Entra tenant id, verifies `state`, and records the connection.
+  - Graph tokens are then obtained server-side with the client-credentials flow and a certificate
+    (ADR 0009 / backlog), never from the browser.
+  - A refused or partial consent is recorded as such, with the granted permissions listed.
+- **Common to both:** callbacks are exempt from CSRF tokens (top-level GETs from the provider) but
+  protected by the single-use, session-bound `state`. The redirect URIs are exact and registered per
+  environment. The provider's error parameters are recorded, never reflected unescaped.
+
+**7. Slack internal-app tier exception (ADR before code).** Some customers install their own internal
+Slack app and hand us its token; there is no OAuth flow to run. One controlled exception:
+- `POST /v1/clients/{c}/connections/slack/token` (`connection.manage`) accepts the token once (and
+  `PUT /v1/connections/{id}/token` to replace it).
+  - Write-only: no endpoint ever returns it, not even masked beyond a fixed "set at <time>".
+  - It is validated against Slack (`auth.test`) and encrypted on receipt (`connection_tokens`); the
+    plaintext lives only in that request's memory.
+  - It is registered with the log redactor before any processing, and excluded from logs, error
+    details, audit and custody payloads, and Temporal.
+  - The audited connection event (`connection_token_submitted` / `_replaced`) records who did it,
+    when, the team id, the token type and the granted scopes: never the value or any part of it.
+- Tests:
+  - every response of the API test suite is scanned for the submitted token (existing credential scan);
+  - log capture contains no fragment of it;
+  - the custody and audit payloads never contain it;
+  - GETs on the connection never expose it.
+
+**8. End-to-end tests in M17.** Playwright runs the UI against the REAL API and stack (the ephemeral
+test stack, dev IdP), not mocks.
+- Flows: sign-in → connection (dummy) → collection → live status (SSE, and the polling fallback) →
+  report → audited download; export upload → validation findings → export job →
+  `completed_against_archive` with its caveat; reopen/close; revocation closing an open stream.
+- Accessibility: axe checks on every page.
+- A **pixel contrast audit:** screenshots of each page in light and dark themes, with text-versus-
+  background contrast computed from the rendered pixels (WCAG AA: 4.5:1 for body text, 3:1 for large
+  text and UI components). Failures list the element and its measured ratio.
+- Runs in CI against the compose stack; traces and screenshots are kept on failure.
+
 **Tests.**
 - Session lifecycle: login, idle and absolute expiry, logout, admin revocation, deactivation. The cookie
   carries the right flags and never reaches another tenant's subdomain.
