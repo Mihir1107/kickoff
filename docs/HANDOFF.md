@@ -1,4 +1,4 @@
-# Handoff (2026-10-02)
+# Handoff (2026-10-03)
 
 Read with `CLAUDE.md` (rules), `docs/ARCHITECTURE.md`, `docs/adr/`, `docs/plans/phase-2.md` and `docs/BACKLOG.md`.
 
@@ -28,7 +28,7 @@ history.
 - the audit-burst measurement;
 - the anchor-storm fix (migration 0017).
 
-**Migrations at head:** 0022.
+**Migrations at head:** 0023.
 
 **Not done in Phase 1:** the 1M-message soak. Laptop disk is too small (~15 GB free; it needs ~21 GB). It is
 in the backlog for a cloud VM: `scripts/resume_soak.py --messages 1000000 --kills 10`.
@@ -47,8 +47,7 @@ in the backlog for a cloud VM: `scripts/resume_soak.py --messages 1000000 --kill
 3. Product-owner confirmation of ADR 0013 decisions (a) and (c).
 4. A cloud VM for the 1M soak.
 
-## Current milestone: M14, Slack export ingestion (ADR 0014, accepted with R1-R7)
-Done:
+## Done: M14, Slack export ingestion (ADR 0014, accepted with R1-R7)
 - **M14.1** hardened streaming ZIP reader `edisc_custody.archive`, property-based fuzzing (R1, R5).
 - **M14.2** pinned-version S3 range source with coalesced reads (R6; 0.8 requests per 1,000 entries).
 - **M14.3** migration 0018 (`slack_exports`, `export_upload_parts`, `export_entries`,
@@ -89,11 +88,43 @@ Done:
   occurrences) resumes to the clean result; one real SIGKILL of the export worker process in the middle
   of the day-file index, then a new worker. Seams: `ExportIngest(hooks=CrashHooks)`.
 
-Next, in order:
-1. **Real-export fixtures** when the user sends them (Developer Program sandbox, free-plan workspace):
-   confirm every *(confirm on real export)* item in ADR 0014 and measure range reads on them.
-2. **M15** RSMF renderer (Relativity licence still to confirm).
-3. Backlog for a cloud VM: the 5 GB streaming archive run (ADR 0014 section 3) with the 1M soak.
+## Next milestone: M15, RSMF renderer (ADR 0015, ACCEPTED 2026-10-03; nothing implemented yet)
+Read `docs/adr/0015-rsmf-renderer.md` in full first; §9 has the review decisions:
+- each render has its own custody stream; its first event (`render_started`) references the SEALED
+  job: job id, final chain head (hash, seq) and seal anchor (key, version). Seals stay final; never
+  append to a sealed job chain. The tenant audit stream gets `audit.render_requested` and
+  `audit.render_completed`;
+- group DMs are RSMF `direct`, with the Slack type (`mpim`) in conversation `custom`;
+- out-of-scope messages appear only as marked thread context, and only with the render option
+  `include_context` (default true), which is recorded in the render's custody stream;
+- `X-RSMF-Generator: edisc-renderers/<semver>` plus `X-RSMF-RendererVersion: <semver>`; golden bytes are
+  keyed by renderer version (changing the bytes needs a version bump).
+
+Implementation order (also in `docs/plans/phase-2.md`, M15):
+1. Vendor `rsmf_schema_2_0_0.json` (BSD-3, `relativitydev/rsmf-validator-samples` commit
+   `c717cd322264b46115d27d034a6107c8c91043d8`) with its `LICENSE` and a `SOURCE.md` (URL, commit,
+   SHA-256). Add `jsonschema` for tests and render-time validation.
+2. The pure renderer: 24 h slices (UTC or matter time zone, DST), the 10,000-event cap with parts,
+   mapping, attachments and `_UNAVAILABLE.txt` placeholders, the deterministic zip and EML; golden bytes.
+3. The loader from items and derivations; storage as `production` registry rows.
+4. `RenderWorkflow` (queue `renders`), the render custody stream, `POST /v1/jobs/{id}/renders`
+   (`export.create`, recent sign-in per ADR 0016), audited downloads (purpose `rsmf`).
+5. The fixture corpus (dummy, both dialects, including an export job with the archive caveat),
+   structural EML checks, the crash matrix for renders.
+
+The Relativity validator stays OUT until the licence question is answered (open decision 1).
+
+After M15: real-export fixtures when the user sends them (confirm every *(confirm on real export)* item
+in ADR 0014, and measure range reads on them), M16 (report), then the M17 backend (ADR 0016, accepted).
+Cloud-VM backlog: the 1M soak and the 5 GB streaming archive run.
+
+## Other sessions and branches
+- The frontend is on branch `feat/web-ui` (another session). Never commit, modify or run `apps/web` from
+  a backend session. It lists the contracts it assumes in `apps/web/src/api/pending.ts`; ADR 0016 adopted
+  them.
+- Several Claude sessions have worked in this tree. Start with `git status` and `git pull`, stage
+  explicit paths only (never `git add -A`), and never restore files with `git checkout` (it destroys
+  uncommitted work).
 
 ## Gotchas learned (read before changing things)
 

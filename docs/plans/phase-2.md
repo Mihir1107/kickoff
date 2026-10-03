@@ -89,9 +89,12 @@ through the existing pipeline.
 
 ## M15: RSMF renderer (`edisc_renderers.rsmf`)
 
-**Detailed proposal: `docs/adr/0015-rsmf-renderer.md` (proposed 2026-10-03, awaiting review; no code
-yet).** It grounds the outline below in the vendored 2.0 schema and Relativity's documented headers.
-It also proposes a render custody stream of its own, since job streams are sealed.
+**Detailed design: `docs/adr/0015-rsmf-renderer.md` (accepted 2026-10-03 with review decisions; not
+implemented).** It supersedes the outline below where they differ:
+- a render custody stream of its own, starting from the sealed job's head and seal anchor;
+- group DMs as `direct` with the Slack type in `custom`;
+- `include_context` as a recorded render option;
+- `X-RSMF-RendererVersion`.
 
 **Implementation order once approved:**
 1. Vendor the schema (BSD-3 `LICENSE`, `SOURCE.md` with commit and SHA-256) and add `jsonschema` as a

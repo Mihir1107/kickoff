@@ -1,6 +1,6 @@
 # ADR 0015: RSMF renderer (`edisc_renderers.rsmf`)
 
-Status: **Proposed** (2026-10-03), for review before any code (M15). Implements M15 of
+Status: **Accepted** (2026-10-03) with the review decisions below (§9); not implemented yet (M15). Implements M15 of
 `docs/plans/phase-2.md` and decisions 5 and 4 there: renders by `matter_manager` and `tenant_admin` only
 (`export.create`), audited; Relativity's validator stays out until the licence question is answered.
 
@@ -35,8 +35,9 @@ Status: **Proposed** (2026-10-03), for review before any code (M15). Implements 
     (for participant names); file availability.
   - Raw evidence is read only to embed file bytes, always by pinned version (or from the locked export
     archive for exports).
-- **Scope:** every in-scope message of the job. Out-of-scope items appear only as thread context
-  (§3), marked.
+- **Scope:** every in-scope message of the job. Out-of-scope items appear ONLY as marked thread
+  context (§3), and only when the render option `include_context` is true (the default). The option is
+  recorded in the render's custody stream (§7), because producibility is decided at production time.
 - The renderer is a library: `render(slice_inputs) -> bytes stream`. It imports no database or cloud
   code. A thin loader in the worker builds its inputs, so golden tests run on plain data.
 
@@ -60,7 +61,9 @@ Status: **Proposed** (2026-10-03), for review before any code (M15). Implements 
   - avatars are not embedded in M15 (avatar files are not collected yet).
 - **Conversation:** one per file.
   - `id` is the Slack conversation id; `platform` is `"slack"`; `display` is the channel name.
-  - `type`: `direct` for DMs and group DMs, `channel` for public and private channels.
+  - `type`: `direct` for DMs and group DMs, `channel` for public and private channels. The original
+    Slack type is always in `custom` as `slack.conversation_type` (`im`, `mpim`, `public_channel`,
+    `private_channel`), so a group DM rendered as `direct` stays identifiable.
   - `participants`: the members when known (export metadata, conversation info), else those observed.
   - `custodian`: the matter custodian mapped to the collected identity, when one is mapped.
   - `custom`: workspace id, kind (`public`, `private`, `dm`, `mpim`), shared/external.
@@ -81,9 +84,13 @@ Status: **Proposed** (2026-10-03), for review before any code (M15). Implements 
   - **Anything uninterpretable:** `type: "unknown"` with the raw subtype in `custom`. Never dropped.
   - **Provenance in `custom`** (every event): the item's idempotency key, content hash, source item id
     and version, and `edisc.in_scope`.
-  - **Thread context** (ADR 0011): a reply in this file whose root sits in an earlier slice or part is
-    preceded by its root. The root carries `custom` `edisc.context = thread_root_outside_file`, so
-    every `parent` resolves inside the file.
+  - **Thread context** (ADR 0011), with `include_context` (the default): a reply in this file whose
+    root sits in an earlier slice or part, or outside the job's scope, is preceded by its root. The root
+    carries `custom` `edisc.context = thread_root_outside_file` (or `thread_root_out_of_scope`), so every
+    `parent` resolves inside the file.
+  - With `include_context = false`, no out-of-scope item is rendered. A reply whose root is not in the
+    file keeps its `parent` only if that root is in the file; otherwise `parent` is omitted and `custom`
+    `edisc.parent_not_rendered = <root ts>` records it, so the thread is never silently cut.
 - **Determinism:**
   - events are sorted by (timestamp, id); participants by id;
   - the manifest is RFC 8785 canonical JSON, UTF-8;
@@ -106,13 +113,18 @@ Status: **Proposed** (2026-10-03), for review before any code (M15). Implements 
   - `Date` is `X-RSMF-EndDate`. `Message-ID` is `<{source-hash}@rsmf.edisc>`, and the MIME boundary is
     also derived from the source hash. No wall clock is used anywhere.
 - **Standard headers:**
-  - `X-RSMF-Version: 2.0.0`; `X-RSMF-Generator: edisc-renderers/<version>`;
+  - `X-RSMF-Version: 2.0.0`; `X-RSMF-Generator: edisc-renderers/<semver>`;
   - `X-RSMF-BeginDate` / `X-RSMF-EndDate`: the first and last event timestamps;
   - `X-RSMF-EventCount`; `X-RSMF-AttachmentCount`; `X-RSMF-Application: Slack`;
   - `X-RSMF-Custodian` (when mapped); `X-RSMF-Participants` (display names, folded per RFC 5322);
   - `X-RSMF-EventCollectionID`.
 - **Custom headers:**
   - `X-RSMF-CollectionId` (job id) and `X-RSMF-ConnectorVersion` / `X-RSMF-NormalizerVersion`.
+  - `X-RSMF-RendererVersion`: the renderer's semver (`edisc_renderers.rsmf.RENDERER_VERSION`), the same
+    as in `X-RSMF-Generator`, as its own machine-readable header. Byte-identical output is promised
+    for the same inputs AND the same renderer version. Any change to the output bytes bumps it, and the
+    golden tests carry it.
+  - `X-RSMF-IncludeContext`: `true` or `false`, the render option in force.
   - `X-RSMF-SourceHash`: the RFC 6962 Merkle root over the sorted `(idempotency key, content hash)` of
     every item rendered in the file, context included. It is the same construction as the custody batch
     roots, so it can be recomputed from the custody package.
@@ -128,20 +140,31 @@ The same inputs give byte-identical files:
 - deflate at a fixed level, no extra fields, no comments;
 - canonical JSON and derived boundary and ids.
 
-A golden test compares bytes (`tests/golden/rsmf/`). Any change to them needs a renderer version bump,
-recorded in the render.
+A golden test compares bytes (`tests/golden/rsmf/`), keyed by renderer version. A change to the bytes
+without a version bump fails CI. The version is recorded in every file's headers and in the render's
+custody stream.
 
 ### 7. Storage, custody, API
 - **Storage:** renders are derived products, never evidence. They go to
   `t/{tenant}/productions/{render}/...`, hashed while written and locked for the matter window, as
   registry rows of a new kind `production`.
-- **Custody:** a job's own chain is sealed when it finishes, so a render gets its **own stream**
-  (stream id = render id). That stream holds `render_started`, then one `rsmf_rendered` event per file
-  (name, slice, part, SHA-256, size, source hash, event count), then a seal, anchored like a job. The
-  tenant audit stream records who asked for it (`audit.render_requested`) and the render's final head.
+- **Custody: one stream per render** (stream id = render id). A sealed job chain is NEVER reopened: seals
+  stay final.
+  - The render stream's FIRST event, `render_started`, references the sealed job it renders:
+    - the job id;
+    - the job chain's final head hash and seq;
+    - the seal anchor (WORM key and pinned version);
+    - the job's status and completeness basis;
+    - the renderer version and the render options (`include_context`, time zone, cap).
+  - The render refuses to start unless the job is sealed and its chain verifies up to that head.
+  - Then one `rsmf_rendered` event per file: name, slice, part, SHA-256, size, source hash, event count,
+    context event count.
+  - Then `render_finished` and a seal, anchored to WORM like a job chain.
+  - The tenant audit stream records who asked for it (`audit.render_requested`: actor, job, options),
+    and when it ends, the render's final head (`audit.render_completed`).
 - **API:**
   - `POST /v1/jobs/{id}/renders` (`export.create`: matter_manager, tenant_admin; recent sign-in per
-    ADR 0016). The body has the time zone and options. It runs as a Temporal `RenderWorkflow` (queue
+    ADR 0016). The body has the time zone and `include_context` (default true). It runs as a Temporal `RenderWorkflow` (queue
     `renders`, idempotent per (job, options) with an `Idempotency-Key`).
   - `GET /v1/renders/{id}` returns status, files and the custody head.
   - Downloads go through the audited content endpoint with purpose `rsmf`.
@@ -178,8 +201,14 @@ recorded in the render.
   but it stays readable.
 - Minus: avatars are not rendered until avatar files are collected.
 
-## Open points (for review)
-1. A render's custody on its own stream (proposed above), or an exception that lets a sealed job stream
-   accept render events. The proposal keeps job seals final.
-2. `type` for group DMs: `direct` (proposed) or `channel`.
-3. Whether out-of-scope messages other than thread context are ever rendered. Proposed: never.
+## 9. Review decisions (2026-10-03)
+1. **Custody:** each render has its own custody stream plus tenant audit events. The stream's first
+   event references the sealed job (job id, final chain head hash, seal anchor). Seals stay final; a
+   sealed job chain is never reopened.
+2. **Group DMs:** RSMF type `direct`; the original Slack conversation type (`mpim`) is recorded in
+   `custom`.
+3. **Out-of-scope messages:** they appear only as marked thread context, and only when the render
+   option `include_context` is true (the default). The option is recorded in the render's custody
+   stream: producibility is decided at production time.
+4. **Renderer version:** `X-RSMF-Generator: edisc-renderers/<semver>` plus `X-RSMF-RendererVersion:
+   <semver>`. Byte-identical output is tied to a specific renderer version.

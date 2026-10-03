@@ -79,6 +79,17 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Layout/tier rules: `edisc_connector_slack_export.layout`. Format details marked *(confirm on real
   export)* in ADR 0014 stay provisional until the real exports are fixtures.
 
+## RSMF renders (M15, ADR 0015 accepted; not implemented yet)
+- Renders read normalized items and derivations, never raw pages (raw evidence only to embed file
+  bytes, by pinned version). The renderer itself is pure (no DB/S3 imports); a worker loader feeds it.
+- Byte-identical output for the same inputs AND renderer version: no clocks, fixed zip timestamps and
+  order, canonical JSON, boundary and Message-ID derived from the source hash. Changing output bytes
+  needs a `RENDERER_VERSION` bump (golden tests are keyed by it).
+- Custody: each render has its own stream; its first event references the sealed job (id, final head,
+  seal anchor). Never append to a sealed job chain.
+- Every manifest is validated against the vendored `rsmf_schema_2_0_0.json`. The Relativity validator is
+  not used until the licence is confirmed.
+
 ## Conventions
 - Python 3.12, `uv` only (no pip). Add deps with `uv add --package <member> <dep>`.
 - mypy `--strict` on all source (packages/apps/workers). ruff is the formatter and linter.
@@ -176,3 +187,6 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - No scope creep: later-phase ideas go in `docs/BACKLOG.md`.
 - Ask before deviating from a principle. Keep this file, ARCHITECTURE.md and ADRs current when decisions change.
 - Start of a session: read docs/HANDOFF.md (state, open decisions, next milestone, gotchas).
+- Stage explicit paths only (never `git add -A`); `apps/web` belongs to the frontend branch
+  (`feat/web-ui`) and is never committed, modified or run from a backend session. Other sessions may share
+  this tree: check `git status` first, and never restore files with `git checkout`.
