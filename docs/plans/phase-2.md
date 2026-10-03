@@ -192,7 +192,8 @@ Out of scope for M17 (backlog): admin screens for IdPs and roles (API-only for n
 The frontend now exists as a Vite + React single-page app (`apps/web`, built elsewhere, on its own
 branch), not Next.js. So there is no separate BFF server: **the API itself holds the session**, which
 keeps decision 7 (server-side sessions, httpOnly cookies, CSRF, revocation, no tokens in the browser).
-ADR 0016 records this before code.
+ADR 0016 (`docs/adr/0016-session-auth.md`, accepted 2026-10-03) fixes the contracts: `return_to` and
+`reauth=1` on login, `{csrf_token}`, `{authorize_url, connection_id}` and `{token}`.
 
 **1. Session auth (ADR 0016).**
 - **Login:** `GET /v1/auth/login` starts OIDC authorization code + PKCE with the tenant's IdP (tenant from
@@ -335,9 +336,10 @@ test stack, dev IdP), not mocks.
   report → audited download; export upload → validation findings → export job →
   `completed_against_archive` with its caveat; reopen/close; revocation closing an open stream.
 - Accessibility: axe checks on every page.
-- A **pixel contrast audit:** screenshots of each page in light and dark themes, with text-versus-
-  background contrast computed from the rendered pixels (WCAG AA: 4.5:1 for body text, 3:1 for large
-  text and UI components). Failures list the element and its measured ratio.
+- A **pixel contrast audit:** screenshots of each page in the **dark theme** (the only theme in M17; a
+  light theme comes later, and the audit then covers both). Contrast is computed from the rendered
+  pixels against WCAG AA: 4.5:1 for body text, 3:1 for large text and UI components (borders, icons,
+  focus rings). Failures list the element and its measured ratio.
 - Runs in CI against the compose stack; traces and screenshots are kept on failure.
 
 **Tests.**
