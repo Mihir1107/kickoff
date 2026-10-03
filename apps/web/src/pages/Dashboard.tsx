@@ -63,7 +63,7 @@ export function Dashboard() {
             <Glass className="p-5" glow={`${k.color}22`}>
               <div className="flex items-start justify-between">
                 <div className="grid size-9 place-items-center rounded-xl border border-white/10 bg-white/[0.04]" style={{ color: k.color }}><k.icon className="size-[18px]" /></div>
-                <Sparkline data={k.trend} color={k.color} width={110} height={36} />
+                <div aria-hidden><Sparkline data={k.trend} color={k.color} width={110} height={36} /></div>
               </div>
               <div className="mt-5 text-[40px] font-light leading-none tracking-tight">{k.value === undefined ? <Skeleton className="h-10 w-20" /> : <Counter value={k.value} />}</div>
               <div className="mt-2 text-[12.5px] text-white/60">{k.label}</div>

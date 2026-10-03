@@ -60,8 +60,8 @@ export function MatterDetail() {
         <div className="space-y-4">
           <Glass className="p-6" glow="rgba(255,200,107,0.08)">
             <SectionTitle eyebrow="Retention · WORM" title={<span className="flex items-center gap-2"><CalendarClock className="size-4 text-amber" />{m ? utc(m.retention_until, false) : "…"}</span>} />
-            <div className="relative h-2 overflow-hidden rounded-full bg-white/[0.06]">
-              <motion.div className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-amber/80 to-mint" initial={{ width: 0 }} animate={{ width: `${Math.max(2, 100 - (days / span) * 100)}%` }} transition={{ duration: 1.2 }} />
+            <div data-progress-track className="relative h-2 overflow-hidden rounded-full bg-white/[0.06]">
+              <motion.div data-progress-fill className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-amber/80 to-mint" initial={{ width: 0 }} animate={{ width: `${Math.max(2, 100 - (days / span) * 100)}%` }} transition={{ duration: 1.2 }} />
             </div>
             <div className="mt-2 flex justify-between font-mono text-[11px] text-white/60"><span>opened {m ? ago(m.created_at) : ""}</span><span>{days}d left</span></div>
             <p className="mt-3 text-[12px] leading-relaxed text-white/60">Locks roll forward in windows while the matter is open; retention may only be extended. COMPLIANCE mode: nobody can delete early, including us.</p>

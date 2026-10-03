@@ -7,5 +7,6 @@ export function SourceGlyph({ source }: { source: string }) {
     dummy: ["◆", "linear-gradient(135deg,#7cf5d2,#5ad8ff)"],
   };
   const [g, bg] = map[source] ?? ["?", "#333"];
-  return <div className="grid size-10 place-items-center rounded-xl text-[17px] font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3)]" style={{ background: bg }}>{g}</div>;
+  // A logo mark beside the source name (decorative, exempt from contrast as a logotype).
+  return <div aria-hidden className="grid size-10 place-items-center rounded-xl text-[17px] font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3)]" style={{ background: bg }}>{g}</div>;
 }

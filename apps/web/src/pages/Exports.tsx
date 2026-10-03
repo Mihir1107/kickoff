@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/Button";
 import { Empty } from "@/components/ui/Empty";
 import { Glass, SectionTitle } from "@/components/ui/Glass";
 import { Hash } from "@/components/ui/Hash";
+import { Field } from "@/components/ui/Modal";
 import { StatusPill } from "@/components/ui/StatusPill";
 import { useToast } from "@/components/ui/Toast";
 import { Pipeline } from "@/components/viz/Pipeline";
@@ -77,20 +78,27 @@ export function Exports() {
         <Glass className="h-fit p-6">
           <SectionTitle eyebrow="Upload" title="New export" />
           <div className="space-y-3">
-            <select className="input" value={client} onChange={(e) => setClientId(e.target.value)}>
-              {data?.clients.filter((c) => !c.closed_at).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-            <select className="input" value={plan} onChange={(e) => setPlan(e.target.value as SlackPlan | "")}>
-              <option value="">Plan: detect from the archive</option>
-              {SLACK_PLANS.map((p) => <option key={p} value={p}>Declared plan: {p}</option>)}
-            </select>
+            <Field label="Client">
+              <select className="input" value={client} onChange={(e) => setClientId(e.target.value)}>
+                {data?.clients.filter((c) => !c.closed_at).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </Field>
+            <Field label="Slack plan">
+              <select className="input" value={plan} onChange={(e) => setPlan(e.target.value as SlackPlan | "")}>
+                <option value="">Detect from the archive</option>
+                {SLACK_PLANS.map((p) => <option key={p} value={p}>Declared: {p}</option>)}
+              </select>
+            </Field>
           </div>
 
           <motion.div onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)}
             onDrop={(e) => { e.preventDefault(); setDrag(false); const f = e.dataTransfer.files[0]; if (f) setFile(f); }}
             onClick={() => input.current?.click()} animate={{ scale: drag ? 1.02 : 1 }}
-            className={clsx("relative mt-4 grid cursor-pointer place-items-center overflow-hidden rounded-2xl border border-dashed px-6 py-10 text-center transition-colors", drag ? "border-mint/60 bg-mint/[0.06]" : "border-white/15 bg-white/[0.015] hover:border-white/30")}>
-            <input ref={input} type="file" accept=".zip,application/zip" className="hidden" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+            // Keyboard: a button that opens the file chooser (Enter or Space); drag and drop is the mouse shortcut.
+            role="button" tabIndex={0} data-variant="outline" aria-label={file ? `Selected ${file.name}. Choose a different export ZIP` : "Choose a workspace export ZIP"}
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.current?.click(); } }}
+            className={clsx("relative mt-4 grid cursor-pointer place-items-center overflow-hidden rounded-2xl border border-dashed px-6 py-10 text-center transition-colors", drag ? "border-mint bg-mint/[0.06]" : "border-[var(--control-border)] bg-white/[0.015] hover:border-[var(--control-border-hover)]")}>
+            <input ref={input} type="file" accept=".zip,application/zip" className="hidden" tabIndex={-1} aria-hidden onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
             {drag && <div className="pointer-events-none absolute inset-x-0 h-1/2 animate-scan bg-gradient-to-b from-transparent via-mint/15 to-transparent" />}
             <motion.div animate={{ y: drag ? -6 : 0 }} className="grid size-14 place-items-center rounded-2xl border border-white/10 bg-white/[0.04]">
               {file ? <FileArchive className="size-6 text-iris" /> : <UploadCloud className="size-6 text-white/65" />}
@@ -106,8 +114,8 @@ export function Exports() {
                   <span className="flex items-center gap-1.5">{phase === "hashing" ? <><Fingerprint className="size-3.5 text-iris" />SHA-256 in your browser…</> : phase === "uploading" ? "Uploading parts (Content-Digest per part)" : "Handed to ingest"}</span>
                   <span className="font-mono">{Math.round(pct * 100)}%</span>
                 </div>
-                <div className="h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
-                  <motion.div className="h-full rounded-full bg-gradient-to-r from-iris via-cyan to-mint" animate={{ width: phase === "hashing" ? "12%" : `${pct * 100}%` }} />
+                <div data-progress-track className="h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
+                  <motion.div data-progress-fill className="h-full rounded-full bg-gradient-to-r from-iris via-cyan to-mint" animate={{ width: phase === "hashing" ? "12%" : `${pct * 100}%` }} />
                 </div>
                 {digest && <div className="mt-2 flex items-center gap-1 text-[11px] text-white/60">declared <Hash value={digest} /></div>}
               </motion.div>
@@ -143,7 +151,7 @@ export function ExportCard({ x, clientName }: { x: ExportOut; clientName?: strin
       {x.upload && (
         <div className="mt-5 font-mono text-[11.5px] text-white/65">
           {x.upload.parts_received} parts · {bytes(x.upload.bytes_received)} of {bytes(x.declared_size)} · session expires {ago(x.upload.expires_at)}
-          <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/[0.06]"><div className="h-full bg-cyan" style={{ width: `${(x.upload.bytes_received / x.declared_size) * 100}%` }} /></div>
+          <div data-progress-track className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/[0.06]"><div data-progress-fill className="h-full bg-cyan" style={{ width: `${(x.upload.bytes_received / x.declared_size) * 100}%` }} /></div>
         </div>
       )}
       {x.status === "rejected" && (

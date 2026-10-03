@@ -92,22 +92,39 @@ route name and code lives in one place: `AUTH` in `src/api/auth.ts`.
 
 ## End-to-end suite (M17)
 `npm run e2e` runs Playwright (`playwright.config.ts`, `e2e/`); CI runs it in the `web` job.
-- `ui` project (demo data): `a11y/contrast.spec.ts` measures WCAG contrast on rendered pixels across every
-  page, and `a11y/reduced-motion.spec.ts` checks the reduced-motion gates, both with the preference set
-  and without it.
+- `ui` project (demo data), every page plus the overlays (palette, modals):
+  - `a11y/axe.spec.ts`: axe-core (WCAG 2.0–2.2 A/AA plus best practices), zero serious or critical violations;
+  - `a11y/contrast.spec.ts`: text contrast (1.4.3) measured on rendered pixels;
+  - `a11y/non-text-contrast.spec.ts`: UI components and graphics (1.4.11, 3:1). Covers input and
+    drop-zone boundaries, outline and danger buttons, selected states (choice cards, active tab), heatmap
+    cells, reconciliation bar segments, progress fills against their tracks, and ring arcs against track
+    and panel;
+  - `a11y/keyboard.spec.ts`: every pointer-clickable element is keyboard-reachable; Tab reaches every
+    control, each with a focus ring of >= 3:1 (focused vs unfocused pixels); the command palette and
+    modals trap focus both ways, Escape closes them, and focus returns to the opener; the reconciliation
+    map reads by arrow keys; the export drop zone opens the file chooser from the keyboard;
+  - `a11y/reduced-motion.spec.ts`: the reduced-motion gates, with the preference set and without it.
+  - Audits wait for a still page (`settle()`: no finite animation running, no inline style changing) and
+    retake a frame torn by live updates, so a running job cannot make them flaky.
 - `contract` project: the real HTTP client with `/v1` intercepted. It checks the session cookie mode,
   the CSRF header, `reauth_required`, the install redirect, and where a credential may appear.
 - **Not yet what plan §8 asks for:**
   - The plan runs the suite against the REAL API and stack. The `contract` project stubs `/v1` because
     the M17 endpoints do not exist; it should become real-stack flows when they do.
-  - The plan's contrast audit covers light and dark themes and UI components (3:1). There is only a dark
-    theme (theming is out of M17 scope), and the audit checks text only, not borders, icons or focus
-    rings yet.
-  - axe checks are not added yet.
+  - The plan's contrast audit covers light and dark themes. M17 is dark-only (decided 2026-10-03), so the
+    light theme is audited when it exists.
 - When the M17 backend lands: set `E2E_BASE_URL` to a tenant host on the live stack and add the plan's
   flows (sign-in, dummy connection, collection, live status, report, audited download, export path).
 
 ## Accessibility
+- **Keyboard**: one global `:focus-visible` ring (2px mint outline with a dark gap); scroll containers
+  keep `scroll-padding` so a focused control is never scrolled flush against the edge where its ring would
+  be clipped. Modals and the palette are portalled outside `#root`, which becomes `inert` while they are
+  open; `useFocusTrap` (`src/lib/focus.ts`) traps Tab and restores focus. Composite widgets (the
+  reconciliation map) are one tab stop with arrow-key navigation and a live region.
+- **Non-text contrast**: control boundaries use `--control-border` (#7b8398, >= 3.4:1 on the lightest
+  panel). Pending heatmap units are hollow slots, collected-but-empty days hollow mint, and matched-cell
+  shading never drops below opacity 0.5 (>= 3.7:1).
 - **Reduced motion** (`src/lib/motion.ts`): with `prefers-reduced-motion: reduce`, every framer-motion
   animation completes instantly (no blur or slide transitions, rings, morphs). These are removed: the cursor
   spotlight, rolling numbers, the chain verification sweep, SMIL pulses and the login hash rain. CSS

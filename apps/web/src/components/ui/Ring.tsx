@@ -8,7 +8,7 @@ export function Ring({ value, size = 120, stroke = 9, children, from = "#7cf5d2"
   const id = `ring-${from.slice(1)}-${to.slice(1)}`;
   return (
     <div className="relative grid place-items-center" style={{ width: size, height: size }}>
-      <svg width={size} height={size} className="-rotate-90">
+      <svg width={size} height={size} className="-rotate-90" data-ring data-value={Math.min(1, Math.max(0, value))} data-r={r} data-stroke={stroke}>
         <defs>
           <linearGradient id={id} x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor={from} /><stop offset="1" stopColor={to} /></linearGradient>
           <filter id={`${id}-glow`}><feGaussianBlur stdDeviation="3" /></filter>

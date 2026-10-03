@@ -28,7 +28,7 @@ export function ChainViz({ events, verifyingTo, failedAt }: { events: CustodyEve
   return (
     <div>
       <div ref={scroller} className="relative overflow-x-auto pb-4 pt-2">
-        <div className="flex items-center px-6">
+        <div className="flex w-max items-center px-6">{/* w-max: the end padding counts toward scroll width */}
           {events.map((e, i) => {
             const verified = verifyingTo >= e.seq && failedAt !== e.seq;
             const color = TYPE_COLOR[e.event_type] ?? "#8a90a6";

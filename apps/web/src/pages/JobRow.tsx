@@ -29,8 +29,8 @@ export function JobRow({ j, matterName, i = 0 }: { j: JobOut; matterName?: strin
         </div>
         <div className="hidden md:block">
           <div className="mb-1.5 flex justify-between font-mono text-[11px] text-white/60"><span>{j.units.done ?? 0}/{unitTotal(j)} units</span><span>{Math.round(p * 100)}%</span></div>
-          <div className="relative h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
-            <motion.div className="absolute inset-y-0 left-0 rounded-full" style={{ background: color, boxShadow: `0 0 10px ${color}` }} initial={{ width: 0 }} animate={{ width: `${p * 100}%` }} transition={{ duration: 1.1, ease: [0.16, 1, 0.3, 1] }} />
+          <div data-progress-track className="relative h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
+            <motion.div data-progress-fill className="absolute inset-y-0 left-0 rounded-full" style={{ background: color, boxShadow: `0 0 10px ${color}` }} initial={{ width: 0 }} animate={{ width: `${p * 100}%` }} transition={{ duration: 1.1, ease: [0.16, 1, 0.3, 1] }} />
             {j.status === "running" && <div className="absolute inset-0 animate-shimmer bg-[linear-gradient(90deg,transparent,rgba(255,255,255,0.35),transparent)] bg-[length:200%_100%]" />}
           </div>
         </div>

@@ -21,7 +21,7 @@ function HashRain() {
   })));
   if (reduced) return null;
   return (
-    <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden [mask-image:radial-gradient(ellipse_at_center,#000_20%,transparent_70%)]">
+    <div aria-hidden data-decorative-motion className="pointer-events-none absolute inset-0 overflow-hidden [mask-image:radial-gradient(ellipse_at_center,#000_20%,transparent_70%)]">
       {cols.map((c, i) => (
         <motion.div key={i} className="absolute top-0 font-mono text-[12px] leading-[1.15] text-mint [writing-mode:vertical-rl]"
           style={{ left: `${c.x}%`, opacity: c.o }} initial={{ y: "-100%" }} animate={{ y: "100vh" }} transition={{ duration: c.dur, delay: c.delay, repeat: Infinity, ease: "linear" }}>
@@ -52,7 +52,7 @@ export function Login() {
 
         <div className="mt-8">
           <label className="mb-1.5 block text-[12px] text-white/55">Tenant</label>
-          <div className="flex items-center rounded-xl border border-white/10 bg-white/[0.03] pr-3 focus-within:border-mint/40">
+          <div data-field className="flex items-center rounded-xl border border-[var(--control-border)] bg-white/[0.03] pr-3 focus-within:border-mint">
             <input id="tenant" aria-label="Tenant" readOnly={API_MODE === "http"} value={host} onChange={(e) => setHost(e.target.value.replace(/[^a-z0-9-]/g, ""))} className="h-11 flex-1 bg-transparent px-3.5 font-mono text-[13.5px] outline-none" />
             <span className="font-mono text-[12.5px] text-white/55">.edisc.localhost</span>
           </div>

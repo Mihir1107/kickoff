@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { AlertTriangle, CheckCircle2, Info } from "lucide-react";
 import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 
 type Kind = "ok" | "error" | "info";
 interface T { id: number; kind: Kind; title: string; body?: string }
@@ -18,7 +19,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <Ctx.Provider value={push}>
       {children}
-      <div className="pointer-events-none fixed bottom-5 right-5 z-[70] flex w-[340px] flex-col gap-2">
+      {createPortal(
+      // Outside #root so it stays announced while a modal makes the app inert.
+      <div role="status" aria-live="polite" className="pointer-events-none fixed bottom-5 right-5 z-[70] flex w-[340px] flex-col gap-2">
         <AnimatePresence>
           {items.map((t) => (
             <motion.div key={t.id} layout initial={{ opacity: 0, x: 40, scale: 0.95 }} animate={{ opacity: 1, x: 0, scale: 1 }} exit={{ opacity: 0, x: 40, scale: 0.95 }}
@@ -31,7 +34,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             </motion.div>
           ))}
         </AnimatePresence>
-      </div>
+      </div>,
+      document.body,
+      )}
     </Ctx.Provider>
   );
 }

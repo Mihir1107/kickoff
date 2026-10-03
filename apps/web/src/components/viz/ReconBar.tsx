@@ -11,10 +11,10 @@ export function ReconBar({ counts }: { counts: Record<string, number> }) {
   const parts = [...ORDER, ...Object.keys(counts).filter((k) => !(ORDER as string[]).includes(k))].filter((k) => (counts[k] ?? 0) > 0);
   return (
     <div>
-      <div className="flex h-3 overflow-hidden rounded-full bg-white/[0.05]">
+      <div data-progress-track className="flex h-3 gap-[2px] overflow-hidden rounded-full">
         {parts.map((k, i) => (
-          <motion.div key={k} initial={{ width: 0 }} animate={{ width: `${((counts[k] ?? 0) / total) * 100}%` }} transition={{ duration: 1, delay: i * 0.08, ease: [0.16, 1, 0.3, 1] }}
-            style={{ background: k === "pending" ? "rgba(255,255,255,0.12)" : toneVar[recon(k).tone], boxShadow: `0 0 14px ${toneVar[recon(k).tone]}` }} className="h-full first:rounded-l-full last:rounded-r-full" title={recon(k).label} />
+          <motion.div key={k} data-segment={k} initial={{ width: 0 }} animate={{ width: `${((counts[k] ?? 0) / total) * 100}%` }} transition={{ duration: 1, delay: i * 0.08, ease: [0.16, 1, 0.3, 1] }}
+            style={{ background: toneVar[recon(k).tone], boxShadow: `0 0 14px ${toneVar[recon(k).tone]}` }} className="h-full first:rounded-l-full last:rounded-r-full" title={recon(k).label} />
         ))}
       </div>
       <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-2.5 sm:grid-cols-4">

@@ -2,11 +2,10 @@ import { useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
 import { ArrowRight, ExternalLink, KeyRound, ShieldCheck } from "lucide-react";
 import { useRef, useState } from "react";
-import { Link } from "react-router-dom";
 import { api } from "@/api";
 import { qk } from "@/api/hooks";
 import type { ConnectionOut } from "@/api/types";
-import { Button } from "@/components/ui/Button";
+import { Button, ButtonLink } from "@/components/ui/Button";
 import { Field, Modal } from "@/components/ui/Modal";
 import { useToast } from "@/components/ui/Toast";
 import { CONNECT_OPTIONS, type SourceOption } from "@/lib/sources";
@@ -45,7 +44,7 @@ export function ConnectSourceModal({ open, onClose, clientId, reauth }: { open: 
         {choice?.method === "upload" && (
           <div className="glass-sub flex items-center justify-between gap-4 p-4 text-[12.5px] text-white/70">
             Exports become a connection once the uploaded archive is locked and validated.
-            <Link to={`/exports?client=${clientId}`} onClick={close}><Button size="sm" variant="primary">Upload export <ArrowRight className="size-3.5" /></Button></Link>
+            <ButtonLink to={`/exports?client=${clientId}`} onClick={close} size="sm" variant="primary">Upload export <ArrowRight aria-hidden className="size-3.5" /></ButtonLink>
           </div>
         )}
       </div>

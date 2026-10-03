@@ -31,8 +31,8 @@ export function Pipeline({ status, rejectStage }: { status: string; rejectStage?
               <div className="text-[10.5px] text-white/55">{s.sub}</div>
             </div>
             {i < STAGES.length - 1 && (
-              <div className="relative mt-[22px] h-[2px] flex-1 overflow-hidden rounded-full bg-white/[0.07]">
-                <motion.div className="absolute inset-y-0 left-0 bg-gradient-to-r from-mint to-cyan" initial={{ width: 0 }} animate={{ width: done ? "100%" : active ? "40%" : "0%" }} transition={{ duration: 0.9 }} />
+              <div data-progress-track className="relative mt-[22px] h-[2px] flex-1 overflow-hidden rounded-full bg-white/[0.07]">
+                <motion.div data-progress-fill className="absolute inset-y-0 left-0 bg-gradient-to-r from-mint to-cyan" initial={{ width: 0 }} animate={{ width: done ? "100%" : active ? "40%" : "0%" }} transition={{ duration: 0.9 }} />
                 {active && !rejected && <div className="absolute inset-y-0 w-1/3 animate-shimmer bg-[linear-gradient(90deg,transparent,rgba(90,216,255,0.8),transparent)] bg-[length:200%_100%]" />}
               </div>
             )}

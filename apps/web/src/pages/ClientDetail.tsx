@@ -9,7 +9,7 @@ import { SourceGlyph } from "@/components/connect/SourceGlyph";
 import { SOURCE_NAMES } from "@/lib/sources";
 import type { ConnectionOut } from "@/api/types";
 import { PageHeader, rise, stagger } from "@/components/layout/PageHeader";
-import { Button } from "@/components/ui/Button";
+import { Button, ButtonLink } from "@/components/ui/Button";
 import { Empty, Skeleton } from "@/components/ui/Empty";
 import { Glass } from "@/components/ui/Glass";
 import { Hash } from "@/components/ui/Hash";
@@ -77,7 +77,7 @@ export function ClientDetail() {
           { value: "exports", label: "Slack exports", count: exports.data?.length },
         ]} />
         {tab === "connections" && <Button size="sm" icon={<Plug className="size-3.5" />} onClick={() => setNewConn(true)}>Connect source</Button>}
-        {tab === "exports" && <Link to={`/exports?client=${id}`}><Button size="sm" icon={<FileArchive className="size-3.5" />}>Upload export</Button></Link>}
+        {tab === "exports" && <ButtonLink to={`/exports?client=${id}`} size="sm" icon={<FileArchive aria-hidden className="size-3.5" />}>Upload export</ButtonLink>}
       </div>
 
       {tab === "matters" && (

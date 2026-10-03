@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { allPages, settle } from "../support/pages";
 
 /**
  * WCAG 2.1 AA text contrast, measured on rendered pixels (the glass panels are translucent, so class
@@ -10,18 +11,6 @@ import { expect, test, type Page } from "@playwright/test";
  * Gradient display text and aria-hidden / disabled / mid-animation (opacity < 0.5) content are skipped.
  * The static check (scripts/check-contrast.mjs, `npm run lint`) uses the lightest background found here.
  */
-
-const STATIC_PAGES = ["/", "/clients", "/collections", "/exports", "/custody", "/access", "/collections/new", "/login"];
-
-async function discover(page: Page): Promise<string[]> {
-  await page.goto("/collections");
-  await page.locator('a[href^="/jobs/"]').first().waitFor();
-  const jobs = await page.$$eval('a[href^="/jobs/"]', (as) => [...new Set(as.map((a) => a.getAttribute("href")!))].slice(0, 3));
-  await page.goto("/clients");
-  await page.locator('a[href^="/clients/"]').first().waitFor();
-  const client = await page.$eval('a[href^="/clients/"]', (a) => a.getAttribute("href")!);
-  return [...STATIC_PAGES, ...jobs, client];
-}
 
 interface Finding { ratio: number; need: number; text: string; cls: string; bg: number[] }
 
@@ -43,7 +32,7 @@ async function audit(page: Page): Promise<Finding[]> {
       // Clip each line box to every scrolling/clipping ancestor: text scrolled out of a container is not
       // visible, and the pixels at its coordinates belong to something else.
       let clip = { l: 0, t: 0, r: innerWidth, b: innerHeight };
-      for (let n = el.parentElement; n; n = n.parentElement) {
+      for (let n: HTMLElement | null = el; n; n = n.parentElement) { // the element itself too: ellipsis truncation clips
         const o = getComputedStyle(n);
         if (o.overflowX !== "visible" || o.overflowY !== "visible") {
           const b = n.getBoundingClientRect();
@@ -98,12 +87,10 @@ async function audit(page: Page): Promise<Finding[]> {
 
 test("every text run meets WCAG AA contrast on every page", async ({ page }) => {
   test.setTimeout(240_000);
-  const pages = await discover(page);
+  const pages = await allPages(page);
   const failures: string[] = [];
   for (const path of pages) {
-    await page.goto(path);
-    await page.waitForLoadState("networkidle");
-    await page.waitForTimeout(3000); // entrance animations settle (opacity < 0.5 content is skipped anyway)
+    await settle(page, path);
     for (const f of await audit(page)) failures.push(`${path}: ${f.ratio}:1 < ${f.need}:1 "${f.text}" bg=rgb(${f.bg}) .${f.cls}`);
   }
   expect(failures, failures.join("\n")).toEqual([]);

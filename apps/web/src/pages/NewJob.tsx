@@ -82,7 +82,7 @@ export function NewJob() {
               <div className="grid gap-8 lg:grid-cols-2">
                 <div>
                   <div className="eyebrow mb-3">Matter</div>
-                  <div className="max-h-[340px] space-y-1.5 overflow-y-auto pr-1">
+                  <div className="-m-1.5 max-h-[340px] space-y-1.5 overflow-y-auto p-1.5">
                     {openMatters.map((m) => (
                       <button key={m.id} onClick={() => { setMatterId(m.id); setConnectionId(""); }}
                         className={clsx("flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition", matterId === m.id ? "border-mint/40 bg-mint/[0.06]" : "border-white/[0.06] bg-white/[0.02] hover:border-white/15")}>

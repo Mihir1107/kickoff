@@ -70,7 +70,7 @@ export function Custody() {
       <div className="mt-4 grid gap-4 xl:grid-cols-[320px_1fr]">
         <Glass className="p-4" spotlight={false}>
           <div className="eyebrow mb-3 px-2">Streams (one per job)</div>
-          <div className="max-h-[560px] space-y-1 overflow-y-auto">
+          <div className="-mx-1.5 max-h-[560px] space-y-1 overflow-y-auto p-1.5">{/* padding: room for focus rings inside the scroller */}
             {jobs.map((j) => (
               <button key={j.id} onClick={() => setSel(j.id)} className={clsx("relative w-full rounded-xl px-3 py-2.5 text-left transition", id === j.id ? "text-white" : "text-white/55 hover:bg-white/[0.03]")}>
                 {id === j.id && <motion.span layoutId="stream" className="absolute inset-0 rounded-xl border border-mint/25 bg-mint/[0.06]" />}
