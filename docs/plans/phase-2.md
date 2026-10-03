@@ -89,6 +89,19 @@ through the existing pipeline.
 
 ## M15: RSMF renderer (`edisc_renderers.rsmf`)
 
+**Detailed proposal: `docs/adr/0015-rsmf-renderer.md` (proposed 2026-10-03, awaiting review; no code
+yet).** It grounds the outline below in the vendored 2.0 schema and Relativity's documented headers.
+It also proposes a render custody stream of its own, since job streams are sealed.
+
+**Implementation order once approved:**
+1. Vendor the schema (BSD-3 `LICENSE`, `SOURCE.md` with commit and SHA-256) and add `jsonschema` as a
+   test and render-time validator.
+2. The pure renderer: slicing (UTC, matter time zone, DST), the 10,000-event cap with parts, mapping,
+   attachments and placeholders, the deterministic zip and EML; golden bytes.
+3. The loader from items and derivations, and storage as `production` registry rows.
+4. `RenderWorkflow`, the render custody stream, the API with recent sign-in, audited downloads.
+5. The fixture corpus (both dialects), structural EML checks, the crash matrix for renders.
+
 **ADR 0015** covers:
 
 **1. Input and slicing.**
