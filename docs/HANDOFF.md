@@ -84,8 +84,16 @@ Done:
   fragments (`edisc_custody.package_archives`).
 - **M17 backend plan** (proposed, amended after review, not implemented): docs/plans/phase-2.md.
 
+- **M14.7 crash matrix** (`tests/integration/api/test_export_crash_matrix.py`): a crash at every
+  boundary of lock and validation (10 points) and of collection from an export (4 points x 2
+  occurrences) resumes to the clean result; one real SIGKILL of the export worker process in the middle
+  of the day-file index, then a new worker. Seams: `ExportIngest(hooks=CrashHooks)`.
+
 Next, in order:
-1. **M14.7** crash matrix during ingestion, real-export fixtures when provided, docs.
+1. **Real-export fixtures** when the user sends them (Developer Program sandbox, free-plan workspace):
+   confirm every *(confirm on real export)* item in ADR 0014 and measure range reads on them.
+2. **M15** RSMF renderer (Relativity licence still to confirm).
+3. Backlog for a cloud VM: the 5 GB streaming archive run (ADR 0014 section 3) with the 1M soak.
 
 ## Gotchas learned (read before changing things)
 

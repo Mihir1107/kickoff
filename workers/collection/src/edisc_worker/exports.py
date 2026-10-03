@@ -67,6 +67,7 @@ from edisc_evidence.writer import EvidenceWriter
 from edisc_normalizer.slack import ts_datetime
 from edisc_worker.activities import _ticking
 from edisc_worker.contracts import ExportRef
+from edisc_worker.pipeline import CrashHooks
 
 log = get_logger(__name__)
 
@@ -112,9 +113,14 @@ class _Scan:
 
 class ExportIngest:
     def __init__(
-        self, sessions: async_sessionmaker[AsyncSession], s3: S3Client, settings: Settings
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        s3: S3Client,
+        settings: Settings,
+        hooks: CrashHooks | None = None,
     ) -> None:
         self.sessions, self.s3, self.settings = sessions, s3, settings
+        self.hooks = hooks or CrashHooks()  # crash-matrix seam (M14.7); no-op in production
 
     # ------------------------------------------------------------------ hash and lock
     async def lock(self, tenant_id: uuid.UUID, export_id: uuid.UUID) -> dict[str, Any]:
@@ -127,7 +133,9 @@ class ExportIngest:
         problem = await self._complete_staged_upload(tenant_id, export_id, row)
         if problem is not None:
             return await self._reopen(tenant_id, export_id, problem)
+        await self.hooks.hit("lock:after_complete")
         sha256, size = await self._hash_staged(row.staging_key)
+        await self.hooks.hit("lock:after_hash")
         if size != row.declared_size:  # the parts were checked against it: storage misbehaved
             raise ApplicationError(
                 f"staged export is {size} bytes, declared {row.declared_size}",
@@ -137,6 +145,7 @@ class ExportIngest:
         written = await EvidenceWriter(self.sessions, self.s3, self.settings).lock_staged(
             tenant_id=tenant_id, staging_key=row.staging_key, sha256=sha256, size=size
         )
+        await self.hooks.hit("lock:after_evidence")
         mismatch = row.declared_sha256 is not None and row.declared_sha256 != sha256
         detail = {"declared_sha256": row.declared_sha256, "sha256": sha256} if mismatch else None
         async with tenant_tx(self.sessions, tenant_id) as s:
@@ -166,6 +175,7 @@ class ExportIngest:
                         s, tenant_id, "export_rejected",
                         {"export_id": str(export_id), "reason": "declared_hash_mismatch", **(detail or {})},
                     )  # fmt: skip
+        await self.hooks.hit("lock:after_commit")
         await anchor_if_due(
             self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=tenant_id
         )
@@ -280,6 +290,7 @@ class ExportIngest:
             blind_spots=list(tier.blind_spots),
             range_requests=src.requests,
         )
+        await self.hooks.hit("validate:before_ready")
         connection_id = new_id()
         async with tenant_tx(self.sessions, tenant_id) as s:
             await s.execute(
@@ -312,6 +323,7 @@ class ExportIngest:
                  "entries_by_kind": dict(scan.kinds), "unknown_entries": findings["unknown_entries"]["count"],
                  "tier_warnings": list(tier.warnings)},
             )  # fmt: skip
+        await self.hooks.hit("validate:after_ready")
         await anchor_if_due(
             self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=tenant_id
         )
@@ -343,6 +355,7 @@ class ExportIngest:
                 "no channels.json, groups.json, dms.json or mpims.json at the top level",
             )
         records = await self._load_conversations(tenant_id, export_id, src, limits, scan)
+        await self.hooks.hit("validate:after_conversations")
         scan.workspace = await self._workspace(src, limits, scan)
         await self._index_day_files(tenant_id, export_id, src, limits, scan)
         return scan, tier, records
@@ -414,6 +427,7 @@ class ExportIngest:
                 await self._insert_threads(tenant_id, export_id, threads)
                 threads = []
             await self._insert_days(tenant_id, export_id, days)
+            await self.hooks.hit("validate:after_day_files")
 
     async def _index_one(
         self,
@@ -551,9 +565,11 @@ class ExportIngest:
             )  # fmt: skip
             if len(batch) >= self.settings.export_entry_batch:
                 await self._insert_entries(tenant_id, export_id, batch)
+                await self.hooks.hit("validate:after_entries_batch")
                 batch = []
         if batch:
             await self._insert_entries(tenant_id, export_id, batch)
+            await self.hooks.hit("validate:after_entries_batch")
         await self._check_overlaps(tenant_id, export_id)
         return scan
 

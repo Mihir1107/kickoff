@@ -134,8 +134,10 @@ are measured on the synthetic export and recorded in `docs/runs/`.
 - its status becomes `rejected`, with the finding recorded in the audit chain;
 - no job can use it.
 
-Tests cover each row with crafted zips, plus a 5 GB streaming archive with bounded memory and the
-SIGKILL crash matrix during ingestion.
+Tests cover each row with crafted zips and the crash matrix during ingestion (every lock, validation
+and collection boundary, plus a real SIGKILL of the export worker mid-validation; M14.7). The 5 GB
+streaming archive run is in the backlog for the cloud VM (the reader's memory bound is tested on a
+3M-entry synthetic directory and by fuzzing).
 
 ### 4. Reconciliation: `matched_against_archive`
 An export has no server-side counts. Completeness is checked against the archive itself.

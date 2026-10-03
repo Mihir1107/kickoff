@@ -54,3 +54,6 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
   for very large matters, track a per-matter "next extension due" date instead.
 - Per-tenant export upload quota (bytes in flight and stored) and a limit on concurrent export uploads
   per tenant (ADR 0014).
+- Slack exports: a 5 GB streaming archive ingestion run with memory measured (ADR 0014 section 3), on the
+  same cloud VM as the 1M soak (laptop disk too small to keep it next to the test stack). The reader's
+  bounded memory is already tested on a 3M-entry synthetic directory and by fuzzing.
