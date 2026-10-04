@@ -40,6 +40,7 @@ from ...unit.dummy.conftest import RecordingLimiter
 from ...unit.renderers.emlcheck import check_eml, custom
 from ..custody.conftest import superuser
 from ..normalizer.harness import Sessions, Tenant, new_tenant
+from .conftest import register_render
 
 SPEC = DatasetSpec(
     seed=23,
@@ -106,9 +107,11 @@ async def _render(
     sessions: Sessions, s3: S3Client, settings: Settings, t: Tenant, job_id: uuid.UUID,
     render_id: uuid.UUID | None = None, options: RenderOptions | None = None,
 ) -> RenderOutput:  # fmt: skip
+    options = options or RenderOptions()
+    render_id = await register_render(sessions, t.tenant_id, job_id, render_id or new_id(), options)
     return await render_and_store(
         sessions, s3, settings, tenant_id=t.tenant_id, job_id=job_id,
-        render_id=render_id or new_id(), options=options or RenderOptions(),
+        render_id=render_id, options=options,
     )  # fmt: skip
 
 

@@ -40,6 +40,8 @@ class Permission(StrEnum):
     JOB_READ = "job.read"
     CUSTODY_READ = "custody.read"
     EVIDENCE_READ = "evidence.read"  # returns evidence content: always audited (decision d)
+    EXPORT_CREATE = "export.create"  # create RSMF renders (ADR 0015; phase-2 decision 5)
+    EXPORT_READ = "export.read"  # download render output files: always audited
 
 
 P = Permission
@@ -71,6 +73,8 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
             P.JOB_RERUN,
             P.CUSTODY_READ,
             P.EVIDENCE_READ,
+            P.EXPORT_CREATE,
+            P.EXPORT_READ,
             *_READ_MATTER,
         }
     ),

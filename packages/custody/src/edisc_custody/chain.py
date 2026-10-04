@@ -20,6 +20,14 @@ from typing import Any
 from edisc_core.canonical import canonical_json, to_jsonable
 from edisc_core.time import format_utc
 from edisc_custody.merkle import batch_root
+from edisc_custody.render_files import (
+    RENDER_BATCH_EVENT,
+    RENDER_COMPLETED,
+    RENDER_LIFECYCLE,
+    RenderFileError,
+    batches_root,
+    files_root,
+)
 
 GENESIS_HASH = "0" * 64
 ANCHOR_FORMAT = "edisc-anchor/1"
@@ -42,6 +50,7 @@ LIFECYCLE_EVENTS = frozenset(
         "connection_revoked",
         "custodian_merged",
         "custodian_split",
+        *RENDER_LIFECYCLE,
     }
 )
 BATCH_EVENT = "items_collected"
@@ -151,6 +160,7 @@ class VerificationReport:
     head_hash: str = GENESIS_HASH
     batches_checked: int = 0
     items_checked: int = 0
+    files_checked: int = 0
     anchors_checked: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -170,6 +180,7 @@ class VerificationReport:
             "head_hash": self.head_hash,
             "batches_checked": self.batches_checked,
             "items_checked": self.items_checked,
+            "files_checked": self.files_checked,
             "anchors_checked": self.anchors_checked,
             "errors": self.errors,
         }
@@ -184,7 +195,9 @@ class ChainVerifier:
     Checks: gapless seq from 1; stream/tenant ids; prev_hash links; recomputed event hashes; every batch
     Merkle root and item count recomputed from item rows; every anchor version agrees with the event
     at its seq; no anchor points past the head; hidden anchors (delete markers) fail; a finalized
-    stream must be sealed at its head.
+    stream must be sealed at its head. Render streams (ADR 0015 §14): every ``render_files_batch`` root,
+    count, index and first ``ord`` recomputed from its file records, and ``render_completed``'s file
+    count, batch count and root over the batch roots recomputed from the batches before it.
     """
 
     def __init__(self, tenant_id: str, stream_id: str) -> None:
@@ -194,6 +207,8 @@ class ChainVerifier:
         self._anchors: dict[int, list[tuple[str, str]]] = {}
         self._anchored_ok: set[int] = set()
         self._halted = False
+        self._render_roots: list[str] = []
+        self._render_files = 0
 
     # -- anchors
     def add_anchor(self, anchor: Anchor) -> None:
@@ -224,8 +239,13 @@ class ChainVerifier:
 
     # -- events
     def add_event(
-        self, ev: EventRecord, batch_items: Iterable[tuple[str, str]] | None = None
+        self,
+        ev: EventRecord,
+        batch_items: Iterable[tuple[str, str]] | None = None,
+        files: Iterable[Mapping[str, Any]] | None = None,
     ) -> None:
+        """``batch_items``: the linked items of a collection batch; ``files``: the file records of a
+        ``render_files_batch``, in render order."""
         r = self.report
         if self._halted:
             return
@@ -250,6 +270,10 @@ class ChainVerifier:
         r.head_hash = ev.event_hash
         if ev.event_type == BATCH_EVENT:
             self._check_batch(ev, list(batch_items or ()))
+        elif ev.event_type == RENDER_BATCH_EVENT:
+            self._check_render_batch(ev, list(files or ()))
+        elif ev.event_type == RENDER_COMPLETED:
+            self._check_render_completed(ev)
         for where, anchored_hash in self._anchors.get(ev.seq, ()):
             if anchored_hash == ev.event_hash:
                 self._anchored_ok.add(ev.seq)
@@ -274,6 +298,60 @@ class ChainVerifier:
             r.fail(
                 f"seq {ev.seq}: batch Merkle root mismatch (item rows altered, added or removed)"
             )
+
+    def _check_render_batch(self, ev: EventRecord, files: list[Mapping[str, Any]]) -> None:
+        r = self.report
+        r.batches_checked += 1
+        r.files_checked += len(files)
+        payload = ev.fields.get("payload", {})
+        index = len(self._render_roots)
+        if payload.get("batch") != index:
+            r.fail(f"seq {ev.seq}: render batch {payload.get('batch')} where {index} was expected")
+        if payload.get("file_count") != len(files):
+            r.fail(
+                f"seq {ev.seq}: render batch file_count {payload.get('file_count')} != {len(files)} files"
+            )
+        if payload.get("first_ord") != self._render_files:
+            r.fail(
+                f"seq {ev.seq}: render batch starts at ord {payload.get('first_ord')}, expected"
+                f" {self._render_files} (files missing or repeated)"
+            )
+        if files and files[0].get("ord") != self._render_files:
+            r.fail(
+                f"seq {ev.seq}: first file has ord {files[0].get('ord')}, expected {self._render_files}"
+            )
+        try:
+            root = files_root(files)
+        except RenderFileError as exc:
+            r.fail(f"seq {ev.seq}: {exc}")
+            root = ""
+        if root != payload.get("merkle_root"):
+            r.fail(
+                f"seq {ev.seq}: render batch Merkle root mismatch (file records altered, added or removed)"
+            )
+        self._render_roots.append(str(payload.get("merkle_root")))
+        self._render_files += len(files)
+
+    def _check_render_completed(self, ev: EventRecord) -> None:
+        r = self.report
+        payload = ev.fields.get("payload", {})
+        if payload.get("file_count") != self._render_files:
+            r.fail(
+                f"seq {ev.seq}: render_completed counts {payload.get('file_count')} files, the batches"
+                f" hold {self._render_files}"
+            )
+        if payload.get("batch_count") != len(self._render_roots):
+            r.fail(
+                f"seq {ev.seq}: render_completed counts {payload.get('batch_count')} batches, found"
+                f" {len(self._render_roots)}"
+            )
+        try:
+            root = batches_root(self._render_roots)
+        except RenderFileError as exc:
+            r.fail(f"seq {ev.seq}: {exc}")
+            return
+        if root != payload.get("batches_root"):
+            r.fail(f"seq {ev.seq}: render_completed batches_root does not match the batch roots")
 
     # -- end
     def finish(

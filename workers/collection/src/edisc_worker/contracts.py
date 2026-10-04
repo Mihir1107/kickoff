@@ -20,10 +20,15 @@ def task_queue(source: str) -> str:
 
 MAINTENANCE_QUEUE = "maintenance"
 EXPORTS_QUEUE = "exports"  # Slack export hash-lock-validate (ADR 0014)
+RENDERS_QUEUE = "renders"  # RSMF renders of sealed jobs (ADR 0015)
 
 
 def export_workflow_id(export_id: str) -> str:
     return f"export-{export_id}"
+
+
+def render_workflow_id(render_id: str) -> str:
+    return f"render-{render_id}"
 
 
 def unit_workflow_id(job_id: str, unit_key: str) -> str:
@@ -39,6 +44,7 @@ class ErrorClass(StrEnum):
         "AuthRequired"  # every running job on the connection pauses for re-authorization
     )
     JOB_CLOSED = "JobClosed"  # the job was sealed/terminal under us: stop, nothing to record
+    RENDER_INTEGRITY = "RenderIntegrity"  # a render's inputs or outputs disagree: the render fails
     TRANSIENT = "Transient"  # retried with backoff; when exhausted the unit goes to retry_later
     UNCLASSIFIED = "Unclassified"  # retried a few times, then the unit fails with the type recorded
 
@@ -49,6 +55,7 @@ NON_RETRYABLE = frozenset(
         ErrorClass.JOB_INTEGRITY,
         ErrorClass.AUTH_REQUIRED,
         ErrorClass.JOB_CLOSED,
+        ErrorClass.RENDER_INTEGRITY,
     }
 )
 
@@ -107,6 +114,40 @@ class ExportRef:
     retry_initial_seconds: float = 1
     retry_max_seconds: float = 60
     max_attempts: int = 25
+
+
+@dataclass(frozen=True)
+class RenderRef:
+    """One render (ADR 0015 §14). The render id is the workflow's whole identity: a retry or a re-run
+    after a crash renders the same id, so it reproduces (and dedups against) the same stored bytes."""
+
+    tenant_id: str
+    render_id: str
+    heartbeat_timeout_seconds: float = 60
+    retry_initial_seconds: float = 1
+    retry_max_seconds: float = 60
+    max_attempts: int = 25
+    control_timeout_seconds: float = 300
+    render_timeout_seconds: float = 43_200
+
+    @classmethod
+    def from_settings(cls, tenant_id: str, render_id: str, settings: Settings) -> RenderRef:
+        return cls(
+            tenant_id=tenant_id,
+            render_id=render_id,
+            heartbeat_timeout_seconds=settings.activity_heartbeat_timeout_seconds,
+            retry_initial_seconds=settings.activity_retry_initial_seconds,
+            retry_max_seconds=settings.activity_retry_max_seconds,
+            max_attempts=settings.activity_max_attempts,
+            render_timeout_seconds=settings.render_start_to_close_seconds,
+        )
+
+
+@dataclass(frozen=True)
+class RenderFailure:
+    render: RenderRef
+    error_type: str
+    error: str
 
 
 @dataclass(frozen=True)

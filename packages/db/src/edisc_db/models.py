@@ -260,7 +260,9 @@ class EvidenceObject(Base):
             ["tenant_id", "archive_evidence_id"],
             ["evidence_objects.tenant_id", "evidence_objects.id"],
         ),
+        ForeignKeyConstraint(["tenant_id", "render_id"], ["renders.tenant_id", "renders.id"]),
         Index(None, "job_id", "state"),
+        Index(None, "render_id", postgresql_where=text("render_id IS NOT NULL")),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
@@ -283,6 +285,7 @@ class EvidenceObject(Base):
     entry_raw_name: Mapped[bytes | None] = mapped_column(LargeBinary)
     entry_crc32: Mapped[int | None] = mapped_column(BigInteger)
     entry_compressed_size: Mapped[int | None] = mapped_column(BigInteger)
+    render_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
 
 
 class CustodyEvent(Base):
@@ -294,6 +297,7 @@ class CustodyEvent(Base):
         ForeignKeyConstraint(
             ["tenant_id", "job_id"], ["collection_jobs.tenant_id", "collection_jobs.id"]
         ),
+        ForeignKeyConstraint(["tenant_id", "render_id"], ["renders.tenant_id", "renders.id"]),
         Index(None, "job_id"),
     )
 
@@ -309,6 +313,7 @@ class CustodyEvent(Base):
     prev_hash: Mapped[str] = mapped_column(Text)
     event_hash: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZ)
+    render_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
 
 
 class CustodyChainHead(Base):
@@ -577,6 +582,7 @@ class ApiIdempotency(Base):
         ForeignKeyConstraint(
             ["tenant_id", "job_id"], ["collection_jobs.tenant_id", "collection_jobs.id"]
         ),
+        ForeignKeyConstraint(["tenant_id", "render_id"], ["renders.tenant_id", "renders.id"]),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
@@ -585,6 +591,7 @@ class ApiIdempotency(Base):
     request_hash: Mapped[str] = mapped_column(Text)
     job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    render_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
 
 
 class WorkUnitScope(Base):
@@ -768,3 +775,92 @@ class ExportThread(Base):
     conversation_id: Mapped[str] = mapped_column(Text)
     thread_ts: Mapped[str] = mapped_column(Text)
     ts: Mapped[str] = mapped_column(Text)
+
+
+class Render(Base):
+    __tablename__ = "renders"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "job_id"], ["collection_jobs.tenant_id", "collection_jobs.id"]
+        ),
+        ForeignKeyConstraint(["tenant_id", "matter_id"], ["matters.tenant_id", "matters.id"]),
+        Index(None, "tenant_id", "job_id"),
+        Index(
+            "uq_renders_identity",
+            "tenant_id",
+            "job_id",
+            "options_hash",
+            "renderer_version",
+            "unicode_version",
+            "tzdata_version",
+            unique=True,
+            postgresql_where=text("status NOT IN ('failed', 'refused')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    job_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    matter_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    options: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    options_hash: Mapped[str] = mapped_column(Text)
+    renderer_version: Mapped[str] = mapped_column(Text)
+    unicode_version: Mapped[str] = mapped_column(Text)
+    tzdata_version: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'requested'"))
+    reason: Mapped[str | None] = mapped_column(Text)
+    detail: Mapped[str | None] = mapped_column(Text)
+    requested_by: Mapped[str] = mapped_column(Text)
+    request_id: Mapped[str | None] = mapped_column(Text)
+    idempotency_key: Mapped[str | None] = mapped_column(Text)
+    job_head_seq: Mapped[int | None] = mapped_column(BigInteger)
+    job_head_hash: Mapped[str | None] = mapped_column(Text)
+    job_seal_key: Mapped[str | None] = mapped_column(Text)
+    job_seal_version: Mapped[str | None] = mapped_column(Text)
+    batches_done: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    files_done: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+    file_count: Mapped[int | None] = mapped_column(BigInteger)
+    batches_root: Mapped[str | None] = mapped_column(Text)
+    summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    head_seq: Mapped[int | None] = mapped_column(BigInteger)
+    head_hash: Mapped[str | None] = mapped_column(Text)
+    seal_storage_key: Mapped[str | None] = mapped_column(Text)
+    seal_version_id: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    updated_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    started_at: Mapped[datetime | None] = mapped_column(TZ)
+    finished_at: Mapped[datetime | None] = mapped_column(TZ)
+    sealed_at: Mapped[datetime | None] = mapped_column(TZ)
+
+
+class RenderFile(Base):
+    __tablename__ = "render_files"
+    __table_args__ = (
+        UniqueConstraint("render_id", "name"),
+        ForeignKeyConstraint(["tenant_id", "render_id"], ["renders.tenant_id", "renders.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "evidence_object_id"],
+            ["evidence_objects.tenant_id", "evidence_objects.id"],
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "custody_event_id"],
+            ["custody_events.tenant_id", "custody_events.id"],
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        Index(None, "custody_event_id"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    render_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    ord: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(Text)
+    evidence_object_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    version_id: Mapped[str] = mapped_column(Text)
+    sha256: Mapped[str] = mapped_column(Text)
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    record: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    custody_event_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)

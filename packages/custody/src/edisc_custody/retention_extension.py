@@ -4,8 +4,9 @@ Objects are written with a short rolling COMPLIANCE window. This job pushes it f
 floor/target rule as dedup hits (``extension_needed``):
 
 - **Matter evidence:** every complete object referenced by an ACTIVE matter (not closed, retention date
-  not passed): its jobs' own objects (pages, files, seals, anchors) and every object behind an item one of
-  its jobs linked (dedup across matters). An archive entry is protected through its locked archive. Target: ``min(now + window, latest retention_until of the active
+  not passed): its jobs' own objects (pages, files, seals, anchors), every object behind an item one of
+  its jobs linked (dedup across matters), and its renders' objects (productions and the anchors of each
+  render's own custody stream, found by ``render_id``: render -> job -> matter). An archive entry is protected through its locked archive. Target: ``min(now + window, latest retention_until of the active
   matters referencing it)``.
 - **Client-level evidence:** validated (``ready``) Slack exports while their client is ACTIVE (not
   closed). They belong to no matter until a job uses them. Target: ``now + window``.
@@ -54,7 +55,12 @@ MATTER_CANDIDATES = (
     "  UNION ALL"
     "  SELECT i.evidence_object_id, m.id, m.retention_until FROM active m"
     "   JOIN collection_jobs j ON j.matter_id = m.id JOIN job_items ji ON ji.job_id = j.id"
-    "   JOIN items i ON i.id = ji.item_id),"
+    "   JOIN items i ON i.id = ji.item_id"
+    # a render's objects (its productions and its own stream's anchors): render -> job -> matter
+    "  UNION ALL"
+    "  SELECT e.id, m.id, m.retention_until FROM active m"
+    "   JOIN collection_jobs j ON j.matter_id = m.id JOIN renders r ON r.job_id = j.id"
+    "   JOIN evidence_objects e ON e.render_id = r.id),"
     # an archive entry is protected by locking its archive (the entry is never an object of its own)
     " owned AS (SELECT coalesce(x.archive_evidence_id, x.id) AS id, r.matter_id, r.retention_until"
     "  FROM refs r JOIN evidence_objects x ON x.id = r.id)"

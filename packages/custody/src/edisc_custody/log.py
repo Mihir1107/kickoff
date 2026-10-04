@@ -48,6 +48,7 @@ from edisc_custody.chain import (
     hashed_fields,
 )
 from edisc_custody.merkle import batch_root
+from edisc_custody.render_files import RENDER_BATCH_EVENT
 from edisc_db.session import tenant_tx
 from edisc_evidence.retention import effective_retain_until
 from edisc_evidence.worm import get_bytes, list_versions, put_immutable
@@ -75,8 +76,12 @@ async def append(
     anchor_every: int = 8,
     created_at: datetime | None = None,
     event_id: uuid.UUID | None = None,
+    render_id: uuid.UUID | None = None,
 ) -> AppendedEvent:
-    """Append one event to ``stream_id`` inside the caller's (tenant-scoped) transaction."""
+    """Append one event to ``stream_id`` inside the caller's (tenant-scoped) transaction.
+
+    ``render_id``: set on every event of a render's own stream (stream id = render id, job_id NULL;
+    a database check enforces both)."""
     created = ensure_utc(created_at) if created_at else utc_now()
     await session.execute(
         text(
@@ -111,8 +116,8 @@ async def append(
     await session.execute(
         text(
             "INSERT INTO custody_events (id, tenant_id, stream_id, job_id, seq, event_type, actor, item_id,"
-            " payload, prev_hash, event_hash, created_at) VALUES (:id, :t, :s, :j, :seq, :et, :actor, :item,"
-            " CAST(:payload AS jsonb), :prev, :hash, :created)"
+            " payload, prev_hash, event_hash, created_at, render_id) VALUES (:id, :t, :s, :j, :seq, :et,"
+            " :actor, :item, CAST(:payload AS jsonb), :prev, :hash, :created, :render)"
         ),
         {
             "id": event_id,
@@ -127,6 +132,7 @@ async def append(
             "prev": head.last_hash,
             "hash": event_hash,
             "created": created,
+            "render": render_id,
         },
     )
     due = bool(
@@ -187,7 +193,10 @@ async def append_batch(
 # ------------------------------------------------------------------ anchoring
 async def _anchor_retain_until(
     session: AsyncSession, settings: Settings, stream_id: uuid.UUID
-) -> tuple[datetime, uuid.UUID | None]:
+) -> tuple[datetime, uuid.UUID | None, uuid.UUID | None]:
+    """(retain until, job id, render id) for an anchor of ``stream_id``: a job stream belongs to its
+    job's matter; a render stream to its render, whose job's matter owns the retention (render ->
+    job -> matter); the tenant stream has the rolling window only."""
     row = (
         await session.execute(
             text(
@@ -198,8 +207,20 @@ async def _anchor_retain_until(
         )
     ).first()
     if row is not None:
-        return effective_retain_until(settings, row.retention_until), row.job_id
-    return effective_retain_until(settings), None  # tenant stream: rolling window only
+        return effective_retain_until(settings, row.retention_until), row.job_id, None
+    render = (
+        await session.execute(
+            text(
+                "SELECT r.id, m.retention_until FROM renders r"
+                " JOIN collection_jobs j ON j.tenant_id = r.tenant_id AND j.id = r.job_id"
+                " JOIN matters m ON m.tenant_id = j.tenant_id AND m.id = j.matter_id WHERE r.id = :s"
+            ),
+            {"s": stream_id},
+        )
+    ).first()
+    if render is not None:
+        return effective_retain_until(settings, render.retention_until), None, render.id
+    return effective_retain_until(settings), None, None  # tenant stream: rolling window only
 
 
 async def anchor_if_due(
@@ -292,7 +313,9 @@ async def _anchor_once(
                     {"s": stream_id, "q": seq},
                 )
             ).scalar_one()
-            retain_until, job_id = await _anchor_retain_until(session, settings, stream_id)
+            retain_until, job_id, render_id = await _anchor_retain_until(
+                session, settings, stream_id
+            )
             key = anchor_key(str(tenant_id), str(stream_id), seq)
             body = anchor_document(
                 tenant_id=str(tenant_id), stream_id=str(stream_id), seq=seq, event_hash=head_hash
@@ -300,14 +323,16 @@ async def _anchor_once(
             # the anchor's hash is known before the object exists: persisted with the row (provenance)
             await session.execute(
                 text(
-                    "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind, retain_until,"
-                    " source_sha256, source_hash_origin)"
-                    " VALUES (:id, :t, :j, :k, 'anchor', :r, :h, 'collection') ON CONFLICT (storage_key) DO NOTHING"
+                    "INSERT INTO evidence_objects (id, tenant_id, job_id, render_id, storage_key, kind,"
+                    " retain_until, source_sha256, source_hash_origin)"
+                    " VALUES (:id, :t, :j, :rid, :k, 'anchor', :r, :h, 'collection')"
+                    " ON CONFLICT (storage_key) DO NOTHING"
                 ),
                 {
                     "id": new_id(),
                     "t": tenant_id,
                     "j": job_id,
+                    "rid": render_id,
                     "k": key,
                     "r": retain_until,
                     "h": hashlib.sha256(body).hexdigest(),
@@ -454,7 +479,8 @@ async def verify_chain(
     require_seal: bool | None = None,
     page_size: int = 500,
 ) -> VerificationReport:
-    """Full verification of one stream. ``require_seal`` defaults to "the job has finished"."""
+    """Full verification of one stream (a job's, a render's or the tenant's). ``require_seal``
+    defaults to "the job (or render) has finished"."""
     verifier = ChainVerifier(str(tenant_id), str(stream_id))
     await load_anchors(s3, settings, verifier, tenant_id=str(tenant_id), stream_id=str(stream_id))
 
@@ -467,7 +493,10 @@ async def verify_chain(
         ).first()
         finished = (
             await session.execute(
-                text("SELECT finished_at IS NOT NULL FROM collection_jobs WHERE id = :s"),
+                text(
+                    "SELECT coalesce((SELECT finished_at IS NOT NULL FROM collection_jobs WHERE id = :s),"
+                    " (SELECT finished_at IS NOT NULL FROM renders WHERE id = :s))"
+                ),
                 {"s": stream_id},
             )
         ).scalar()
@@ -498,8 +527,29 @@ async def verify_chain(
                 )
                 for link in linked:
                     items[link.custody_event_id].append((link.idempotency_key, link.content_hash))
+            file_batches = [r.id for r in rows if r.event_type == RENDER_BATCH_EVENT]
+            files: dict[uuid.UUID, list[dict[str, Any]]] = {i: [] for i in file_batches}
+            if file_batches:
+                stored = await session.execute(
+                    text(
+                        "SELECT custody_event_id, ord, name, version_id, sha256, size_bytes, record"
+                        " FROM render_files WHERE custody_event_id = ANY(:ids) ORDER BY ord"
+                    ),
+                    {"ids": file_batches},
+                )
+                for f in stored:
+                    rec = dict(f.record)
+                    columns = (f.ord, f.name, f.version_id, f.sha256, f.size_bytes)
+                    recorded = tuple(
+                        rec.get(k) for k in ("ord", "name", "version_id", "sha256", "size")
+                    )
+                    if columns != recorded:
+                        verifier.report.fail(
+                            f"render file {f.ord}: columns {columns} disagree with its record {recorded}"
+                        )
+                    files[f.custody_event_id].append(rec)
             for row in rows:
-                verifier.add_event(event_record_from_row(row), items.get(row.id))
+                verifier.add_event(event_record_from_row(row), items.get(row.id), files.get(row.id))
             after = rows[-1].seq
     expected_head = (head.last_seq, head.last_hash) if head is not None else None
     seal = bool(finished) if require_seal is None else require_seal

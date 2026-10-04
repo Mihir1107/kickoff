@@ -250,11 +250,15 @@ def _request_hash(matter_id: uuid.UUID, body: BaseModel | None, action: str) -> 
 
 
 async def _claim_key(
-    s: AsyncSession, caller: Caller, key: str, request_hash: str
+    s: AsyncSession,
+    caller: Caller,
+    key: str,
+    request_hash: str,
+    target: Literal["job_id", "render_id"] = "job_id",
 ) -> uuid.UUID | None:
-    """Claim an Idempotency-Key inside the caller's transaction. Returns the job of an earlier request
-    with the same key and body (replay), None when this request owns the key. A concurrent duplicate
-    blocks on the unique key until the first commits, then replays its job."""
+    """Claim an Idempotency-Key inside the caller's transaction. Returns the job (or render) of an
+    earlier request with the same key and body (replay), None when this request owns the key. A
+    concurrent duplicate blocks on the unique key until the first commits, then replays its result."""
     inserted = (
         await s.execute(
             text(
@@ -268,15 +272,16 @@ async def _claim_key(
         return None
     row = (
         await s.execute(
-            text("SELECT request_hash, job_id FROM api_idempotency WHERE key = :k"), {"k": key}
+            text("SELECT request_hash, job_id, render_id FROM api_idempotency WHERE key = :k"),
+            {"k": key},
         )
     ).one()
     if row.request_hash != request_hash:
         raise unprocessable("Idempotency-Key was already used with a different request")
-    if row.job_id is None:  # cannot happen: the key and its job commit together
+    found: uuid.UUID | None = getattr(row, target)
+    if found is None:  # cannot happen: the key and its result commit together
         raise conflict("the original request with this Idempotency-Key did not complete")
-    job_id: uuid.UUID = row.job_id
-    return job_id
+    return found
 
 
 async def _ensure_workflow(
@@ -663,7 +668,8 @@ async def evidence_content(
                 {"e": evidence_id},
             )
         ).one_or_none()
-        if row is None or row.matter_id is None:
+        # render outputs are reachable only through the render endpoints (export.read), never here
+        if row is None or row.matter_id is None or row.kind == "production":
             raise not_found()
         await authorize(s, caller, P.EVIDENCE_READ, Scope("matter", row.matter_id))
         await audit.record(

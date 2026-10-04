@@ -19,6 +19,7 @@ from edisc_renderers.rsmf import RenderOptions
 from edisc_worker.render_store import render_and_store
 
 from ...unit.renderers.emlcheck import check_eml, custom
+from ..renders.conftest import register_render
 from ..renders.test_render_store import _read
 from .conftest import Api, FileHost, TenantCtx, collection_workers
 from .test_export_collection import SPEC, _export_connection, _job, _scope
@@ -40,9 +41,11 @@ async def test_an_export_job_renders_from_archive_entries(api: Api, tenant: Tena
                 {"connection_id": export["connection_id"], "scopes": [_scope(start, 3)]},
             )
         job_id = uuid.UUID(job["id"])
+        options = RenderOptions(time_zone="America/New_York")
+        render_id = await register_render(exp.sessions, tenant.tenant_id, job_id, new_id(), options)
         out = await render_and_store(
             exp.sessions, exp.s3, exp.settings, tenant_id=tenant.tenant_id, job_id=job_id,
-            render_id=new_id(), options=RenderOptions(time_zone="America/New_York"),
+            render_id=render_id, options=options,
         )  # fmt: skip
 
     async with tenant_tx(exp.sessions, tenant.tenant_id) as s:

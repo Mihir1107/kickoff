@@ -11,12 +11,15 @@ Two passes over the job:
    a mismatch aborts that upload, and no object is created.
 
 Pages verified in pass 1 are not read again in pass 2 (the loader remembers them for the render).
-Custody (the render's own stream) and the workflow are step 4.
+The render's custody stream and workflow (step 4) are in `edisc_worker.renders`: it passes `on_stored`,
+which receives every stored file in render order, so files are committed in bounded batches and never
+all held in memory.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,6 +41,7 @@ from edisc_worker.render_loader import LoadedJob, RenderLoader
 
 @dataclass(frozen=True)
 class StoredFile:
+    ord: int  # position in the render (deterministic: the same inputs give the same order)
     name: str
     evidence_id: uuid.UUID
     storage_key: str
@@ -53,7 +57,8 @@ class RenderOutput:
     render_id: uuid.UUID
     job: LoadedJob
     options: RenderOptions
-    files: tuple[StoredFile, ...]
+    files: tuple[StoredFile, ...]  # empty when the files went to ``on_stored``
+    file_count: int
     reconciliation: Reconciliation
     verified_objects: int  # pages and archive entries read by pinned version and verified
 
@@ -71,6 +76,7 @@ async def render_and_store(
     job_id: uuid.UUID,
     render_id: uuid.UUID,
     options: RenderOptions,
+    on_stored: Callable[[StoredFile], Awaitable[None]] | None = None,
 ) -> RenderOutput:
     loader = RenderLoader(
         sessions, s3, settings, tenant_id=tenant_id, job_id=job_id, options=options
@@ -90,9 +96,10 @@ async def render_and_store(
     writer = EvidenceWriter(sessions, s3, settings)
     opener = loader.opener()
     stored: list[StoredFile] = []
+    count = 0
     async for inp in loader.slices():
         for f in render_slice(inp, options):
-            index = len(stored)
+            index = count
             if index >= len(planned) or _plan_key(f) != planned[index]:
                 raise ReconciliationError(f"{f.name}: the second pass differs from the plan")
             written = await writer.write_production(
@@ -103,18 +110,24 @@ async def render_and_store(
                 matter_retention_until=job.matter_retention_until,
                 stream=lambda f=f: f.astream(opener),  # type: ignore[misc]
             )
-            stored.append(
-                StoredFile(
-                    name=f.name,
-                    evidence_id=written.evidence_id,
-                    storage_key=written.storage_key,
-                    version_id=written.version_id,
-                    sha256=written.sha256,
-                    size=written.size,
-                    record=f.record(),
-                    deduplicated=written.deduplicated,
-                )
+            one = StoredFile(
+                ord=index,
+                name=f.name,
+                evidence_id=written.evidence_id,
+                storage_key=written.storage_key,
+                version_id=written.version_id,
+                sha256=written.sha256,
+                size=written.size,
+                record=f.record(),
+                deduplicated=written.deduplicated,
             )
-    if len(stored) != len(planned):
-        raise ReconciliationError(f"planned {len(planned)} files, wrote {len(stored)}")
-    return RenderOutput(render_id, job, options, tuple(stored), summary, loader.verified_objects)
+            count += 1
+            if on_stored is None:
+                stored.append(one)
+            else:
+                await on_stored(one)
+    if count != len(planned):
+        raise ReconciliationError(f"planned {len(planned)} files, wrote {count}")
+    return RenderOutput(
+        render_id, job, options, tuple(stored), count, summary, loader.verified_objects
+    )

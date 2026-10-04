@@ -1,7 +1,8 @@
 # ADR 0015: RSMF renderer (`edisc_renderers.rsmf`)
 
 Status: **Accepted** (2026-10-03) with the review decisions below (§9). Steps 1–3 implemented and
-approved (§10, §12 with the 2026-10-04 decisions in §13); steps 4–5 not yet (M15). Implements M15 of
+approved (§10, §12 with the 2026-10-04 decisions in §13); step 4 implemented (§14, for review); step 5
+not yet (M15). Implements M15 of
 `docs/plans/phase-2.md` and decisions 5 and 4 there: renders by `matter_manager` and `tenant_admin` only
 (`export.create`), audited; Relativity's validator stays out until the licence question is answered.
 
@@ -171,9 +172,10 @@ stream.
     - the job's status and completeness basis;
     - the renderer version and the render options (`include_context`, time zone, cap).
   - The render refuses to start unless the job is sealed and its chain verifies up to that head.
-  - Then one `rsmf_rendered` event per file: name, slice, part, SHA-256, size, source hash, event count,
-    context event count.
-  - Then `render_finished` and a seal, anchored to WORM like a job chain.
+  - Then the files in bounded `render_files_batch` events, each with a Merkle root over its files
+    (*amended 2026-10-04, replacing one `rsmf_rendered` event per file; §14*).
+  - Then `render_completed` (file count, reconciliation summary, root over the batch roots) and a seal,
+    anchored to WORM like a job chain.
   - The tenant audit stream records who asked for it (`audit.render_requested`: actor, job, options),
     and when it ends, the render's final head (`audit.render_completed`).
 - **API:**
@@ -400,3 +402,75 @@ Code: `edisc_worker.render_loader` (loader), `edisc_worker.render_store` (orches
 
 These change the output bytes: `RENDERER_VERSION` 1.1.0, goldens in
 `tests/golden/rsmf/1.1.0_unicode-15.0.0_tzdata-2026e/`. The 1.0.0 generation stays as history.
+
+## 14. Step 4: render workflow, render custody stream, API (2026-10-05, for review)
+Implements the step 4 plan approved 2026-10-04 with its four decisions. Code: `edisc_worker.renders`
+(the lifecycle and activities), `RenderWorkflow` (`edisc_worker.workflows`, queue `renders`, id
+`render-{render_id}`), `edisc_api.routes.renders`, `edisc_custody.render_files` / `render_package` /
+`render_export`, migration 0026. Tests: `tests/integration/renders/test_render_workflow.py`,
+`tests/integration/api/test_renders.py`, `tests/integration/custody/test_render_package.py`,
+`tests/unit/custody/test_render_files.py`; Temporal goldens `render-clean`, `render-failed`.
+
+1. **Records:** `renders` (status `requested -> rendering -> rendered -> completed`, or `refused` /
+   `failed`; final states never change except the seal, recorded once; a guard trigger enforces the
+   transitions and the immutable identity and job reference) and `render_files` (insert-only, one row
+   per output file, tied to its batch event by a deferred FK, like `job_items`).
+2. **Identity and deduplication (decision 2):** (job, options hash, renderer, Unicode and tzdata
+   versions). A partial unique index allows one live render per identity; failed and refused renders
+   do not count. Concurrent identical requests: `INSERT ... ON CONFLICT DO NOTHING`, then read the
+   winner. The API answers 201 when it created the render (or replays the key that did), 200 when it
+   returned the live one. `audit.render_requested` records every request (with `created`); a key
+   replay is the same request and is not recorded again.
+3. **The render's custody stream (stream id = render id):** every event has `render_id` set and
+   `job_id` NULL (a check constraint: `render_id = stream_id`, which the event hash covers; a sealed
+   job's chain is never appended to). Events:
+   - `render_started`: render id, versions, options and options hash, requester, and `job`: id,
+     status, completeness basis, final head (seq, hash) and seal anchor (key, VersionId). Before it,
+     the job must be sealed, its matter and client open, its chain verify up to that head with the
+     seal required, and the seal key be exactly one object version (listed from S3, never the DB)
+     whose body anchors that head. Otherwise `render_refused` (reason `job_not_sealed`,
+     `matter_closed`, `client_closed`, `chain_verification_failed`, `seal_mismatch`) is the only event.
+   - `render_files_batch` (decision 1): at most `EDISC_RENDER_FILES_BATCH_SIZE` (500) files: batch
+     index, first ord, file count and the RFC 6962 root over the files' records in render order
+     (leaf = canonical JSON of name, slice, part, VersionId, SHA-256, size, source hash, counts;
+     `render_files.FILE_FIELDS`).
+   - `render_completed`: file count, batch count, the root over the batch roots, the reconciliation
+     summary and the number of verified objects.
+   - `render_failed`: the error class and text, the status it failed from, progress so far; an alert.
+   - Then the seal: a forced anchor of the final head, recorded on the render together with the tenant
+     audit event (`audit.render_completed` / `.render_refused` / `.render_failed`) in one transaction.
+   - Render lifecycle events trigger anchors like job lifecycle events.
+4. **Resumability:** each activity acts only from the status it starts from and moves the status in
+   the same transaction as its event (the status is the fence, not a value that can repeat; see the
+   ABA fix in ADR 0006). A batch is committed only when `batches_done` equals its index; a batch an
+   earlier attempt committed must re-render to exactly the recorded records, or the render fails as
+   an integrity incident. The render id sets the storage keys, never the bytes, so a retry dedups
+   against the stored objects. Crash tests at every boundary and a real SIGKILL of the worker process
+   end with the same files as an independent in-memory rendering.
+5. **Failures:** integrity errors (render inputs, evidence, reconciliation, renderer, file records)
+   are class `RenderIntegrity` (non-retryable); anything that fails for good leads to `fail_render`,
+   which is retried without limit: a render never ends without a sealed record. A worker whose
+   renderer, Unicode or tzdata version differs from the render's identity refuses to render it (an
+   integrity failure, so the render fails and a new request renders on the current versions): bytes
+   are only promised for the versions the render records.
+6. **Retention:** render anchors carry the render id (`evidence_objects.render_id`, job id NULL), as
+   do productions (which also keep the job id). Anchor retention and the retention extension resolve
+   render -> job -> matter.
+7. **API (decisions 3, 4):** `POST /v1/jobs/{id}/renders` (`export.create`), `GET /v1/jobs/{id}/renders`,
+   `GET /v1/renders/{id}`, `GET /v1/renders/{id}/files`, `GET /v1/renders/{id}/custody/verify`
+   (`custody.read`: auditors see status and custody), `GET /v1/renders/{id}/files/{ord}/content`
+   (`export.read`, completed renders only; audited and anchored before any byte; re-hashed while
+   streaming, a mismatch aborts and raises an alert). `export.create` and `export.read` belong to
+   matter managers (and tenant admins); reviewers, collectors, auditors and client admins have
+   neither. The generic `/v1/evidence/{id}/content` never serves a `production`.
+   Recent sign-in: `edisc_api.auth.require_recent_sign_in(caller)` is called in the create route
+   before any change; it does nothing until the M17 sessions exist (ADR 0016 §4 now lists render
+   creation).
+8. **`edisc-verify` render packages** (`edisc-render-package/1`, exported by
+   `export_render_package`): the render chain with every batch root and the completed totals, the
+   start of the stream and its reference to the job seal (included as read from WORM, which must
+   anchor exactly the referenced head), every output file's SHA-256 and size (embedded, or supplied
+   with `--file`), nothing unlisted in `outputs/`; with `--job-package`, the job's custody package is
+   verified too and must hold the referenced head and seal.
+9. **Not in step 4:** the full render crash matrix and fixture corpus (step 5); oversized attachments
+   as external natives (§11); a package download endpoint (the exporter is a library function).

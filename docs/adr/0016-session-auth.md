@@ -80,6 +80,8 @@ cookies, CSRF, revocation, no tokens in the browser). It fixes the details the f
   - role assignment and group membership changes;
   - session revocation;
   - submitting or replacing an internal-app token.
+  - creating an RSMF render (ADR 0015 §14; the check is `edisc_api.auth.require_recent_sign_in`, a
+    no-op until these sessions exist).
 - They require `authenticated_at` within `EDISC_API_REAUTH_MAX_AGE_SECONDS` (default 600). Otherwise the
   API answers 401 `reauth_required` and the UI navigates to `/v1/auth/login?reauth=1&return_to=<here>`.
 - Bearer callers are judged on their token's `auth_time` where the IdP provides it, else on `iat`.

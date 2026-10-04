@@ -103,6 +103,7 @@ implemented).** It supersedes the outline below where they differ:
    attachments and placeholders, the deterministic zip and EML; golden bytes.
 3. The loader from items and derivations, and storage as `production` registry rows.
 4. `RenderWorkflow`, the render custody stream, the API with recent sign-in, audited downloads.
+   *(Done 2026-10-05, for review: ADR 0015 §14.)*
 5. The fixture corpus (both dialects), structural EML checks, the crash matrix for renders.
 
 **ADR 0015** covers:

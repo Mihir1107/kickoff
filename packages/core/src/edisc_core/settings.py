@@ -217,6 +217,15 @@ class Settings(BaseSettings):
         default=1800, gt=0, description="time box + one batch + margin (ADR 0012 section 4)"
     )
     activity_heartbeat_timeout_seconds: float = Field(default=60, gt=0)
+    render_files_batch_size: int = Field(
+        default=500,
+        ge=1,
+        le=10_000,
+        description="render output files per render_files_batch custody event (ADR 0015 §14)",
+    )
+    render_start_to_close_seconds: float = Field(
+        default=43_200, gt=0, description="the longest one render_files activity may run"
+    )
     unclassified_max_attempts: int = Field(
         default=3, ge=1, description="attempts for errors no class recognises, then the unit fails"
     )

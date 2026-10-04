@@ -4,6 +4,7 @@ One Temporal worker per source, on task queue ``collect-{source}``, sharing one 
 Redis limiter. At startup, journaled token refreshes are reconciled (ADR 0009) before any activity runs.
 ``--maintenance`` also runs the ``maintenance`` queue (sweepers) and creates/updates their schedules.
 ``--exports`` also runs the ``exports`` queue: hash, lock and validate uploaded Slack exports (ADR 0014).
+``--renders`` also runs the ``renders`` queue: RSMF renders of sealed jobs (ADR 0015).
 """
 
 from __future__ import annotations
@@ -35,14 +36,16 @@ from edisc_db.connection_tokens import reconcile_token_refreshes
 from edisc_db.session import create_engine, session_factory
 from edisc_evidence.s3 import s3_client
 from edisc_worker.activities import Activities
-from edisc_worker.contracts import EXPORTS_QUEUE, MAINTENANCE_QUEUE, task_queue
+from edisc_worker.contracts import EXPORTS_QUEUE, MAINTENANCE_QUEUE, RENDERS_QUEUE, task_queue
 from edisc_worker.exports import ExportActivities
 from edisc_worker.maintenance import MaintenanceActivities, ensure_schedules
+from edisc_worker.renders import RenderActivities
 from edisc_worker.workflows import (
     CollectionJobWorkflow,
     CollectUnitWorkflow,
     ExportIngestWorkflow,
     MaintenanceWorkflow,
+    RenderWorkflow,
     TenantRetentionWorkflow,
 )
 
@@ -103,7 +106,13 @@ async def activities_for(
 
 
 async def run(
-    sources: Sequence[str], *, maintenance: bool, exports: bool = False, queue: str | None = None
+    sources: Sequence[str],
+    *,
+    maintenance: bool,
+    exports: bool = False,
+    renders: bool = False,
+    queue: str | None = None,
+    renders_queue: str = RENDERS_QUEUE,
 ) -> None:
     settings = Settings()
     client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
@@ -137,6 +146,15 @@ async def run(
                     activities=ExportActivities(acts.sessions, acts.s3, settings).all(),
                 )
             )
+        if renders:
+            workers.append(
+                Worker(
+                    client,
+                    task_queue=renders_queue,
+                    workflows=[RenderWorkflow],
+                    activities=RenderActivities(acts.sessions, acts.s3, settings).all(),
+                )
+            )
         log.info("worker started", task_queues=[w.task_queue for w in workers])
         await asyncio.gather(*(w.run() for w in workers))
 
@@ -146,13 +164,24 @@ def main() -> None:
     ap.add_argument("--source", action="append", dest="sources", help="repeatable; default dummy")
     ap.add_argument("--maintenance", action="store_true", help="also run sweepers and schedules")
     ap.add_argument("--exports", action="store_true", help="also hash, lock and validate exports")
+    ap.add_argument("--renders", action="store_true", help="also run RSMF renders")
     ap.add_argument("--queue", help="task queue override (one source only; tests and soak runs)")
+    ap.add_argument("--renders-queue", default=RENDERS_QUEUE, help="renders queue override (tests)")
     args = ap.parse_args()
     sources = args.sources or ["dummy"]
     if args.queue and len(sources) != 1:
         ap.error("--queue needs exactly one --source")
     configure_logging()
-    asyncio.run(run(sources, maintenance=args.maintenance, exports=args.exports, queue=args.queue))
+    asyncio.run(
+        run(
+            sources,
+            maintenance=args.maintenance,
+            exports=args.exports,
+            renders=args.renders,
+            queue=args.queue,
+            renders_queue=args.renders_queue,
+        )
+    )
 
 
 if __name__ == "__main__":

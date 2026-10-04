@@ -16,7 +16,7 @@ from temporalio import workflow
 from temporalio.client import WorkflowHistory
 from temporalio.worker import Replayer
 
-from edisc_worker.workflows import CollectionJobWorkflow, CollectUnitWorkflow
+from edisc_worker.workflows import CollectionJobWorkflow, CollectUnitWorkflow, RenderWorkflow
 
 from .patched_workflows import PatchedChange, UnpatchedChange
 
@@ -36,7 +36,8 @@ def event_types(h: WorkflowHistory) -> set[str]:
 def test_goldens_cover_the_required_scenarios() -> None:
     names = {p.name.rsplit("-", 1)[0] for p in FILES}
     assert {"job-clean", "job-retries", "job-cancel", "job-auth-pause"} <= names
-    histories = [load(p) for p in FILES]
+    assert {"render-clean", "render-failed"} <= names  # RenderWorkflow (ADR 0015 §14)
+    histories = [load(p) for p in FILES if not p.name.startswith("render-")]
     parents = [h for h in histories if "/" not in h.workflow_id]
     children = [h for h in histories if "/" in h.workflow_id]
     can = "workflow_execution_continued_as_new_event_attributes"
@@ -47,9 +48,9 @@ def test_goldens_cover_the_required_scenarios() -> None:
 
 @pytest.mark.parametrize("path", FILES, ids=[p.stem for p in FILES])
 async def test_recorded_history_replays_against_current_code(path: Path) -> None:
-    await Replayer(workflows=[CollectionJobWorkflow, CollectUnitWorkflow]).replay_workflow(
-        load(path)
-    )
+    await Replayer(
+        workflows=[CollectionJobWorkflow, CollectUnitWorkflow, RenderWorkflow]
+    ).replay_workflow(load(path))
 
 
 # ---------------------------------------------------------------- versioning policy (patch test)

@@ -1,4 +1,4 @@
-# Handoff (2026-10-04)
+# Handoff (2026-10-05)
 
 Read with `CLAUDE.md` (rules), `docs/ARCHITECTURE.md`, `docs/adr/`, `docs/plans/phase-2.md` and `docs/BACKLOG.md`.
 
@@ -28,7 +28,7 @@ history.
 - the audit-burst measurement;
 - the anchor-storm fix (migration 0017).
 
-**Migrations at head:** 0025.
+**Migrations at head:** 0026.
 
 **Not done in Phase 1:** the 1M-message soak. Laptop disk is too small (~15 GB free; it needs ~21 GB). It is
 in the backlog for a cloud VM: `scripts/resume_soak.py --messages 1000000 --kills 10`.
@@ -91,8 +91,16 @@ in the backlog for a cloud VM: `scripts/resume_soak.py --messages 1000000 --kill
 ## In progress: M15, RSMF renderer (ADR 0015, ACCEPTED 2026-10-03)
 **Steps 1–3 are approved (2026-10-04).** The §12 review decisions are implemented (ADR 0015 §13:
 renderer 1.1.0, normalizer 0.2.0, dummy connector 0.2.0 with versioned conversation metadata,
-migration 0025). **Next: step 4** (RenderWorkflow, the render custody stream, the API with recent
-sign-in, audited downloads).
+migration 0025). **Step 4 is implemented, waiting for review** (ADR 0015 §14, migration 0026):
+`RenderWorkflow` (queue `renders`, `make worker` runs it), the render's own custody stream with
+bounded `render_files_batch` events, the API (`export.create`/`export.read`, dedup by identity,
+refusals, audited downloads, productions blocked from the generic content endpoint), render anchors
+carrying the render id with matter retention, and `edisc-verify` render packages. **Next: step 5**
+(fixture corpus, structural EML checks, the full render crash matrix), then §11 (external natives).
+
+**Fixed 2026-10-04 (3e47bec):** an ABA race in the batch checkpoint guard (a unit starts and ends at
+cursor NULL): a stalled zombie attempt re-applied its first page after the retry finished the unit.
+The guard now fences on `(cursor, pages_done)` (ADR 0006 amendment).
 
 **Mentor demo:** `scripts/demo.sh` on branch `demo/progress` (docs/DEMO.md): about 30 s from clean,
 on its own disposable stack (`edisc-demo`); `scripts/demo.sh down` removes it. The decisions

@@ -225,6 +225,12 @@ Each sweeper is a Temporal Schedule with `overlap=SKIP`, running a one-activity 
   messages (10 x 10 x 500, page 200), 3 `python -m edisc_worker` processes, 4 random SIGKILLs plus one
   kill-all/restart, oracle-exact. The 1M manual run is recorded in `docs/runs/`.
 
+## RenderWorkflow (2026-10-05, ADR 0015 §14)
+`RenderWorkflow` (queue `renders`, id `render-{render_id}`): `begin_render`, `render_files`,
+`complete_render`, each idempotent from the render's status in the DB; any activity that fails for
+good leads to `fail_render` (retried without limit), so every render ends sealed. Integrity problems
+are the non-retryable class `RenderIntegrity`. Goldens: `render-clean`, `render-failed`.
+
 ## Active workflow patches
 | Patch id | Since | What | Remove when |
 |---|---|---|---|

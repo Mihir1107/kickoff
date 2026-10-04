@@ -39,6 +39,8 @@ with workflow.unsafe.imports_passed_through():
         JobRef,
         OverviewRequest,
         PauseRequest,
+        RenderFailure,
+        RenderRef,
         RunConfig,
         StopRequest,
         UnitFailure,
@@ -402,3 +404,55 @@ class TenantRetentionWorkflow:
             retry_policy=RetryPolicy(maximum_attempts=5, maximum_interval=timedelta(minutes=1)),
         )
         return result
+
+
+@workflow.defn(name="RenderWorkflow")
+class RenderWorkflow:
+    """One render of a sealed job (ADR 0015 §14; id ``render-{render_id}``, queue ``renders``).
+
+    ``begin_render`` (checks, then ``render_started`` or ``render_refused``), ``render_files`` (stores
+    files in committed batches), ``complete_render`` (``render_completed`` and the seal). Each activity
+    is idempotent and reads the render's status from the DB, so a retry, or a re-run after a crash,
+    continues where the render is and reproduces the same stored bytes. Any activity that fails for
+    good (a render integrity class, or retries exhausted) leads to ``fail_render``, which records
+    ``render_failed`` and seals the stream: a render never ends without a sealed record."""
+
+    @workflow.run
+    async def run(self, ref: RenderRef) -> dict[str, Any]:
+        retry = RetryPolicy(
+            initial_interval=timedelta(seconds=ref.retry_initial_seconds),
+            backoff_coefficient=2.0,
+            maximum_interval=timedelta(seconds=ref.retry_max_seconds),
+            maximum_attempts=ref.max_attempts,
+            non_retryable_error_types=[ErrorClass.RENDER_INTEGRITY.value],
+        )
+        heartbeat = timedelta(seconds=ref.heartbeat_timeout_seconds)
+        control = timedelta(seconds=ref.control_timeout_seconds)
+        try:
+            status: str = await workflow.execute_activity(
+                "begin_render", ref, result_type=str, start_to_close_timeout=control,
+                heartbeat_timeout=heartbeat, retry_policy=retry,
+            )  # fmt: skip
+            if status == "rendering":
+                await workflow.execute_activity(
+                    "render_files", ref, result_type=str,
+                    start_to_close_timeout=timedelta(seconds=ref.render_timeout_seconds),
+                    heartbeat_timeout=heartbeat, retry_policy=retry,
+                )  # fmt: skip
+            done: dict[str, Any] = await workflow.execute_activity(
+                "complete_render", ref, result_type=dict[str, Any], start_to_close_timeout=control,
+                heartbeat_timeout=heartbeat, retry_policy=retry,
+            )  # fmt: skip
+        except ActivityError as err:
+            kind, detail = error_text(err)
+            failed: dict[str, Any] = await workflow.execute_activity(
+                "fail_render", RenderFailure(ref, kind, detail), result_type=dict[str, Any],
+                start_to_close_timeout=control, heartbeat_timeout=heartbeat,
+                retry_policy=RetryPolicy(
+                    initial_interval=timedelta(seconds=ref.retry_initial_seconds),
+                    maximum_interval=timedelta(seconds=ref.retry_max_seconds),
+                    maximum_attempts=0,  # the failure itself must be recorded and sealed
+                ),
+            )  # fmt: skip
+            return failed
+        return done

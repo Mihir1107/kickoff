@@ -26,6 +26,7 @@ COPY_OVERRIDES = {
     "export_conversations": "'export_id', gen_random_uuid()",
     "export_day_files": "'export_id', gen_random_uuid()",
     "export_threads": "'export_id', gen_random_uuid()",
+    "render_files": "'render_id', gen_random_uuid()",
 }
 UPDATABLE = {
     "matters": "name",
@@ -38,6 +39,7 @@ UPDATABLE = {
     "token_refresh_journal": "state",
     "slack_exports": "updated_at",
     "export_upload_parts": "updated_at",
+    "renders": "updated_at",
 }
 
 

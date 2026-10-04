@@ -209,9 +209,14 @@ class EvidenceWriter:
         existing = await self._row_by_key(tenant_id, key)
         if existing is None:
             evidence_id = new_id()
-            await self._register(tenant_id, job_id, evidence_id, key, "production", retain)
+            await self._register(
+                tenant_id, job_id, evidence_id, key, "production", retain, render_id
+            )
             return await self._upload_production(tenant_id, evidence_id, key, retain, stream())
-        if existing.kind != "production" or existing.job_id != job_id:
+        if existing.kind != "production" or (existing.job_id, existing.render_id) != (
+            job_id,
+            render_id,
+        ):
             raise EvidenceIntegrityError(f"{key}: registered for another job or kind")
         digest, size = await _hash_stream(stream())
         if existing.state == "complete":
@@ -287,8 +292,8 @@ class EvidenceWriter:
             return (
                 await s.execute(
                     text(
-                        "SELECT id, kind, job_id, state, sha256, size_bytes, source_sha256, version_id,"
-                        " retain_until FROM evidence_objects WHERE storage_key = :k"
+                        "SELECT id, kind, job_id, render_id, state, sha256, size_bytes, source_sha256,"
+                        " version_id, retain_until FROM evidence_objects WHERE storage_key = :k"
                     ),
                     {"k": key},
                 )
@@ -803,17 +808,19 @@ class EvidenceWriter:
         key: str,
         kind: str,
         retain: datetime,
+        render_id: uuid.UUID | None = None,
     ) -> None:
         async with tenant_tx(self._sessions, tenant_id) as s:
             await s.execute(
                 text(
-                    "INSERT INTO evidence_objects (id, tenant_id, job_id, storage_key, kind, retain_until)"
-                    " VALUES (:id, :t, :j, :k, :kind, :r)"
+                    "INSERT INTO evidence_objects (id, tenant_id, job_id, render_id, storage_key, kind,"
+                    " retain_until) VALUES (:id, :t, :j, :rid, :k, :kind, :r)"
                 ),
                 {
                     "id": evidence_id,
                     "t": tenant_id,
                     "j": job_id,
+                    "rid": render_id,
                     "k": key,
                     "kind": kind,
                     "r": retain,

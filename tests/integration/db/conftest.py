@@ -262,6 +262,28 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
             t,
             export,
         )
+        # renders (migration 0026)
+        render = new_id()
+        await conn.execute(
+            "INSERT INTO renders (id, tenant_id, job_id, matter_id, options, options_hash,"
+            " renderer_version, unicode_version, tzdata_version, requested_by)"
+            " VALUES ($1, $2, $3, $4, '{}', $5, '1', '1', '1', 'seed')",
+            render,
+            t,
+            ids["job"],
+            ids["matter"],
+            HEX,
+        )
+        await conn.execute(
+            "INSERT INTO render_files (tenant_id, render_id, ord, name, evidence_object_id, version_id,"
+            " sha256, size_bytes, record, custody_event_id) VALUES ($1, $2, 0, 'f.rsmf', $3, 'v', $4,"
+            " 1, '{}', $5)",
+            t,
+            render,
+            ids["ev"],
+            HEX,
+            ids["event"],
+        )
         await conn.execute(
             "INSERT INTO retention_gaps (id, tenant_id, evidence_object_id, owner_type, owner_id,"
             " unprotected_from, unprotected_until, outcome) VALUES ($1, $2, $3, 'matter', $4, now(),"
@@ -326,5 +348,7 @@ TENANT_TABLES = [
     "retention_gaps",
     "export_day_files",
     "export_threads",
+    "renders",
+    "render_files",
 ]
 ALL_TABLES = ["tenants", *TENANT_TABLES]

@@ -57,6 +57,15 @@ independently: no access to our database, no network, no credentials, no trust i
   record. Then item fragments, as for pages. The zip reader is the same pure module the worker uses.
 - The verifier accepts /1 and /2; the exporter writes /2.
 
+## Amendment (2026-10-05, M15 step 4): render packages `edisc-render-package/1`
+A render package (`edisc_custody.render_export.export_render_package`) holds the render's custody
+stream and anchors, every output file record with its batch, the rendered job's seal anchor as read
+from WORM, and the output files (or, with `outputs="reference"`, only their hashes: the expert passes
+them with `--file`). `edisc-verify` recognises the format and checks the chain with every
+`render_files_batch` root and the `render_completed` totals, the reference to the job seal, and each
+output's SHA-256 and size; `--job-package` verifies the job's own package and matches its head and
+seal. Details: ADR 0015 §14. The verifier stays free of database and cloud imports.
+
 ## Consequences
 - + Verification is reproducible by third parties with one command, air-gapped.
 - + Streaming reads: package size is not bounded by verifier memory (items are grouped by batch).

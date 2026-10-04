@@ -42,7 +42,7 @@ make test               # unit tests
 make test-integration   # FRESH ephemeral stack (-p edisc-test, .env.test, other ports), tests, then down -v
 make test-env-up / test-integration-only / test-env-down   # keep the test stack up while iterating
                         # up/up-ci/test targets refuse below MIN_FREE_GB (15) free disk
-make worker / api       # Temporal worker (+ maintenance queue, sweeper schedules, exports queue) / API
+make worker / api       # Temporal worker (+ maintenance queue, sweeper schedules, exports, renders) / API
 ```
 
 ## API (M13, ADR 0013)
@@ -79,7 +79,7 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Layout/tier rules: `edisc_connector_slack_export.layout`. Format details marked *(confirm on real
   export)* in ADR 0014 stay provisional until the real exports are fixtures.
 
-## RSMF renders (M15, ADR 0015; steps 1-3 done: schema, pure renderer, loader + storage; 4-5 not yet)
+## RSMF renders (M15, ADR 0015; steps 1-4 done: schema, pure renderer, loader + storage, workflow + custody + API; 5 not yet)
 - Renders read normalized items and derivations, never raw pages (raw evidence only to embed file
   bytes, by pinned version). The renderer `edisc_renderers.rsmf` is pure (no DB/S3/clock imports; a
   test enforces it). A worker loader builds `SliceInput`s and streams evidence through a `FileOpener`.
@@ -106,8 +106,21 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   own file name. Every participant/conversation name stays searchable (`edisc.known_name`).
 - Storage (`edisc_worker.render_store`): pass 1 reconciles with nothing written; pass 2 writes
   `production` evidence (`EvidenceWriter.write_production`, origin `render`) tied to the rendered job.
-- Custody: each render has its own stream; its first event references the sealed job (id, final head,
-  seal anchor). Never append to a sealed job chain.
+- Custody (`edisc_worker.renders`, ADR 0015 §14): each render has its own stream (stream id = render
+  id; every event has `render_id` set and `job_id` NULL). `render_started` references the sealed job
+  (id, final head, seal anchor key + VersionId listed from S3, completeness basis, versions, options);
+  or `render_refused` is the only event. Files go in bounded `render_files_batch` events (Merkle root
+  over `render_files.FILE_FIELDS`); `render_completed` carries totals + root over batch roots; then the
+  seal + `audit.render_*` in one transaction. Never append to a sealed job chain.
+- Render steps are fenced by the render's STATUS, moved in the same transaction as the event; a batch
+  commits only when `batches_done` equals its index (never fence on a value that can repeat: see the
+  ABA fix in ADR 0006). Anything that fails for good goes to `fail_render` (retried without limit).
+- One live render per (job, options hash, renderer, Unicode, tzdata versions); failed/refused do not
+  count. API: `export.create` / `export.read` (matter managers, tenant admins), reads `custody.read`.
+  `require_recent_sign_in` is the ADR 0016 §4 hook (no-op until M17). The generic evidence content
+  endpoint never serves `production` rows. Render anchors and productions carry `render_id`;
+  retention resolves render -> job -> matter. `edisc-verify` verifies render packages
+  (`edisc-render-package/1`, `--file`, `--job-package`).
 - Every manifest is validated against the vendored `rsmf_schema_2_0_0.json` (SHA-256 pinned, format
   checks on). The Relativity validator is not used until the licence is confirmed.
 

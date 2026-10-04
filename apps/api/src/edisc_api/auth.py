@@ -62,6 +62,15 @@ class Caller:
         return f"{self.kind}:{self.principal_id}"
 
 
+def require_recent_sign_in(caller: Caller) -> None:
+    """ADR 0016 §4: sensitive actions need a sign-in no older than ``EDISC_API_REAUTH_MAX_AGE_SECONDS``
+    (401 ``reauth_required`` otherwise). Every covered action calls this, inside its transaction and
+    before any change. Until the M17 sessions exist the caller carries no ``authenticated_at``, so it
+    does nothing; M17 adds the field (session sign-in time, or the bearer token's ``auth_time``/``iat``)
+    and the check here, and the covered routes need no change."""
+    return None
+
+
 def host_subdomain(host: str | None, base_domain: str) -> str | None:
     if not host:
         return None
