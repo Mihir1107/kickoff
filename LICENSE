@@ -1,0 +1,4 @@
+Proprietary and confidential. All rights reserved.
+
+Third-party components keep their own licences, for example the RSMF manifest schema under
+packages/renderers/src/edisc_renderers/rsmf/schema/ (BSD 3-Clause, see the LICENSE file there).
