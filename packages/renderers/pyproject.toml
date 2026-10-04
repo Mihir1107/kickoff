@@ -1,14 +1,18 @@
 [project]
 name = "edisc-renderers"
 version = "0.1.0"
-description = "RSMF, HTML and JSON renderers (Phase 2, stub)."
+description = "RSMF renderer (pure: no database or cloud imports)."
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "edisc-core",
+    "edisc-custody",
+    "jsonschema>=4.23",
+    "rfc3339-validator>=0.1.4",
 ]
 
 [tool.uv.sources]
 edisc-core = { workspace = true }
+edisc-custody = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
