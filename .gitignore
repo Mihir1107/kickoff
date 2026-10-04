@@ -18,3 +18,4 @@ build/
 node_modules/
 .env.test
 test-stack-logs.txt
+.playwright-mcp/
