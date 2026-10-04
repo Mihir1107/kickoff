@@ -91,16 +91,28 @@ def build_job(
 
     conversations = []
     for i, c in enumerate(ds.conversations()):
+        # the state at the job's epoch, and every name the conversation had up to then
+        state = ds.conversation_state(c.id, epoch)
+        names = {str(ds.conversation_state(c.id, e)["name"]) for e in range(epoch + 1)} - {""}
         conversations.append(
             ConversationInfo(
                 id=c.id,
                 slack_type=_KIND[c.kind],  # type: ignore[arg-type]
                 workspace_id=ws,
-                name=c.name or None,
+                name=str(state["name"]) or None,
                 members=c.members,
-                custodian=c.members[0] if i == 0 else None,
-                is_shared=i == 0,
-                is_ext_shared=i == 0,
+                # conversation 0 is covered by two custodian scopes, conversation 2 by one
+                custodians=tuple(sorted(c.members[:2]))
+                if i == 0
+                else (c.members[0],)
+                if i == 2
+                else (),
+                is_shared=bool(state["shared"]),
+                is_ext_shared=bool(state["shared"]),
+                archived=bool(state["archived"]),
+                topic=str(state["topic"]) or None,
+                purpose=str(state["purpose"]) or None,
+                known_names=tuple(sorted(names)),
             )
         )
 

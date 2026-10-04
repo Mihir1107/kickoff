@@ -395,3 +395,62 @@ def test_directory_snapshots() -> None:
     (snap,) = normalize_directory_page(p, ctx=dctx, page_ref=REF, prior={}).items
     assert snap.source_item_id == "T0DUMMY01/user/U1#profile"
     assert snap.derived["deactivated"] is True
+
+
+def test_message_derivation_carries_the_attachment_references_of_its_fingerprint() -> None:
+    """Renders name an unfetched file after the message's own reference (ADR 0015 §12)."""
+    gone = norm(FILE_PAGE, files={"F1": FileUnavailable("F1", "permission")})
+    (m,) = only(gone, ItemType.MESSAGE)
+    assert m.derived["files"] == m.fingerprint["files"] == [["F1", "a.pdf", "application/pdf"]]
+    assert NORMALIZER_VERSION == "0.2.0"
+
+
+def _channels(*channels: dict[str, Any]) -> bytes:
+    return json.dumps({"ok": True, "channels": list(channels)}).encode()
+
+
+def test_conversation_snapshots_are_versioned_and_reverts_observed() -> None:
+    dctx = NormalizeContext(TENANT, "dummy", "T0DUMMY01", None, None, None, None)
+    base = {
+        "id": "C1", "name": "general", "is_channel": True, "is_private": False,
+        "is_archived": False, "members": ["U2", "U1"], "num_members": 2, "updated": 1,
+        "topic": {"value": "Ship it", "creator": "U1", "last_set": 1},
+        "purpose": {"value": "", "creator": "", "last_set": 0},
+    }  # fmt: skip
+    (first,) = normalize_directory_page(_channels(base), ctx=dctx, page_ref=REF, prior={}).items
+    assert first.source_item_id == "T0DUMMY01/C1#conversation"
+    assert first.event_kind is EventKind.CONVERSATION_SNAPSHOT
+    assert first.derived | {"event_kind": None} == {
+        "conversation": "C1", "type": "public_channel", "name": "general", "topic": "Ship it",
+        "purpose": None, "members": ["U1", "U2"], "archived": False, "shared": False,
+        "ext_shared": False, "event_kind": None,
+    }  # fmt: skip
+    # volatile fields (counts, update times, who set the topic) never make a version
+    noisy = base | {"num_members": 9, "updated": 99, "topic": {"value": "Ship it", "creator": "U9", "last_set": 7}}  # fmt: skip
+    (same,) = normalize_directory_page(_channels(noisy), ctx=dctx, page_ref=REF, prior={}).items
+    assert same.content_hash == first.content_hash
+    renamed = normalize_directory_page(
+        _channels(base | {"name": "general-2"}), ctx=dctx, page_ref=REF, prior={}
+    ).items[0]
+    assert renamed.content_hash != first.content_hash
+    prior = {
+        first.source_item_id: PriorState(
+            latest_content_hash=renamed.content_hash,
+            known_content_hashes=frozenset({first.content_hash, renamed.content_hash}),
+        )
+    }
+    back = normalize_directory_page(_channels(base), ctx=dctx, page_ref=REF, prior=prior).items
+    assert [d.event_kind for d in back] == [
+        EventKind.CONVERSATION_SNAPSHOT,
+        EventKind.CHANGE_OBSERVATION,
+    ]
+    assert back[1].derived["kind"] == "reverted"
+    for flags, kind in (
+        ({"is_im": True}, "im"),
+        ({"is_mpim": True, "is_private": True}, "mpim"),
+        ({"is_group": True, "is_private": True}, "private_channel"),
+    ):
+        (snap,) = normalize_directory_page(
+            _channels({"id": "D1", **flags}), ctx=dctx, page_ref=REF, prior={}
+        ).items
+        assert snap.derived["type"] == kind

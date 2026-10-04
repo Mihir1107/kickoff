@@ -21,6 +21,7 @@ from edisc_renderers.rsmf import (
     render_slice,
 )
 from edisc_renderers.rsmf.slicing import slice_bounds, slice_day
+from edisc_renderers.rsmf.version import RENDERER_VERSION
 from tests.unit.renderers.builders import (
     JOB,
     attachment,
@@ -149,13 +150,14 @@ def test_attachments_and_placeholders() -> None:
     assert e["attachments"] == [
         {"id": "F1_Q3 report_v2_final.pdf", "display": "Q3 report/v2:final.pdf", "size": len(data)},
         {
-            "id": "F2_UNAVAILABLE.txt",
+            "id": "F2_gone.png.UNAVAILABLE.txt",
             "display": "gone.png",
-            "size": parsed.zip.getinfo("F2_UNAVAILABLE.txt").file_size,
+            "size": parsed.zip.getinfo("F2_gone.png.UNAVAILABLE.txt").file_size,
         },
     ]
     assert parsed.zip.read("F1_Q3 report_v2_final.pdf") == data
-    note = parsed.zip.read("F2_UNAVAILABLE.txt").decode()
+    note = parsed.zip.read("F2_gone.png.UNAVAILABLE.txt").decode()
+    assert "F2_gone.png" in note and "gone.png" in note
     assert "expired_url" in note and "F2" in note and files["F2"].item.idempotency_key in note
     assert custom(e)["edisc.file_unavailable"] == ["F2: expired_url"]
     assert (f.attachment_count, f.unavailable_count) == (2, 1)
@@ -260,7 +262,7 @@ def test_identity_in_force_at_the_slice_and_email_check() -> None:
 
 def test_custodian_and_participant_headers() -> None:
     identities = {"U2": (Identity("U2", display_name="Zoë ✓ 李"),)}
-    c = conv(custodian="U2")
+    c = conv(custodians=("U2",))
     [(_, parsed)] = render(
         slice_input(DAY, [msg("2026-01-05T09:00:00Z")], conversation=c, identities=identities)
     )
@@ -367,8 +369,8 @@ def test_the_eml_parses_with_the_standard_library() -> None:
     data = b"".join(f.stream(opener_for({})))
     parsed = email.message_from_bytes(data, policy=email.policy.default)
     assert parsed["Date"] == "Mon, 05 Jan 2026 09:00:00 +0000"
-    assert parsed["X-RSMF-RendererVersion"] == "1.0.0"
-    assert parsed["X-RSMF-Generator"] == "edisc-renderers/1.0.0"
+    assert parsed["X-RSMF-RendererVersion"] == RENDERER_VERSION
+    assert parsed["X-RSMF-Generator"] == f"edisc-renderers/{RENDERER_VERSION}"
     assert parsed["X-RSMF-CollectionId"] == str(JOB.job_id)
     assert parsed.defects == []
     assert all(not p.defects for p in parsed.walk())
@@ -440,3 +442,43 @@ async def test_attachments_stream_through_with_bounded_memory() -> None:
         tracemalloc.stop()
     assert total > size * 4 // 3  # base64 of the whole zip went through
     assert peak < 8 << 20, f"peak {peak / 2**20:.1f} MiB for a 64 MiB attachment"
+
+
+def test_several_custodians_are_all_listed_and_names_stay_searchable() -> None:
+    from edisc_core.time import parse_utc
+
+    identities = {
+        "U1": (
+            Identity("U1", None, display_name="Alice", real_name="Alice Smith"),
+            Identity("U1", parse_utc("2026-01-04T00:00:00Z"), display_name="Alice Jones"),
+        ),
+        "U2": (Identity("U2", display_name="Bob"),),
+    }
+    c = conv(
+        custodians=("U1", "U2"), archived=True, topic="Ship it", purpose="Releases",
+        known_names=("general", "general-old"),
+    )  # fmt: skip
+    [(_, parsed)] = render(
+        slice_input(DAY, [msg("2026-01-05T09:00:00Z")], conversation=c, identities=identities)
+    )
+    (cv,) = parsed.manifest["conversations"]
+    assert "custodian" not in cv  # several: the RSMF field stays empty, custom lists them all
+    pairs = [(x["name"], x["value"]) for x in cv["custom"]]
+    assert [v for n, v in pairs if n == "edisc.custodian"] == ["U1", "U2"]
+    assert [v for n, v in pairs if n == "edisc.known_name"] == ["general", "general-old"]
+    assert ("slack.is_archived", "true") in pairs and ("slack.topic", "Ship it") in pairs
+    assert parsed.headers["X-RSMF-Custodian"] == "Alice Jones, Bob"
+    people = {p["id"]: p for p in parsed.manifest["participants"]}
+    alice = [(x["name"], x["value"]) for x in people["U1"]["custom"]]
+    assert people["U1"]["display"] == "Alice Jones"  # in force at the slice
+    assert [v for n, v in alice if n == "edisc.known_name"] == [
+        "Alice",
+        "Alice Jones",
+        "Alice Smith",
+    ]
+    assert ("slack.user_id", "U1") in alice
+
+
+def test_custodians_must_be_sorted_and_unique() -> None:
+    with pytest.raises(RenderInputError):
+        conv(custodians=("U2", "U1"))

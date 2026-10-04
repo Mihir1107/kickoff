@@ -183,3 +183,38 @@ def users_page(ds: Dataset, users: list[User], epoch: int, *, next_cursor: str |
             "response_metadata": {"next_cursor": next_cursor or ""},
         }
     )
+
+
+def conversations_page(
+    ds: Dataset, conversation_ids: list[str], epoch: int, *, next_cursor: str | None
+) -> bytes:
+    """``conversations.list`` with each conversation's members inlined (the live connector will call
+    ``conversations.members``; the dummy folds it in). Topic/purpose carry creator and last_set,
+    which are hints, not content."""
+    channels = []
+    for cid in conversation_ids:
+        st = ds.conversation_state(cid, epoch)
+        kind = st["kind"]
+        when = int(ds.epoch_time(epoch).split(".")[0])
+        channels.append(
+            {
+                "id": cid,
+                "name": st["name"],
+                "is_channel": kind == "channel",
+                "is_group": kind == "private_channel",
+                "is_im": kind == "dm",
+                "is_mpim": kind == "group_dm",
+                "is_private": kind != "channel",
+                "is_archived": st["archived"],
+                "is_shared": st["shared"],
+                "is_ext_shared": st["shared"],
+                "topic": {"value": st["topic"], "creator": "", "last_set": when},
+                "purpose": {"value": st["purpose"], "creator": "", "last_set": when},
+                "members": st["members"],
+                "num_members": len(st["members"]),  # type: ignore[arg-type]
+                "updated": when,
+            }
+        )
+    return _dump(
+        {"ok": True, "channels": channels, "response_metadata": {"next_cursor": next_cursor or ""}}
+    )

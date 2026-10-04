@@ -4,6 +4,7 @@ Identity
     message   ``{workspace}/{channel}/{ts}``      (channel + ts; ts alone is only unique per channel)
     file      ``{workspace}/file/{file_id}``
     user      ``{workspace}/user/{user_id}#profile``        directory snapshot (users.list)
+    channel   ``{workspace}/{channel}#conversation``        conversation snapshot (conversations.list)
               ``{workspace}/user/{user_id}#profile-embed``  what a message showed (user_profile embed)
     derived   ``{subject}#reactions`` | ``{subject}#change`` | ``{subject}#observation``
 
@@ -57,6 +58,7 @@ FP_CHANGE = "slack.change/1"
 FP_OBSERVATION = "slack.observation/1"
 FP_AVAILABILITY = "slack.file-availability/1"
 FP_ACCESS = "slack.access/1"
+FP_CONVERSATION = "slack.conversation/1"
 
 NO_LONGER_OBSERVED = "no_longer_observed"
 UNAVAILABLE = "unavailable"
@@ -402,6 +404,8 @@ def normalize_messages_page(
                 "edited_ts": hints.get("edited_ts"),
                 "deleted_ts": hints.get("deleted_ts"),
                 "file_ids": sorted(e[0] for e in file_entries),
+                # [id, name, mimetype] as shown in the message (the fingerprint's file references)
+                "files": sorted(file_entries),
                 "mentions": sorted(set(_MENTION.findall(text))),
             },
         )
@@ -568,9 +572,94 @@ def normalize_messages_page(
 
 
 # ------------------------------------------------------------------ directory
+def conversation_subject(workspace: str, conversation_id: str) -> str:
+    return f"{workspace}/{conversation_id}#conversation"
+
+
+def _is_conversations_page(page: bytes, dialect: str) -> bool:
+    """A directory page of conversations (``conversations.list`` shape, API dialect only; exports
+    keep their conversation metadata in ``export_conversations``)."""
+    if dialect != API:
+        return False
+    try:
+        doc = json.loads(page)
+    except ValueError as exc:
+        raise NormalizationError("page is not valid JSON") from exc
+    return isinstance(doc, dict) and isinstance(doc.get("channels"), list)
+
+
+def _conversation_type(raw: Mapping[str, Any]) -> str:
+    if raw.get("is_im"):
+        return "im"
+    if raw.get("is_mpim"):
+        return "mpim"
+    if raw.get("is_private") or raw.get("is_group"):
+        return "private_channel"
+    return "public_channel"
+
+
+def _text_of(value: Any) -> str | None:
+    """Topic and purpose arrive as ``{"value": ..., "creator": ..., "last_set": ...}``: only the text
+    is content; who set it and when are hints."""
+    if isinstance(value, Mapping):
+        value = value.get("value")
+    return value if isinstance(value, str) and value else None
+
+
+def _normalize_conversations(
+    page: bytes, *, ctx: NormalizeContext, page_ref: EvidenceRef, prior: Mapping[str, PriorState]
+) -> PageResult:
+    """Conversation snapshots (ADR 0004 amendment, 2026-10-04): versioned like directory profiles, so a
+    renamed, re-purposed or archived channel keeps every earlier state."""
+    items: list[Derived] = []
+    subjects: set[str] = set()
+    for index, raw in enumerate(_parse(page, "channels", ctx.dialect)):
+        cid = raw.get("id")
+        if not isinstance(cid, str):
+            raise NormalizationError(f"conversation {index} has no id")
+        members = raw.get("members")
+        fp = {
+            "fp": FP_CONVERSATION,
+            "conversation": cid,
+            "type": _conversation_type(raw),
+            "name": raw.get("name") or None,
+            "topic": _text_of(raw.get("topic")),
+            "purpose": _text_of(raw.get("purpose")),
+            "members": sorted(members) if isinstance(members, list) else None,
+            "archived": bool(raw.get("is_archived")),
+            "shared": bool(raw.get("is_shared")),
+            "ext_shared": bool(raw.get("is_ext_shared")),
+        }
+        sid = conversation_subject(ctx.workspace_id, cid)
+        path = _path(ctx.dialect, "channels", index)
+        raw_hash = canonical_hash(raw)
+        snap = _event(
+            sid, EventKind.CONVERSATION_SNAPSHOT, fp, None, page_ref, path, raw_hash, None, True, {}
+        )
+        items.append(snap)
+        subjects.add(sid)
+        items.extend(
+            _changes(
+                subject=sid,
+                current_hash=snap.content_hash,
+                prior=prior.get(sid, EMPTY_PRIOR),
+                hints=None,
+                evidence=page_ref,
+                json_path=path,
+                raw_hash=raw_hash,
+                sent_at=None,
+                in_scope=True,
+            )
+        )
+    return PageResult(tuple(items), frozenset(), frozenset(subjects))
+
+
 def normalize_directory_page(
     page: bytes, *, ctx: NormalizeContext, page_ref: EvidenceRef, prior: Mapping[str, PriorState]
 ) -> PageResult:
+    """A directory page: users (profiles), or conversations (conversation snapshots)."""
+    if _is_conversations_page(page, ctx.dialect):
+        return _normalize_conversations(page, ctx=ctx, page_ref=page_ref, prior=prior)
     items: list[Derived] = []
     subjects: set[str] = set()
     for index, raw in enumerate(_parse(page, "members", ctx.dialect)):
@@ -683,6 +772,11 @@ def message_page_subjects(page: bytes, *, ctx: NormalizeContext) -> frozenset[st
 
 
 def directory_page_subjects(page: bytes, *, ctx: NormalizeContext) -> frozenset[str]:
+    if _is_conversations_page(page, ctx.dialect):
+        return frozenset(
+            conversation_subject(ctx.workspace_id, str(c.get("id")))
+            for c in _parse(page, "channels", ctx.dialect)
+        )
     return frozenset(
         profile_id(ctx.workspace_id, str(m.get("id"))) for m in _parse(page, "members", ctx.dialect)
     )

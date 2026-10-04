@@ -45,6 +45,7 @@ class EventKind(StrEnum):
     FILE_BECAME_AVAILABLE = "file_became_available"
     ACCESS_LOST = "access_lost"  # a whole conversation became inaccessible
     ACCESS_RESTORED = "access_restored"
+    CONVERSATION_SNAPSHOT = "conversation_snapshot"  # name, type, topic, purpose, members, archived
 
 
 class ScopeType(StrEnum):

@@ -162,3 +162,23 @@ namespace of what was collected (`Connector.item_source`), not the connector tha
 ## Consequences
 - + Re-fetches are free no-ops; edits/deletes produce versions; nothing volatile is lost.
 - − Fingerprint definitions are consequential and must be reviewed per source.
+
+## Amendment (2026-10-04, M15): conversation snapshots; file references in the message derivation
+- **Conversation metadata is versioned** like directory profiles: `event` items of kind
+  `conversation_snapshot`, `source_item_id = {workspace}/{conversation}#conversation`, from the
+  directory unit's `conversations.list` pages (members inlined). Fingerprint `slack.conversation/1`:
+  type (`im`, `mpim`, `public_channel`, `private_channel`), name, topic text, purpose text, sorted
+  members, archived, shared, externally shared.
+  - Excluded: member counts, `updated`, and who set the topic/purpose and when (hints).
+  - A renamed, re-purposed, archived or re-membered channel is a new version, and every earlier
+    state is kept; reverts are observed (`#change`).
+  - Migration 0025 adds the event kind.
+  - The dummy connector emits these pages (`DummyConnector.version` 0.2.0; conversation 0 is renamed
+    at epoch 1, conversation 1 is archived from epoch 2).
+  - **The Phase 3 live Slack connector must emit them** (hard requirement): name, type, topic,
+    purpose, members, archived state.
+  - Exports keep their metadata in `export_conversations` (ADR 0014) and do not emit these items.
+- **The message derivation carries `files`** (`[id, name, mimetype]`, exactly the fingerprint's file
+  references), so a render can name an unfetched file after the message's own reference without
+  reading raw pages. This is `NORMALIZER_VERSION` 0.2.0. Content hashes are unchanged (derivation
+  only); pages normalized by 0.1.0 need reprocessing before they can be rendered (the loader says so).

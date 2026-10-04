@@ -45,6 +45,7 @@ def expected(ds: Dataset, last_epoch: int) -> dict[str, Any]:
     status: dict[str, list[str]] = {}
     reactions: dict[str, _Stream] = {}
     profiles: dict[str, _Stream] = {}
+    conversations: dict[str, _Stream] = {}
     embeds: dict[str, set[tuple[Any, ...]]] = {}
     files: set[str] = set()
 
@@ -108,6 +109,14 @@ def expected(ds: Dataset, last_epoch: int) -> dict[str, Any]:
             profiles.setdefault(f"{ws}/user/{u.id}#profile", _Stream()).observe(
                 (u.display_name, u.real_name, u.email, u.avatar_hash, "", u.deleted)
             )
+        kinds = {"channel": "public_channel", "private_channel": "private_channel", "dm": "im",
+                 "group_dm": "mpim"}  # fmt: skip
+        for conv in ds.conversations():
+            st = ds.conversation_state(conv.id, epoch)
+            conversations.setdefault(f"{ws}/{conv.id}#conversation", _Stream()).observe(
+                (kinds[conv.kind], st["name"] or None, st["topic"] or None, st["purpose"] or None,
+                 tuple(sorted(conv.members)), st["archived"], st["shared"], st["shared"])
+            )  # fmt: skip
 
     out: dict[str, Any] = {}
     for mid, s in messages.items():
@@ -117,7 +126,7 @@ def expected(ds: Dataset, last_epoch: int) -> dict[str, Any]:
             out[f"{mid}#change"] = sorted(changes, key=repr)
         if status.get(mid):
             out[f"{mid}#observation"] = status[mid]
-    for rid, s in {**reactions, **profiles}.items():
+    for rid, s in {**reactions, **profiles, **conversations}.items():
         out[rid] = s.versions
         if s.changes:
             out[f"{rid}#change"] = sorted(s.changes, key=repr)
@@ -152,6 +161,12 @@ def project(recorded: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
                 {(d["display_name"], d["real_name"], d["avatar_hash"], d["team"]) for d in derived},
                 key=repr,
             )
+        elif sid.endswith("#conversation"):
+            out[sid] = [
+                (d["type"], d["name"], d["topic"], d["purpose"], tuple(d["members"]),
+                 d["archived"], d["shared"], d["ext_shared"])
+                for d in derived
+            ]  # fmt: skip
         elif sid.endswith("#profile"):
             out[sid] = [
                 (

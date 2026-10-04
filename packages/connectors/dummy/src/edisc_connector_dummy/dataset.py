@@ -214,6 +214,26 @@ class Dataset:
             out.append(Conversation(f"{prefix[kind]}{c:05d}DUMMY", kind, name, tuple(members)))
         return tuple(out)
 
+    def conversation_state(self, conversation_id: str, epoch: int) -> dict[str, object]:
+        """What ``conversations.list`` (+ members) shows at ``epoch``. Conversation 0 is renamed at
+        epoch 1 and conversation 1 is archived from epoch 2, so the metadata has versions."""
+        conv = self.conversation(conversation_id)
+        index = [c.id for c in self.conversations()].index(conversation_id)
+        name = conv.name
+        if index == 0 and epoch >= 1 and name:
+            name = f"{name}-renamed"
+        return {
+            "kind": conv.kind,
+            "name": name,
+            "topic": f"Topic of {name}" if conv.kind in ("channel", "private_channel") else "",
+            "purpose": f"Purpose of conversation {index}"
+            if conv.kind in ("channel", "private_channel")
+            else "",
+            "members": list(conv.members),
+            "archived": index == 1 and epoch >= 2,
+            "shared": index == 0,
+        }
+
     def conversation(self, conversation_id: str) -> Conversation:
         for conv in self.conversations():
             if conv.id == conversation_id:

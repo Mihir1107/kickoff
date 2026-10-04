@@ -100,6 +100,10 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   entry behind a rendered item is read by pinned VersionId and checked (registry SHA-256 and size, each
   item's `raw_hash` at `json_path`, `derived_hash`) BEFORE the slice reaches the renderer, outside DB
   transactions. Files stream by pinned version and are checked as they pass.
+- Conversation metadata: versioned `conversation_snapshot` items (`{ws}/{conv}#conversation`) from the
+  directory unit (dummy connector 0.2.0; a hard requirement for the Phase 3 live connector). Message
+  derivations carry `files` ([id, name, mimetype], normalizer 0.2.0) so placeholders use the message's
+  own file name. Every participant/conversation name stays searchable (`edisc.known_name`).
 - Storage (`edisc_worker.render_store`): pass 1 reconciles with nothing written; pass 2 writes
   `production` evidence (`EvidenceWriter.write_production`, origin `render`) tied to the rendered job.
 - Custody: each render has its own stream; its first event references the sealed job (id, final head,

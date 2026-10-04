@@ -42,5 +42,12 @@ def attachment_name(file_id: str, original: str) -> str:
     return prefix + _truncate_utf8(stem, budget) + suffix
 
 
-def placeholder_name(file_id: str) -> str:
-    return f"{file_id}_UNAVAILABLE.txt"
+PLACEHOLDER_SUFFIX = ".UNAVAILABLE.txt"
+
+
+def placeholder_name(file_id: str, original: str) -> str:
+    """The attachment's own safe name plus `.UNAVAILABLE.txt`, still within 200 bytes:
+    `F1_report.pdf.UNAVAILABLE.txt`."""
+    name = attachment_name(file_id, original)
+    budget = MAX_NAME_BYTES - len(PLACEHOLDER_SUFFIX.encode("utf-8"))
+    return _truncate_utf8(name, budget) + PLACEHOLDER_SUFFIX

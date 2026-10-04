@@ -21,7 +21,10 @@ def test_examples() -> None:
     assert attachment_name("F1", ".bashrc") == "F1_bashrc"
     long = attachment_name("F1", "李" * 300 + ".docx")
     assert long.endswith(".docx") and len(long.encode()) <= 200
-    assert placeholder_name("F1") == "F1_UNAVAILABLE.txt"
+    assert placeholder_name("F1", "report.pdf") == "F1_report.pdf.UNAVAILABLE.txt"
+    assert placeholder_name("F1", "") == "F1_file.UNAVAILABLE.txt"
+    long_placeholder = placeholder_name("F1", "\u674e" * 300 + ".docx")
+    assert long_placeholder.endswith(".UNAVAILABLE.txt") and len(long_placeholder.encode()) <= 200
 
 
 @given(st.text(max_size=400))

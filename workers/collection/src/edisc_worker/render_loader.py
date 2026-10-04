@@ -125,6 +125,7 @@ class RenderLoader:
         self._writer = EvidenceWriter(sessions, s3, settings)
         self._verified: set[uuid.UUID] = set()  # evidence objects verified during this render
         self._unverified: list[Any] = []  # item rows read since the last verification
+        self._file_names: dict[str, str] = {}  # file id -> name in the referencing message
         self._job: LoadedJob | None = None
         self._source = "slack"
         self._connection_id: uuid.UUID | None = None
@@ -328,12 +329,42 @@ class RenderLoader:
                     ).all()
                 }
             )
+            # versioned conversation snapshots from the directory unit, as of the job (ADR 0004 amendment)
+            job = self._job
+            if job is None:
+                raise RuntimeError("load_job() first")
+            snapshots = await self._items(
+                s, [f"{workspace}/{conversation_id}#conversation"], ItemType.EVENT.value, job
+            )
+        versions = sorted(
+            snapshots.get(f"{workspace}/{conversation_id}#conversation", []),
+            key=lambda rd: (rd[0].collected_at, rd[0].version),
+        )
+        await self._verify_pending()
+        if versions:
+            d = versions[-1][1]
+            names = sorted({str(v["name"]) for _, v in versions if v.get("name")})
+            return ConversationInfo(
+                id=conversation_id,
+                slack_type=d["type"],
+                workspace_id=workspace,
+                name=d.get("name"),
+                members=tuple(d["members"]) if d.get("members") is not None else None,
+                custodians=tuple(custodians),
+                is_shared=d.get("shared"),
+                is_ext_shared=d.get("ext_shared"),
+                archived=d.get("archived"),
+                topic=d.get("topic"),
+                purpose=d.get("purpose"),
+                known_names=tuple(names),
+            )
         return ConversationInfo(
             id=conversation_id,
             slack_type=_EXPORT_KINDS.get(meta.kind) if meta else None,  # type: ignore[arg-type]
             workspace_id=workspace,
             name=meta.name if meta else None,
-            custodian=custodians[0] if len(custodians) == 1 else None,
+            custodians=tuple(custodians),
+            known_names=(meta.name,) if meta and meta.name else (),
         )
 
     async def _slice(
@@ -440,6 +471,15 @@ class RenderLoader:
             ]
             if not rows or rows[-1][0].version != e.max_version:
                 raise RenderInputIntegrityError(f"{e.source_item_id}: linked version not found")
+            current = rows[-1][1]
+            if not current.get("deleted") and current.get("file_ids"):
+                if "files" not in current:
+                    raise RenderInputIntegrityError(
+                        f"{e.source_item_id}: derivation has no file references; reprocess the job's"
+                        " pages with normalizer >= 0.2.0"
+                    )
+                for fid, name, _mime in current["files"]:
+                    self._file_names.setdefault(fid, name)
             states = tuple(
                 MessageState(
                     item=ItemRef(r.source_item_id, r.version, r.idempotency_key, r.content_hash),
@@ -520,7 +560,7 @@ class RenderLoader:
                 )
             r, d = refused[-1]
             out[fid] = FileUnavailable(
-                fid, fid, str(d["reason"]),
+                fid, self._file_names.get(fid) or fid, str(d["reason"]),
                 ItemRef(r.source_item_id, r.version, r.idempotency_key, r.content_hash),
             )  # fmt: skip
         return out

@@ -1,7 +1,7 @@
 # ADR 0015: RSMF renderer (`edisc_renderers.rsmf`)
 
-Status: **Accepted** (2026-10-03) with the review decisions below (§9). Steps 1–2 implemented and
-approved (§10); step 3 implemented (§12, awaiting review); steps 4–5 not yet (M15). Implements M15 of
+Status: **Accepted** (2026-10-03) with the review decisions below (§9). Steps 1–3 implemented and
+approved (§10, §12 with the 2026-10-04 decisions in §13); steps 4–5 not yet (M15). Implements M15 of
 `docs/plans/phase-2.md` and decisions 5 and 4 there: renders by `matter_manager` and `tenant_admin` only
 (`export.create`), audited; Relativity's validator stays out until the licence question is answered.
 
@@ -378,3 +378,25 @@ Code: `edisc_worker.render_loader` (loader), `edisc_worker.render_store` (orches
     the observed participants. Collecting conversation metadata (type, name, members) as normalized
     items is a connector + normalizer change for a decision (backlog).
 11. **Custodian:** set when exactly one custodian-type scope of the job covers the conversation.
+
+## 13. Review decisions on §12 (2026-10-04), implemented (renderer 1.1.0, normalizer 0.2.0)
+1. **Conversation metadata:** the versioned conversation snapshots of ADR 0004's amendment are read
+   as of the job: type, name, members, topic, purpose, archived, shared. Every name the conversation
+   had goes into conversation `custom` as `edisc.known_name`, so a renamed channel stays findable
+   under old names. Exports still use `export_conversations`. A job with neither keeps the type
+   omitted and `edisc.conversation_metadata = not_collected`. Collecting this metadata is a hard
+   requirement of the Phase 3 live Slack connector.
+2. **Identities (§12.5) approved,** and every participant carries `slack.user_id` plus every name
+   from any of its snapshots (`edisc.known_name`, display and real names), so old names stay
+   searchable. `display` stays the name in force at the slice.
+3. **File bytes held beat a later refusal (§12.4):** approved.
+4. **Unavailable placeholders** are named from the message's own attachment reference (part of
+   the version fingerprint; now in the derivation): `{file_id}_{sanitized name}.UNAVAILABLE.txt`,
+   at most 200 bytes. The text gives the safe name, the file id, the name as shown in the message,
+   the reason and the recording item. `display` is the original name.
+5. **Custodians:** every custodian scope covering the conversation is listed in conversation
+   `custom` as `edisc.custodian` (sorted). The RSMF `custodian` field is set only when there is
+   exactly one; `X-RSMF-Custodian` lists every custodian's display name.
+
+These change the output bytes: `RENDERER_VERSION` 1.1.0, goldens in
+`tests/golden/rsmf/1.1.0_unicode-15.0.0_tzdata-2026e/`. The 1.0.0 generation stays as history.

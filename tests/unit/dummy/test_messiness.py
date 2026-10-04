@@ -6,6 +6,8 @@ import json
 import unicodedata
 from datetime import UTC, datetime, time
 
+import pytest
+
 from edisc_connector_dummy.dataset import Dataset, ts_to_datetime
 from edisc_connectors_base.types import BatchKind
 
@@ -152,6 +154,7 @@ async def test_directory_has_deactivated_external_bot_and_app_users() -> None:
     members = [
         m
         for b in [b async for b in c.fetch_directory(conn, None)]
+        if b.request["method"] == "users.list"
         for m in json.loads(b.body)["members"]
     ]
     assert len(members) == spec.users
@@ -186,9 +189,37 @@ async def test_user_renamed_mid_dataset_and_between_epochs() -> None:
         cc, _ = connector()
         bs = [b async for b in cc.fetch_directory(connection(spec, epoch), None)]
         return {
-            m["id"]: m["profile"]["display_name"] for b in bs for m in json.loads(b.body)["members"]
+            m["id"]: m["profile"]["display_name"]
+            for b in bs
+            if b.request["method"] == "users.list"
+            for m in json.loads(b.body)["members"]
         }
 
     before, after = await directory(0), await directory(1)
     assert before["U00005DUMMY"] != after["U00005DUMMY"]
     assert {k for k in before if before[k] != after[k]} == {"U00005DUMMY"}
+
+
+@pytest.mark.parametrize("epoch", [0, 1, 2])
+async def test_directory_has_versioned_conversation_metadata(epoch: int) -> None:
+    """conversations.list pages follow the users: conversation 0 is renamed at epoch 1, conversation 1
+    archived from epoch 2; every conversation of the dataset is listed with its members."""
+    spec = make_spec()
+    c, _ = connector()
+    conn = connection(spec, epoch)
+    channels = {
+        ch["id"]: ch
+        for b in [b async for b in c.fetch_directory(conn, None)]
+        if b.request["method"] == "conversations.list"
+        for ch in json.loads(b.body)["channels"]
+    }
+    ds = Dataset(spec)
+    assert set(channels) == {cv.id for cv in ds.conversations()}
+    first, second = ds.conversations()[0], ds.conversations()[1]
+    assert channels[first.id]["name"] == (first.name + "-renamed" if epoch >= 1 else first.name)
+    assert channels[second.id]["is_archived"] is (epoch >= 2)
+    assert all(ch["members"] == list(ds.conversation(cid).members) for cid, ch in channels.items())
+    kinds = {cid: ds.conversation(cid).kind for cid in channels}
+    assert set(kinds.values()) == {"channel", "private_channel", "dm", "group_dm"}
+    assert all(ch["is_im"] == (kinds[cid] == "dm") for cid, ch in channels.items())
+    assert all(ch["is_mpim"] == (kinds[cid] == "group_dm") for cid, ch in channels.items())

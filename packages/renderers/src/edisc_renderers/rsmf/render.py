@@ -159,25 +159,31 @@ def _display(user_id: str, identity: Identity | None) -> str:
     return user_id
 
 
-def _participant(user_id: str, identity: Identity | None) -> dict[str, Any]:
+def _known_names(snapshots: Sequence[Identity]) -> list[tuple[str, str]]:
+    """Every name a participant had in any snapshot, so an old name stays searchable."""
+    names = {n for s in snapshots for n in (s.display_name, s.real_name) if n and n.strip()}
+    return [("edisc.known_name", n) for n in sorted(names)]
+
+
+def _participant(
+    user_id: str, identity: Identity | None, snapshots: Sequence[Identity]
+) -> dict[str, Any]:
     out: dict[str, Any] = {
         "id": user_id,
         "account_id": user_id,
         "display": _display(user_id, identity),
     }
+    pairs: list[tuple[str, str | None]] = [("slack.user_id", user_id), *_known_names(snapshots)]
     if identity is not None:
         if identity.email and _EMAIL.match(identity.email):
             out["email"] = identity.email
-        custom = _custom(
-            [
+        pairs += [
                 ("slack.team_id", identity.team_id),
                 ("slack.is_bot", None if identity.is_bot is None else _flag(identity.is_bot)),
                 ("slack.is_app_user", None if identity.is_app_user is None else _flag(identity.is_app_user)),
                 ("slack.deactivated", None if identity.deactivated is None else _flag(identity.deactivated)),
-            ]
-        )  # fmt: skip
-        if custom:
-            out["custom"] = custom
+        ]  # fmt: skip
+    out["custom"] = _custom(pairs)
     return out
 
 
@@ -244,7 +250,7 @@ def _event(
             zname = attachment_name(fid, outcome.name)
             attachments.append({"id": zname, "display": outcome.name or fid, "size": outcome.size})
         else:
-            zname = placeholder_name(fid)
+            zname = placeholder_name(fid, outcome.name)
             text = _placeholder_text(outcome)
             attachments.append({"id": zname, "display": outcome.name or fid, "size": len(text)})
             unavailable.append(("edisc.file_unavailable", f"{fid}: {outcome.reason}"))
@@ -282,8 +288,9 @@ def _event(
 def _placeholder_text(f: FileUnavailable) -> bytes:
     lines = [
         "This file was not collected. This text file stands in for it.",
+        f"File: {attachment_name(f.file_id, f.name)}",
         f"File id: {f.file_id}",
-        f"Original name: {f.name}",
+        f"Name in the message: {f.name}",
         f"Reason reported by the source: {f.reason}",
         f"Recorded as item: {f.item.idempotency_key}",
         "",
@@ -352,9 +359,11 @@ def _build_file(
         observed.update(u for r in e.get("reactions", []) for u in r.get("participants", []))
         observed.update(x["participant"] for x in e.get("edits", []))
     members = sorted(set(conv.members)) if conv.members else sorted(observed)
-    everyone = observed | set(members) | ({conv.custodian} if conv.custodian else set())
+    everyone = observed | set(members) | set(conv.custodians)
     identities = {u: _identity_at(inp.identities.get(u, ()), bounds[1]) for u in everyone}
-    participants = [_participant(u, identities[u]) for u in sorted(everyone)]
+    participants = [
+        _participant(u, identities[u], inp.identities.get(u, ())) for u in sorted(everyone)
+    ]
     displays = {p["id"]: p["display"] for p in participants}
 
     conversation: dict[str, Any] = {
@@ -373,6 +382,12 @@ def _build_file(
                     "slack.is_ext_shared",
                     None if conv.is_ext_shared is None else _flag(conv.is_ext_shared),
                 ),
+                ("slack.is_archived", None if conv.archived is None else _flag(conv.archived)),
+                ("slack.topic", conv.topic),
+                ("slack.purpose", conv.purpose),
+                *(("edisc.known_name", n) for n in conv.known_names),
+                # every custodian covering the conversation; the RSMF field only when there is one
+                *(("edisc.custodian", c) for c in conv.custodians),
             ]
         ),
     }
@@ -380,8 +395,8 @@ def _build_file(
         conversation["type"] = _RSMF_TYPE[conv.slack_type]
     if conv.name:
         conversation["display"] = conv.name
-    if conv.custodian:
-        conversation["custodian"] = conv.custodian
+    if len(conv.custodians) == 1:
+        conversation["custodian"] = conv.custodians[0]
 
     slice_id = f"{inp.job.job_id}/{conv.id}/{inp.day.isoformat()}/{part_no}"
     collection_id = str(uuid.uuid5(_EVENT_COLLECTION_NS, slice_id))
@@ -407,7 +422,7 @@ def _build_file(
 
     begin, end = everything[0].message.sent_at, everything[-1].message.sent_at
     unavailable = sum(isinstance(o, FileUnavailable) for o in zip_files.values())
-    custodian = displays.get(conv.custodian) if conv.custodian else None
+    custodian = ", ".join(displays[c] for c in conv.custodians) or None
     title = conv.name or conv.id
     headers: list[tuple[str, str]] = [
         ("Date", eml.rfc5322_date(end)),

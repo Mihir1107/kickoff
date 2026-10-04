@@ -13,7 +13,7 @@ from edisc_core.canonical import canonical_hash
 from edisc_core.idempotency import idempotency_key
 from edisc_core.schemas import EventKind, ItemType
 
-NORMALIZER_VERSION = "0.1.0"
+NORMALIZER_VERSION = "0.2.0"
 """Recorded on every derived record (item_derivations). Bump when derivation logic changes. Changing a
 FINGERPRINT definition additionally changes content hashes (see the fp tags in slack.py) and is a
 deliberate, reviewed change (ADR 0004)."""

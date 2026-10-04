@@ -91,7 +91,7 @@ def _decode(cursor: Cursor | None) -> int:
 
 class DummyConnector:
     source = "dummy"
-    version = "0.1.0"
+    version = "0.2.0"  # 0.2.0: conversation metadata pages in the directory unit
     item_source = "slack"  # both dialects simulate the Slack Web API
     dialect = "api"
     archive_backed = False
@@ -338,26 +338,38 @@ class DummyConnector:
     async def fetch_directory(
         self, conn: Connection, cursor: Cursor | None
     ) -> AsyncIterator[RawBatch]:
+        """Users, then conversations (with members): one cursor over both, so a resumed directory unit
+        continues exactly where it stopped."""
         ds, epoch = self.dataset(conn)
         users = list(ds.users(epoch))
+        convs = [c.id for c in ds.conversations()]
         size = ds.spec.page_size
         index = _decode(cursor)
-        pages = max(1, -(-len(users) // size))
+        user_pages = max(1, -(-len(users) // size))
+        pages = user_pages + max(1, -(-len(convs) // size))
         while index < pages:
             nxt = _encode(index + 1) if index + 1 < pages else None
-            chunk = users[index * size : (index + 1) * size]
+            if index < user_pages:
+                chunk: list[Any] = users[index * size : (index + 1) * size]
+                method, key = "users.list", f"users|{epoch}|{index}"
 
-            def respond(chunk: list[Any] = chunk, nxt: Cursor | None = nxt) -> bytes:
-                return slack.users_page(ds, chunk, epoch, next_cursor=nxt)
+                def respond(chunk: list[Any] = chunk, nxt: Cursor | None = nxt) -> bytes:
+                    return slack.users_page(ds, chunk, epoch, next_cursor=nxt)
 
-            body: bytes = await self._request(
-                conn, ds, "directory", f"users|{epoch}|{index}", respond
-            )
+            else:
+                at = index - user_pages
+                chunk = convs[at * size : (at + 1) * size]
+                method, key = "conversations.list", f"conversations|{epoch}|{at}"
+
+                def respond(chunk: list[Any] = chunk, nxt: Cursor | None = nxt) -> bytes:
+                    return slack.conversations_page(ds, chunk, epoch, next_cursor=nxt)
+
+            body: bytes = await self._request(conn, ds, "directory", key, respond)
             yield RawBatch(
                 body,
                 nxt,
                 BatchKind.DIRECTORY,
-                {"method": "users.list", "cursor": _encode(index) if index else ""},
+                {"method": method, "cursor": _encode(index) if index else ""},
             )
             index += 1
 

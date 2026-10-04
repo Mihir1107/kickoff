@@ -171,12 +171,29 @@ async def test_a_sealed_job_renders_into_locked_productions(
         assert parsed.headers["X-RSMF-CollectionId"] == str(job_id)
         assert parsed.headers["X-RSMF-CompletenessBasis"] == "source"
         (conv,) = parsed.manifest["conversations"]
-        assert "type" not in conv  # live sources record no conversation metadata yet
-        assert {"name": "edisc.conversation_metadata", "value": "not_collected"} in conv["custom"]
+        # conversation metadata from the versioned snapshots of the directory unit
+        dconv = ds.conversation(conv["id"])
+        state = ds.conversation_state(conv["id"], 1)
+        kind = {"channel": "public_channel", "private_channel": "private_channel", "dm": "im",
+                "group_dm": "mpim"}[dconv.kind]  # fmt: skip
+        cust = {}
+        for pair in conv["custom"]:
+            cust.setdefault(pair["name"], []).append(pair["value"])
+        assert cust["slack.conversation_type"] == [kind]
+        assert conv["type"] == ("direct" if kind in ("im", "mpim") else "channel")
+        assert conv.get("display") == (state["name"] or None)
+        assert conv["participants"] == sorted(dconv.members)
+        if conv["id"] == ds.conversations()[0].id:  # renamed at epoch 1: both names searchable
+            assert cust["edisc.known_name"] == sorted([dconv.name, f"{dconv.name}-renamed"])
         for e in parsed.manifest["events"]:
             c = custom(e)
             if "edisc.context" not in c:
                 primaries[c["edisc.source_item_id"][0]] += 1
+            for value in c.get("edisc.file_unavailable", []):  # named after the message's reference
+                fid = value.split(":")[0]
+                (ref,) = [a for a in e["attachments"] if a["id"].startswith(f"{fid}_")]
+                assert ref["id"] == f"{fid}_{ref['display']}.UNAVAILABLE.txt"
+                assert ref["display"] != fid and ref["display"].startswith("attachment-")
     assert primaries == Counter(want)  # every in-scope message exactly once, across all files
 
 
@@ -333,3 +350,40 @@ async def test_a_re_render_that_differs_from_the_stored_production_is_an_inciden
         await conn.close()
     with pytest.raises(EvidenceIntegrityError, match="re-render"):
         await _render(app_sessions, s3, settings, t, job_id, render_id)
+
+
+async def test_every_custodian_scope_covering_a_conversation_is_listed(
+    app_sessions: Sessions, s3: S3Client, settings: Settings
+) -> None:
+    from edisc_connectors_base.types import CollectionScope
+    from edisc_core.schemas import ScopeType
+
+    t = await new_tenant(app_sessions)
+    ds = Dataset(SPEC)
+    first = ds.conversations()[0]
+    a, b = sorted(first.members[:2])
+    start = datetime.combine(ds.day(0), datetime.min.time(), tzinfo=UTC)
+    end = datetime.combine(ds.day(ds.n_days(0)), datetime.min.time(), tzinfo=UTC)
+    conn = Connection(
+        t.tenant_id, t.connection_id, "dummy", SPEC.workspace_id,
+        {"spec": SPEC.model_dump(mode="json"), "epoch": 0},
+    )  # fmt: skip
+    job_id = new_id()
+    p = Pipeline(app_sessions, s3, settings, DummyConnector(RecordingLimiter()), CrashHooks())
+    await p.start_job(
+        tenant_id=t.tenant_id, job_id=job_id, matter_id=t.matter_id, connection_id=t.connection_id,
+        scopes=[CollectionScope(ScopeType.CUSTODIAN, u, start, end) for u in (a, b)],
+        requested_by="tester",
+    )  # fmt: skip
+    await p.run(tenant_id=t.tenant_id, job_id=job_id, conn=conn)
+    out = await _render(app_sessions, s3, settings, t, job_id)
+    checked = 0
+    for f in out.files:
+        if f.record["conversation_id"] != first.id:
+            continue
+        checked += 1
+        data = await _read(s3, settings, f.storage_key, f.version_id)
+        (conv,) = check_eml(data).manifest["conversations"]
+        listed = [x["value"] for x in conv["custom"] if x["name"] == "edisc.custodian"]
+        assert listed == [a, b] and "custodian" not in conv
+    assert checked > 0

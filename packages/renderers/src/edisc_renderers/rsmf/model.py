@@ -176,9 +176,19 @@ class ConversationInfo:
     workspace_id: str
     name: str | None = None
     members: tuple[str, ...] | None = None  # known membership; else the observed participants
-    custodian: str | None = None  # user id of the mapped matter custodian
+    custodians: tuple[str, ...] = ()  # user ids of every custodian scope covering the conversation
     is_shared: bool | None = None
     is_ext_shared: bool | None = None
+    archived: bool | None = None
+    topic: str | None = None
+    purpose: str | None = None
+    known_names: tuple[str, ...] = ()  # every name the conversation had (renames stay searchable)
+
+    def __post_init__(self) -> None:
+        if list(self.custodians) != sorted(set(self.custodians)):
+            raise RenderInputError(f"{self.id}: custodians must be unique and sorted")
+        if list(self.known_names) != sorted(set(self.known_names)):
+            raise RenderInputError(f"{self.id}: known names must be unique and sorted")
 
 
 @dataclass(frozen=True)
