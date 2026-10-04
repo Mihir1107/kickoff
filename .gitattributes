@@ -1,0 +1,2 @@
+# rendered RSMF goldens are compared byte for byte (CRLF line endings): never convert them
+tests/golden/rsmf/** binary

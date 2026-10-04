@@ -1,4 +1,4 @@
-# Handoff (2026-10-03)
+# Handoff (2026-10-04)
 
 Read with `CLAUDE.md` (rules), `docs/ARCHITECTURE.md`, `docs/adr/`, `docs/plans/phase-2.md` and `docs/BACKLOG.md`.
 
@@ -88,7 +88,13 @@ in the backlog for a cloud VM: `scripts/resume_soak.py --messages 1000000 --kill
   occurrences) resumes to the clean result; one real SIGKILL of the export worker process in the middle
   of the day-file index, then a new worker. Seams: `ExportIngest(hooks=CrashHooks)`.
 
-## Next milestone: M15, RSMF renderer (ADR 0015, ACCEPTED 2026-10-03; nothing implemented yet)
+## In progress: M15, RSMF renderer (ADR 0015, ACCEPTED 2026-10-03)
+**Steps 1 and 2 are done (2026-10-04) and await the user's review before step 3.** The decisions
+taken in code are in ADR 0015 §10. The one deviation is STORED zip entries instead of deflate
+(§10.1). Tests are in `tests/unit/renderers` (property tests over random dummy datasets including
+slices over 10,000 events, reconciliation tampering, golden bytes, purity) and `tests/golden/rsmf/1.0.0/`.
+Mutation-checked: dropped, duplicated and unmarked events, the cap, nondeterminism, schema format,
+zip order, missing edits, missing `parent_not_rendered`, Merkle leaves.
 Read `docs/adr/0015-rsmf-renderer.md` in full first; §9 has the review decisions:
 - each render has its own custody stream; its first event (`render_started`) references the SEALED
   job: job id, final chain head (hash, seq) and seal anchor (key, version). Seals stay final; never

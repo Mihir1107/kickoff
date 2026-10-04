@@ -79,16 +79,23 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Layout/tier rules: `edisc_connector_slack_export.layout`. Format details marked *(confirm on real
   export)* in ADR 0014 stay provisional until the real exports are fixtures.
 
-## RSMF renders (M15, ADR 0015 accepted; not implemented yet)
+## RSMF renders (M15, ADR 0015; steps 1-2 done: schema + pure renderer; steps 3-5 not yet)
 - Renders read normalized items and derivations, never raw pages (raw evidence only to embed file
-  bytes, by pinned version). The renderer itself is pure (no DB/S3 imports); a worker loader feeds it.
+  bytes, by pinned version). The renderer `edisc_renderers.rsmf` is pure (no DB/S3/clock imports; a
+  test enforces it). A worker loader builds `SliceInput`s and streams evidence through a `FileOpener`.
 - Byte-identical output for the same inputs AND renderer version: no clocks, fixed zip timestamps and
-  order, canonical JSON, boundary and Message-ID derived from the source hash. Changing output bytes
-  needs a `RENDERER_VERSION` bump (golden tests are keyed by it).
+  order, STORED entries (deflate differs per zlib build; ADR 0015 §10.1, for review), canonical JSON,
+  boundary and Message-ID derived from the source hash. Changing output bytes needs a
+  `RENDERER_VERSION` bump (`rsmf/version.py`); then record `tests/golden/rsmf/<version>/` with
+  `EDISC_RECORD_RSMF=1` (it never overwrites an existing generation).
+- Reconciliation: every in-scope message appears as exactly ONE event across the render's files, plus
+  marked context events. `Reconciler` fails loudly; the loader must pass `finish()` the count and
+  `subject_digest` derived from the job's in-scope links, never from rendered output. Each referenced
+  thread root goes in `SliceInput.roots` or `missing_roots`; anything else raises.
 - Custody: each render has its own stream; its first event references the sealed job (id, final head,
   seal anchor). Never append to a sealed job chain.
-- Every manifest is validated against the vendored `rsmf_schema_2_0_0.json`. The Relativity validator is
-  not used until the licence is confirmed.
+- Every manifest is validated against the vendored `rsmf_schema_2_0_0.json` (SHA-256 pinned, format
+  checks on). The Relativity validator is not used until the licence is confirmed.
 
 ## Conventions
 - Python 3.12, `uv` only (no pip). Add deps with `uv add --package <member> <dep>`.

@@ -1,0 +1,62 @@
+"""RSMF 2.0 renderer (ADR 0015). Pure: no database, object storage or clock imports."""
+
+from edisc_renderers.rsmf.model import (
+    RENDER_CAP,
+    ConversationInfo,
+    EvidenceMismatchError,
+    FileAttachment,
+    FileOpener,
+    FileOutcome,
+    FileUnavailable,
+    Identity,
+    ItemRef,
+    JobInfo,
+    ManifestInvalidError,
+    Message,
+    MessageState,
+    Reactions,
+    ReconciliationError,
+    RenderError,
+    RenderInputError,
+    RenderOptions,
+    SliceInput,
+    ZipLimitError,
+)
+from edisc_renderers.rsmf.reconcile import Reconciler, Reconciliation, subject_digest
+from edisc_renderers.rsmf.render import RenderedFile, RenderResult, render_job, render_slice
+from edisc_renderers.rsmf.slicing import slice_bounds, slice_day
+from edisc_renderers.rsmf.version import RENDERER_VERSION, RSMF_VERSION
+
+__all__ = [
+    "RENDERER_VERSION",
+    "RENDER_CAP",
+    "RSMF_VERSION",
+    "ConversationInfo",
+    "EvidenceMismatchError",
+    "FileAttachment",
+    "FileOpener",
+    "FileOutcome",
+    "FileUnavailable",
+    "Identity",
+    "ItemRef",
+    "JobInfo",
+    "ManifestInvalidError",
+    "Message",
+    "MessageState",
+    "Reactions",
+    "Reconciler",
+    "Reconciliation",
+    "ReconciliationError",
+    "RenderError",
+    "RenderInputError",
+    "RenderOptions",
+    "RenderResult",
+    "RenderedFile",
+    "SliceInput",
+    "ZipLimitError",
+    "render_job",
+    "render_slice",
+    "slice_bounds",
+    "slice_day",
+    "subject_digest",
+]

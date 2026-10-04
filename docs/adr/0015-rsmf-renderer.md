@@ -1,6 +1,7 @@
 # ADR 0015: RSMF renderer (`edisc_renderers.rsmf`)
 
-Status: **Accepted** (2026-10-03) with the review decisions below (§9); not implemented yet (M15). Implements M15 of
+Status: **Accepted** (2026-10-03) with the review decisions below (§9). Steps 1–2 implemented
+(2026-10-04, §10, awaiting review); steps 3–5 not yet (M15). Implements M15 of
 `docs/plans/phase-2.md` and decisions 5 and 4 there: renders by `matter_manager` and `tenant_admin` only
 (`export.create`), audited; Relativity's validator stays out until the licence question is answered.
 
@@ -137,7 +138,7 @@ Status: **Accepted** (2026-10-03) with the review decisions below (§9); not imp
 ### 6. Determinism
 The same inputs give byte-identical files:
 - zip entries sorted by name, with timestamps fixed at 1980-01-01 00:00 and fixed permissions;
-- deflate at a fixed level, no extra fields, no comments;
+- deflate at a fixed level, no extra fields, no comments (implemented as STORED, for review: §10.1);
 - canonical JSON and derived boundary and ids.
 
 A golden test compares bytes (`tests/golden/rsmf/`), keyed by renderer version. A change to the bytes
@@ -212,3 +213,72 @@ custody stream.
    stream: producibility is decided at production time.
 4. **Renderer version:** `X-RSMF-Generator: edisc-renderers/<semver>` plus `X-RSMF-RendererVersion:
    <semver>`. Byte-identical output is tied to a specific renderer version.
+
+## 10. Implementation notes, steps 1 and 2 (2026-10-04, for review)
+Steps 1 (vendored schema) and 2 (pure renderer) are done. Each item below is either a detail the ADR
+left open or a deviation, marked **for review**.
+
+1. **Zip entries are STORED, not deflated (deviation from §6, for review).** Deflate output depends on
+   the zlib build: this laptop has zlib 1.2.12, while CI's python-build-standalone may ship another
+   zlib or zlib-ng. A fixed level therefore does not give byte-identical files across machines.
+   Byte identity is the stronger promise, so it wins. The cost is size: manifests are text and
+   compress about 5x, while most attachments are already compressed. Evidence files are streamed once,
+   so they use a data descriptor (flag bit 3). The manifest and placeholders carry their CRC in the
+   local header.
+2. **Render reconciliation (review requirement).**
+   - Unit of reconciliation: the message subject (source item id). Earlier versions are its `edits`,
+     and the latest reaction snapshot and the files fold into the same event.
+   - `Reconciler` re-reads each manifest from its bytes and checks every slice:
+     - the primary events, as a multiset of subjects, equal the slice's in-scope input (exactly once);
+     - parts run 1..M and every file is at or under the cap;
+     - every context event is marked, is a root that a primary event of the same file needs, and its
+       marker agrees with `edisc.in_scope`.
+   - At the job level, each (conversation, day) is accepted once. `finish(expected count, expected
+     digest)` compares with an order-independent subject digest (sum of SHA-256 mod 2^256). The loader
+     derives the expected values from the job's in-scope links, so a substitution (one item missing,
+     another duplicated) fails even when the counts agree.
+   - Summary (`Reconciliation.as_payload()`, goes into the render custody stream in step 4):
+     `items_in`, `events_out`, `context_events`, `context_events_out_of_scope`, `edits`,
+     `attachments`, `unavailable_attachments`, `parents_not_rendered`, `files`, `slices`,
+     `subject_digest`.
+3. **Thread context:**
+   - A reply whose root is not a primary event of the same file gets the root as context, wherever the
+     root is (an earlier slice, an earlier part, out of scope).
+   - The loader must name each referenced root: give it in `roots`, or declare it in `missing_roots`
+     (the job does not hold it). Anything else is a loader bug and raises.
+   - A missing root is never invented. The reply carries `edisc.parent_not_rendered` plus
+     `edisc.parent_not_rendered_reason`: `context_excluded` (include_context off) or `not_collected`
+     (the job lacks the root).
+   - Splitting counts the context a part needs, so no file exceeds the cap.
+4. **Edits:** one entry per consecutive pair of versions, `previous`/`new` always present (an empty
+   string is real content here). The timestamp is the new version's `deleted_ts` for a deletion, or
+   its `edited_ts` hint when that hint changed; otherwise it is omitted. A tombstone therefore keeps
+   the collected text in `edits`, and `deleted: true` comes with no body.
+5. **Custom names:**
+   - On events: `edisc.idempotency_key`, `edisc.content_hash`, `edisc.source_item_id`, `edisc.version`,
+     `edisc.in_scope`, `edisc.prior_version_keys`, `edisc.reactions.idempotency_key` and
+     `.content_hash`, `edisc.file_unavailable` (`<file id>: <reason>`), `edisc.context`,
+     `slack.subtype`.
+   - On participants: `slack.team_id`, `slack.is_bot`, `slack.is_app_user`, `slack.deactivated`.
+   - On conversations: `slack.conversation_type`, `slack.kind`, `slack.workspace_id`,
+     `slack.is_shared`, `slack.is_ext_shared`.
+   - Name/value pairs are sorted, and empty values are omitted (the schema needs `minLength: 1`).
+6. **`X-RSMF-SourceHash` leaves:** every version of each rendered message (current and earlier), its
+   reaction snapshot, and the file item (or `file_unavailable` item) of each attachment, context
+   included. Deduplicated by key; the same key with two content hashes raises.
+7. **Envelope details the ADR left open:**
+   - `From: rsmf@rsmf.edisc`, plus a `Subject` naming the conversation, day, zone and part;
+   - `X-RSMF-Participants` lists display names in participant-id order, joined with `, `;
+   - ASCII header values fold at spaces only, so a single long token (`Message-ID`, the source hash)
+     may exceed 78 characters but never 998. Non-ASCII values use UTF-8 B encoded-words split on
+     code points;
+   - the text part is base64 UTF-8;
+   - file name `{conversation}_{day}_part{NNN}of{MMM}.rsmf`.
+8. **Zip names:** NFC, then `_` for path separators, Windows-reserved characters, control, format,
+   private and unassigned code points, and Unicode spaces other than U+0020. Leading and trailing dots
+   and spaces are trimmed. A name collision between two file ids raises.
+9. **Limits:** no ZIP64. A file over 4 GiB or 65,535 entries raises `ZipLimitError` before any byte is
+   written (backlog). Evidence size and SHA-256 are verified while streaming
+   (`EvidenceMismatchError`).
+10. **Runtime dependence:** byte identity also assumes Python 3.12's Unicode database and the tz
+    database in use (backlog: pin `tzdata` and record both versions in custody).

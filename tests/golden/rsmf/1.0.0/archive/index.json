@@ -1,0 +1,28 @@
+{
+  "files": [
+    {
+      "name": "C00000DUMMY_2026-01-05_part001of001.rsmf",
+      "sha256": "ec59a9a00189fff27b93484f5d009e7b9de2aa5f3dde44a0ca8c8ebeb37159c1",
+      "size": 75987
+    }
+  ],
+  "options": {
+    "cap": 10000,
+    "include_context": true,
+    "time_zone": "UTC"
+  },
+  "reconciliation": {
+    "attachments": 1,
+    "context_events": 0,
+    "context_events_out_of_scope": 0,
+    "edits": 0,
+    "events_out": 12,
+    "files": 1,
+    "items_in": 12,
+    "parents_not_rendered": 0,
+    "slices": 1,
+    "subject_digest": "9d567fecba7ff681918f3d635192dd37e2e4f77e037b4b2c3a9dd48fc0ef9e26",
+    "unavailable_attachments": 0
+  },
+  "renderer_version": "1.0.0"
+}

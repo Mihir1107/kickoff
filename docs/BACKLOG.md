@@ -57,3 +57,8 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - Slack exports: a 5 GB streaming archive ingestion run with memory measured (ADR 0014 section 3), on the
   same cloud VM as the 1M soak (laptop disk too small to keep it next to the test stack). The reader's
   bounded memory is already tested on a 3M-entry synthetic directory and by fuzzing.
+- RSMF renders over 4 GiB or 65,535 zip entries: ZIP64 in `edisc_renderers.rsmf.zipstream` (M15 refuses
+  them loudly with `ZipLimitError` before any byte is written). Measure real slice sizes first.
+- RSMF byte identity across runtimes: it depends on Python 3.12's Unicode database (NFC, character
+  categories in zip names) and on the tz database (slice bounds in a matter time zone). Pin `tzdata`
+  as a dependency, and record the tzdata and Unicode versions in the render's custody stream.
