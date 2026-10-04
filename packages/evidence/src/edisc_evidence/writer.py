@@ -107,6 +107,18 @@ def file_key(tenant_id: uuid.UUID, sha256: str) -> str:
     return f"t/{tenant_id}/files/sha256/{sha256[:2]}/{sha256}"
 
 
+def production_key(tenant_id: uuid.UUID, render_id: uuid.UUID, name: str) -> str:
+    return f"t/{tenant_id}/productions/{render_id}/{name}"
+
+
+async def _hash_stream(stream: AsyncIterable[bytes]) -> tuple[str, int]:
+    digest, size = hashlib.sha256(), 0
+    async for chunk in stream:
+        digest.update(chunk)
+        size += len(chunk)
+    return digest.hexdigest(), size
+
+
 class EvidenceWriter:
     def __init__(
         self, sessions: async_sessionmaker[AsyncSession], s3: S3Client, settings: Settings
@@ -164,6 +176,123 @@ class EvidenceWriter:
         return WrittenEvidence(
             evidence_id, key, result.sha256, result.size, result.version_id, deduplicated=False
         )
+
+    # ------------------------------------------------------------------ productions (ADR 0015 §7)
+    async def write_production(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        job_id: uuid.UUID,
+        render_id: uuid.UUID,
+        name: str,
+        matter_retention_until: datetime,
+        stream: Callable[[], AsyncIterable[bytes]],
+    ) -> WrittenEvidence:
+        """A render output (an `.rsmf` file) as locked evidence of kind ``production``. It is tied to the
+        RENDERED job, so the job's matter owns its retention. The output is reproducible, so ``stream``
+        is a factory, and a retry re-renders instead of buffering:
+
+        - no row yet: register, stream into WORM while hashing (single pass), persist the hash
+          (origin ``render``) before the commit, then complete;
+        - a complete row: hash the re-render. It must equal the recorded hash (a different output for
+          the same inputs is an integrity incident); nothing is written;
+        - a pending row (an earlier attempt died): hash the re-render, then pin a stored version that
+          holds exactly those bytes, or upload it.
+
+        A stream that raises (evidence that fails verification, a render error) aborts the upload,
+        so no object exists and the row stays pending. Nothing partial can be completed.
+        """
+        if "/" in name or not name:
+            raise ValueError(f"unsafe production name {name!r}")
+        key = production_key(tenant_id, render_id, name)
+        retain = effective_retain_until(self._settings, matter_retention_until)
+        existing = await self._row_by_key(tenant_id, key)
+        if existing is None:
+            evidence_id = new_id()
+            await self._register(tenant_id, job_id, evidence_id, key, "production", retain)
+            return await self._upload_production(tenant_id, evidence_id, key, retain, stream())
+        if existing.kind != "production" or existing.job_id != job_id:
+            raise EvidenceIntegrityError(f"{key}: registered for another job or kind")
+        digest, size = await _hash_stream(stream())
+        if existing.state == "complete":
+            if (existing.sha256, existing.size_bytes) != (digest, size):
+                raise EvidenceIntegrityError(
+                    f"{key}: re-render gives sha256 {digest}, recorded {existing.sha256}"
+                )
+            return WrittenEvidence(
+                existing.id, key, digest, size, existing.version_id, deduplicated=True
+            )
+        if existing.state != "pending":
+            raise EvidenceIntegrityError(f"{key}: unexpected registry state {existing.state}")
+        if existing.source_sha256 not in (None, digest):
+            raise EvidenceIntegrityError(f"{key}: persisted render hash differs from re-render")
+        version = await self._find_version(key, digest, size)
+        if version is None:
+            return await self._upload_production(
+                tenant_id, existing.id, key, existing.retain_until, stream()
+            )
+        if existing.source_sha256 is None:
+            await self._persist_source_hash(tenant_id, existing.id, digest, "render")
+        await self._complete(tenant_id, existing.id, digest, size, version)
+        return WrittenEvidence(existing.id, key, digest, size, version, deduplicated=False)
+
+    async def _upload_production(
+        self,
+        tenant_id: uuid.UUID,
+        evidence_id: uuid.UUID,
+        key: str,
+        retain: datetime,
+        stream: AsyncIterable[bytes],
+    ) -> WrittenEvidence:
+        async def record_upload(upload_id: str) -> None:
+            async with tenant_tx(self._sessions, tenant_id) as s:
+                await s.execute(
+                    text(
+                        "UPDATE evidence_objects SET upload_id = :u WHERE id = :id AND state = 'pending'"
+                        " AND upload_id IS NULL"
+                    ),
+                    {"u": upload_id, "id": evidence_id},
+                )
+
+        async def persist_render_hash(sha256: str, _size: int) -> None:
+            row = await self._row_by_key(tenant_id, key)
+            if row is not None and row.source_sha256 is not None:
+                if row.source_sha256 != sha256:  # an earlier attempt persisted another output
+                    raise EvidenceIntegrityError(
+                        f"{key}: render hash differs from the persisted one"
+                    )
+                return
+            await self._persist_source_hash(tenant_id, evidence_id, sha256, "render")
+
+        result = await stream_upload(
+            self._s3,
+            bucket=self._bucket,
+            key=key,
+            stream=stream,
+            part_size=self._settings.evidence_part_size_bytes,
+            lock=Lock(retain),
+            if_none_match=True,
+            on_multipart_started=record_upload,
+            before_commit=persist_render_hash,
+        )
+        if not result.version_id:
+            raise EvidenceIntegrityError(f"{key}: store returned no VersionId (versioning off?)")
+        await self._complete(tenant_id, evidence_id, result.sha256, result.size, result.version_id)
+        return WrittenEvidence(
+            evidence_id, key, result.sha256, result.size, result.version_id, deduplicated=False
+        )
+
+    async def _row_by_key(self, tenant_id: uuid.UUID, key: str) -> Any:
+        async with tenant_tx(self._sessions, tenant_id) as s:
+            return (
+                await s.execute(
+                    text(
+                        "SELECT id, kind, job_id, state, sha256, size_bytes, source_sha256, version_id,"
+                        " retain_until FROM evidence_objects WHERE storage_key = :k"
+                    ),
+                    {"k": key},
+                )
+            ).one_or_none()
 
     # ------------------------------------------------------------------ files
     async def write_file(

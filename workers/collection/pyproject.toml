@@ -12,6 +12,7 @@ dependencies = [
     "edisc-db",
     "edisc-evidence",
     "edisc-normalizer",
+    "edisc-renderers",
     "temporalio>=1.33.0",
 ]
 
@@ -21,6 +22,7 @@ edisc-db = { workspace = true }
 edisc-evidence = { workspace = true }
 edisc-custody = { workspace = true }
 edisc-normalizer = { workspace = true }
+edisc-renderers = { workspace = true }
 edisc-connectors-base = { workspace = true }
 edisc-connector-dummy = { workspace = true }
 edisc-connector-slack-export = { workspace = true }

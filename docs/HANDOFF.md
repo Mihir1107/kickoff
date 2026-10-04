@@ -28,7 +28,7 @@ history.
 - the audit-burst measurement;
 - the anchor-storm fix (migration 0017).
 
-**Migrations at head:** 0023.
+**Migrations at head:** 0024.
 
 **Not done in Phase 1:** the 1M-message soak. Laptop disk is too small (~15 GB free; it needs ~21 GB). It is
 in the backlog for a cloud VM: `scripts/resume_soak.py --messages 1000000 --kills 10`.
@@ -89,7 +89,9 @@ in the backlog for a cloud VM: `scripts/resume_soak.py --messages 1000000 --kill
   of the day-file index, then a new worker. Seams: `ExportIngest(hooks=CrashHooks)`.
 
 ## In progress: M15, RSMF renderer (ADR 0015, ACCEPTED 2026-10-03)
-**Steps 1 and 2 are done (2026-10-04) and await the user's review before step 3.** The decisions
+**Steps 1 and 2 are approved (2026-10-04; pins and §11 committed). Step 3 (loader + storage, ADR
+0015 §12) is done and awaits review before step 4.** Open: conversation metadata for live sources
+(§12.10, backlog decision). The decisions
 taken in code are in ADR 0015 §10. The one deviation is STORED zip entries instead of deflate
 (§10.1). Tests are in `tests/unit/renderers` (property tests over random dummy datasets including
 slices over 10,000 events, reconciliation tampering, golden bytes, purity) and `tests/golden/rsmf/1.0.0/`.

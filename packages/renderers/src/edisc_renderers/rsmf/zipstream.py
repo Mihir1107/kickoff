@@ -13,13 +13,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import struct
 import zlib
-from collections.abc import Iterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Sequence
 from dataclasses import dataclass
 
 from edisc_renderers.rsmf.model import (
+    AsyncFileOpener,
     EvidenceMismatchError,
     FileAttachment,
     FileOpener,
@@ -77,10 +79,12 @@ def check_limits(entries: Sequence[ZipEntry]) -> None:
         )
 
 
-def _streamed(file: FileAttachment, opener: FileOpener) -> Iterator[tuple[bytes, int, int]]:
+async def _streamed(
+    file: FileAttachment, opener: AsyncFileOpener
+) -> AsyncIterator[tuple[bytes, int, int]]:
     """Yield chunks of a file with the running CRC-32 and size; verify size and SHA-256 at the end."""
     crc, size, digest = 0, 0, hashlib.sha256()
-    for chunk in opener(file):
+    async for chunk in opener(file):
         if not chunk:
             continue
         crc = zlib.crc32(chunk, crc)
@@ -98,7 +102,8 @@ def _streamed(file: FileAttachment, opener: FileOpener) -> Iterator[tuple[bytes,
         )
 
 
-def zip_stream(entries: Sequence[ZipEntry], opener: FileOpener) -> Iterator[bytes]:
+async def azip_stream(entries: Sequence[ZipEntry], opener: AsyncFileOpener) -> AsyncIterator[bytes]:
+    """The zip as an async stream: evidence is read through `opener` one chunk at a time."""
     check_limits(entries)
     offset = 0
     central: list[bytes] = []
@@ -120,7 +125,7 @@ def zip_stream(entries: Sequence[ZipEntry], opener: FileOpener) -> Iterator[byte
             )
             yield header + name
             crc, size = 0, 0
-            for chunk, crc, size in _streamed(e.file, opener):  # noqa: B007 (last values used below)
+            async for chunk, crc, size in _streamed(e.file, opener):  # noqa: B007 (last values used below)
                 yield chunk
             descriptor = _DESCRIPTOR.pack(0x08074B50, crc, size, size)
             yield descriptor
@@ -153,3 +158,28 @@ def zip_stream(entries: Sequence[ZipEntry], opener: FileOpener) -> Iterator[byte
     directory = b"".join(central)
     yield directory
     yield _EOCD.pack(0x06054B50, 0, 0, len(entries), len(entries), len(directory), offset, 0)
+
+
+def as_async(opener: FileOpener) -> AsyncFileOpener:
+    """A synchronous opener (tests, in-memory data) as an async one."""
+
+    async def aopen(file: FileAttachment) -> AsyncIterator[bytes]:
+        for chunk in opener(file):
+            yield chunk
+
+    return aopen
+
+
+def drive(stream: AsyncIterator[bytes]) -> Iterator[bytes]:
+    """Iterate an async byte stream from synchronous code (outside any running event loop), lazily:
+    one chunk at a time on a private loop, so memory stays bounded."""
+    loop = asyncio.new_event_loop()
+    try:
+        while True:
+            try:
+                yield loop.run_until_complete(anext(stream))
+            except StopAsyncIteration:
+                return
+    finally:
+        loop.run_until_complete(stream.aclose())  # type: ignore[attr-defined]
+        loop.close()

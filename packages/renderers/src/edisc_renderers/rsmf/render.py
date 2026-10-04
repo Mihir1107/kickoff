@@ -11,7 +11,7 @@ import json
 import re
 import uuid
 from collections import defaultdict
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, tzinfo
 from typing import Any
@@ -22,6 +22,7 @@ from edisc_core.time import format_utc, from_epoch
 from edisc_custody.merkle import batch_root
 from edisc_renderers.rsmf import eml
 from edisc_renderers.rsmf.model import (
+    AsyncFileOpener,
     ConversationInfo,
     FileAttachment,
     FileOpener,
@@ -39,7 +40,7 @@ from edisc_renderers.rsmf.reconcile import Reconciler, Reconciliation, subject_d
 from edisc_renderers.rsmf.slicing import event_order, slice_bounds, slice_day, split_parts
 from edisc_renderers.rsmf.validate import check_structure, validate_manifest
 from edisc_renderers.rsmf.version import RENDERER_VERSION, RSMF_VERSION
-from edisc_renderers.rsmf.zipstream import ZipEntry, check_limits, zip_stream
+from edisc_renderers.rsmf.zipstream import ZipEntry, as_async, azip_stream, check_limits, drive
 
 _EVENT_COLLECTION_NS = uuid.uuid5(uuid.NAMESPACE_URL, "urn:edisc:rsmf:eventcollectionid")
 _CONVERSATION_ID = re.compile(r"^[A-Za-z0-9]{1,64}$")
@@ -107,12 +108,17 @@ class RenderedFile:
     def boundary(self) -> str:
         return f"rsmf-{self.source_hash[:40]}"
 
-    def stream(self, opener: FileOpener) -> Iterator[bytes]:
+    def astream(self, opener: AsyncFileOpener) -> AsyncIterator[bytes]:
         """The EML bytes in chunks. Evidence is streamed through `opener` and verified as it passes;
-        a mismatch raises mid-stream, and the consumer must discard what it wrote."""
-        return eml.envelope(
-            self.headers, self.boundary, self.summary, zip_stream(self.entries, opener)
+        a mismatch raises mid-stream, and the consumer must discard what it wrote (the production
+        writer aborts the upload, so no object is created)."""
+        return eml.aenvelope(
+            self.headers, self.boundary, self.summary, azip_stream(self.entries, opener)
         )
+
+    def stream(self, opener: FileOpener) -> Iterator[bytes]:
+        """`astream` for synchronous callers (outside an event loop) with a synchronous opener."""
+        return drive(self.astream(as_async(opener)))
 
     def record(self) -> dict[str, Any]:
         """Payload for the render's `rsmf_rendered` custody event (the writer adds SHA-256 and size)."""
@@ -354,12 +360,13 @@ def _build_file(
     conversation: dict[str, Any] = {
         "id": conv.id,
         "platform": "slack",
-        "type": _RSMF_TYPE[conv.slack_type],
         "participants": members,
         "custom": _custom(
             [
                 ("slack.conversation_type", conv.slack_type),
-                ("slack.kind", _KIND[conv.slack_type]),
+                ("slack.kind", _KIND[conv.slack_type] if conv.slack_type else None),
+                # the RSMF type is optional: omitted, and said so, when the source gave no metadata
+                ("edisc.conversation_metadata", None if conv.slack_type else "not_collected"),
                 ("slack.workspace_id", conv.workspace_id),
                 ("slack.is_shared", None if conv.is_shared is None else _flag(conv.is_shared)),
                 (
@@ -369,6 +376,8 @@ def _build_file(
             ]
         ),
     }
+    if conv.slack_type is not None:
+        conversation["type"] = _RSMF_TYPE[conv.slack_type]
     if conv.name:
         conversation["display"] = conv.name
     if conv.custodian:

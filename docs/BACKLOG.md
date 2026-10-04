@@ -61,3 +61,6 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
   the render package, referenced by hash (design: ADR 0015 §11; implement after M15 step 5).
 - RSMF renders over 4 GiB or 65,535 zip entries with ZIP64 in `edisc_renderers.rsmf.zipstream`.
   After §11, only a manifest or placeholder set that is itself too large would need it.
+- **[decision needed, before production renders of live jobs]** Collect conversation metadata (type,
+  name, members, shared flags) as normalized items, so live-source renders carry the RSMF conversation
+  `type` and name (ADR 0015 §12.10; today only export jobs have them).

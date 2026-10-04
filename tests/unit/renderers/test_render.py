@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import email
 import email.policy
 from datetime import date
@@ -379,3 +380,63 @@ def test_render_job_refuses_a_message_given_twice() -> None:
     m = msg("2026-01-05T09:00:00Z")
     with pytest.raises(RenderInputError, match="twice"):
         render_job(JOB, [conv()], [m, m], {}, {}, RenderOptions())
+
+
+def test_unknown_conversation_type_is_omitted_and_said_so() -> None:
+    [(_, parsed)] = render(slice_input(DAY, [msg("2026-01-05T09:00:00Z")], conversation=conv(None)))
+    (c,) = parsed.manifest["conversations"]
+    assert "type" not in c
+    cust = {x["name"]: x["value"] for x in c["custom"]}
+    assert cust["edisc.conversation_metadata"] == "not_collected"
+    assert "slack.conversation_type" not in cust and "slack.kind" not in cust
+
+
+async def test_async_and_sync_streams_give_the_same_bytes() -> None:
+    from collections.abc import AsyncIterator
+
+    data = b"x" * 5000
+    m = msg("2026-01-05T09:00:00Z", files=("F1",))
+    [f] = render_slice(
+        slice_input(DAY, [m], files={"F1": attachment("F1", "a.bin", data)}), RenderOptions()
+    )
+
+    async def aopen(_: FileAttachment) -> AsyncIterator[bytes]:
+        for i in range(0, len(data), 777):
+            yield data[i : i + 777]
+
+    streamed = b"".join([c async for c in f.astream(aopen)])
+    # the synchronous driver runs its own loop, so an async caller uses it from a thread
+    synced = await asyncio.to_thread(lambda: b"".join(f.stream(opener_for({"F1": data}))))
+    assert streamed == synced
+
+
+async def test_attachments_stream_through_with_bounded_memory() -> None:
+    """A 64 MiB attachment goes through the zip and base64 without ever being held whole."""
+    import hashlib
+    import tracemalloc
+    from collections.abc import AsyncIterator
+
+    size, chunk = 64 << 20, b"\xab" * (1 << 20)
+    digest = hashlib.sha256()
+    for _ in range(size // len(chunk)):
+        digest.update(chunk)
+    big = FileAttachment("F1", "big.bin", size, digest.hexdigest(), ref("T0TEST/file/F1"), "F1")
+    [f] = render_slice(
+        slice_input(DAY, [msg("2026-01-05T09:00:00Z", files=("F1",))], files={"F1": big}),
+        RenderOptions(),
+    )
+
+    async def aopen(_: FileAttachment) -> AsyncIterator[bytes]:
+        for _ in range(size // len(chunk)):
+            yield chunk
+
+    tracemalloc.start()
+    total = 0
+    try:
+        async for out in f.astream(aopen):
+            total += len(out)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert total > size * 4 // 3  # base64 of the whole zip went through
+    assert peak < 8 << 20, f"peak {peak / 2**20:.1f} MiB for a 64 MiB attachment"

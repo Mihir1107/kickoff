@@ -1,7 +1,7 @@
 # ADR 0015: RSMF renderer (`edisc_renderers.rsmf`)
 
-Status: **Accepted** (2026-10-03) with the review decisions below (§9). Steps 1–2 implemented
-(2026-10-04, §10, awaiting review); steps 3–5 not yet (M15). Implements M15 of
+Status: **Accepted** (2026-10-03) with the review decisions below (§9). Steps 1–2 implemented and
+approved (§10); step 3 implemented (§12, awaiting review); steps 4–5 not yet (M15). Implements M15 of
 `docs/plans/phase-2.md` and decisions 5 and 4 there: renders by `matter_manager` and `tenant_admin` only
 (`export.create`), audited; Relativity's validator stays out until the licence question is answered.
 
@@ -315,3 +315,66 @@ leave the zip and travel next to it. This comes ahead of ZIP64, which stays in t
   recorded hash.
 - **Not a gap:** the bytes are delivered, so completeness is unchanged. `X-RSMF-SourceHash` still
   covers the file item. The collection report (M16) lists the external natives.
+
+## 12. Implementation notes, step 3: loader and storage (2026-10-04, for review)
+Code: `edisc_worker.render_loader` (loader), `edisc_worker.render_store` (orchestration),
+`EvidenceWriter.write_production`, migration 0024. Tests: `tests/integration/renders`,
+`tests/integration/api/test_export_render.py`.
+
+1. **Only finished, sealed jobs** are loaded (`RenderRefusedError` otherwise). Verifying the job chain
+   up to its head is step 4, with the render's custody stream.
+2. **Query by id:**
+   - per conversation, the job's links come from `job_items` by the conversation's unit keys, then
+     items by id in chunks of 5,000; days and types are filtered in Python;
+   - a message can be linked under another unit of its conversation (a thread batch; first link
+     wins), which is why the index covers all of a conversation's units;
+   - scope comes from the link, and a subject whose versions are linked with different scope raises.
+3. **As of the job:**
+   - message versions run up to the highest version linked to the job (earlier versions from earlier
+     jobs become `edits`);
+   - reaction snapshots, files, availability and identity snapshots are the versions collected up to
+     the job's `finished_at`;
+   - each item uses its derivation with the highest normalizer version; `derived_hash` is re-checked,
+     so an altered derivation fails;
+   - `X-RSMF-NormalizerVersion` lists every version the job's links have.
+4. **Files:** collected bytes at any time up to the job win over a later refusal (we hold them). The
+   registry SHA-256 must equal the file item's `raw_hash` and its derivation, and the evidence must be
+   complete and pinned. Without bytes, the latest `file_unavailable` event gives a placeholder (named
+   by file id: the message derivation does not carry file names). A file with neither raises.
+5. **Identities:** directory snapshots (`#profile`) in collection order. The first is in force from the
+   start, each later one from its `collected_at`, the time we observed the change (a lower bound
+   for when it happened). Profile embeds are not used yet. Bot/app flags are not in the profile
+   fingerprint, so they are omitted.
+6. **Verified on read (review requirement):**
+   - every page or archive entry behind an item of a slice is read by its pinned VersionId (archive
+     entries are decompressed from the locked export's pinned version, with CRC and size checked) and
+     must match the registry's SHA-256 and size;
+   - every item's sub-document at `json_path` must re-hash to `items.raw_hash`;
+   - all of this happens before the slice reaches the renderer, outside any DB transaction, and each
+     object once per render;
+   - file bytes stream by pinned version and are checked by the renderer as they pass; a mismatch
+     aborts that upload, so no object exists and the row stays `pending`;
+   - tested by tampering a page hash, an item's `raw_hash` and a derivation (all fail before anything
+     is stored), and by flipping a byte on the file read path.
+7. **Two passes:** pass 1 renders the manifests, with no bytes, and reconciles the whole job against
+   `count(DISTINCT in-scope message subject)` and its digest, computed by the database. Only then does
+   pass 2 re-render and store, and each file must equal pass 1's record (name, slice, part, source
+   hash, counts). A reconciliation failure therefore leaves nothing stored. Pages verified in pass 1
+   are not re-read.
+8. **Storage:**
+   - kind `production`, key `t/{tenant}/productions/{render}/{file name}`, tied to the rendered job,
+     so its matter owns retention (`effective_retain_until`; the retention extension job covers it);
+   - Object Lock COMPLIANCE at creation, If-None-Match;
+   - our SHA-256 is persisted as `source_sha256` with origin `render` before the commit, and the row
+     records the VersionId;
+   - the writer takes a stream factory: a retry with the same render id re-renders and must hash to
+     the stored row (an incident otherwise), or completes a pending row against a stored version.
+9. **Memory:** one conversation's link index (subject, ts, version, scope) plus one slice of items and
+   one page at a time. A 64 MiB attachment peaks under 8 MiB through zip and base64 (test); the upload
+   buffers one part.
+10. **Conversation metadata (open, for review):** only export jobs record a conversation's type and name
+    (`export_conversations`). For live and dummy jobs the RSMF `type` (optional in the schema) and the
+    name are omitted, and `edisc.conversation_metadata = not_collected` says so. Members fall back to
+    the observed participants. Collecting conversation metadata (type, name, members) as normalized
+    items is a connector + normalizer change for a decision (backlog).
+11. **Custodian:** set when exactly one custodian-type scope of the job covers the conversation.

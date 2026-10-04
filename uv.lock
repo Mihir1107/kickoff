@@ -591,6 +591,7 @@ dependencies = [
     { name = "edisc-db" },
     { name = "edisc-evidence" },
     { name = "edisc-normalizer" },
+    { name = "edisc-renderers" },
     { name = "temporalio" },
 ]
 
@@ -604,6 +605,7 @@ requires-dist = [
     { name = "edisc-db", editable = "packages/db" },
     { name = "edisc-evidence", editable = "packages/evidence" },
     { name = "edisc-normalizer", editable = "packages/normalizer" },
+    { name = "edisc-renderers", editable = "packages/renderers" },
     { name = "temporalio", specifier = ">=1.33.0" },
 ]
 

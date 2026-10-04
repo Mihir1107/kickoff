@@ -5,7 +5,7 @@ encoded-words split on code-point boundaries. Everything is a pure function of i
 from __future__ import annotations
 
 import binascii
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
 from datetime import datetime
 
 from edisc_core.time import ensure_utc
@@ -84,30 +84,42 @@ def header(name: str, value: str) -> bytes:
     return b"".join(line.encode("ascii") + CRLF for line in lines)
 
 
+class _Base64Lines:
+    """Base64 in 76-character CRLF lines, incrementally: holds at most one partial line plus a chunk."""
+
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+
+    def feed(self, chunk: bytes) -> bytes:
+        self._buffer += chunk
+        whole = len(self._buffer) // _B64_IN * _B64_IN
+        if not whole:
+            return b""
+        view = bytes(self._buffer[:whole])
+        del self._buffer[:whole]
+        return b"".join(
+            binascii.b2a_base64(view[i : i + _B64_IN], newline=False) + CRLF
+            for i in range(0, whole, _B64_IN)
+        )
+
+    def finish(self) -> bytes:
+        rest = bytes(self._buffer)
+        self._buffer.clear()
+        return binascii.b2a_base64(rest, newline=False) + CRLF if rest else b""
+
+
 def base64_lines(chunks: Iterable[bytes]) -> Iterator[bytes]:
-    """Base64 in 76-character CRLF lines, streamed: holds at most one partial line plus a chunk."""
-    buffer = bytearray()
+    encoder = _Base64Lines()
     for chunk in chunks:
-        buffer += chunk
-        whole = len(buffer) // _B64_IN * _B64_IN
-        if whole:
-            view = bytes(buffer[:whole])
-            del buffer[:whole]
-            yield b"".join(
-                binascii.b2a_base64(view[i : i + _B64_IN], newline=False) + CRLF
-                for i in range(0, whole, _B64_IN)
-            )
-    if buffer:
-        yield binascii.b2a_base64(bytes(buffer), newline=False) + CRLF
+        out = encoder.feed(chunk)
+        if out:
+            yield out
+    tail = encoder.finish()
+    if tail:
+        yield tail
 
 
-def envelope(
-    headers: Sequence[tuple[str, str]],
-    boundary: str,
-    summary: str,
-    zip_chunks: Iterable[bytes],
-) -> Iterator[bytes]:
-    """The whole EML as a stream of byte chunks."""
+def _head(headers: Sequence[tuple[str, str]], boundary: str, summary: str) -> bytes:
     head = b"".join(header(n, v) for n, v in headers)
     head += header("MIME-Version", "1.0")
     head += f'Content-Type: multipart/mixed; boundary="{boundary}"'.encode("ascii") + CRLF
@@ -120,6 +132,20 @@ def envelope(
     head += b'Content-Type: application/zip; name="rsmf.zip"' + CRLF
     head += b"Content-Transfer-Encoding: base64" + CRLF
     head += b'Content-Disposition: attachment; filename="rsmf.zip"' + CRLF + CRLF
-    yield head
-    yield from base64_lines(zip_chunks)
-    yield f"--{boundary}--".encode("ascii") + CRLF
+    return head
+
+
+async def aenvelope(
+    headers: Sequence[tuple[str, str]],
+    boundary: str,
+    summary: str,
+    zip_chunks: AsyncIterator[bytes],
+) -> AsyncIterator[bytes]:
+    """The whole EML as an async stream of byte chunks."""
+    yield _head(headers, boundary, summary)
+    encoder = _Base64Lines()
+    async for chunk in zip_chunks:
+        out = encoder.feed(chunk)
+        if out:
+            yield out
+    yield encoder.finish() + f"--{boundary}--".encode("ascii") + CRLF

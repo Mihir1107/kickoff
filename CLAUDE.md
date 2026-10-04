@@ -79,7 +79,7 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Layout/tier rules: `edisc_connector_slack_export.layout`. Format details marked *(confirm on real
   export)* in ADR 0014 stay provisional until the real exports are fixtures.
 
-## RSMF renders (M15, ADR 0015; steps 1-2 done: schema + pure renderer; steps 3-5 not yet)
+## RSMF renders (M15, ADR 0015; steps 1-3 done: schema, pure renderer, loader + storage; 4-5 not yet)
 - Renders read normalized items and derivations, never raw pages (raw evidence only to embed file
   bytes, by pinned version). The renderer `edisc_renderers.rsmf` is pure (no DB/S3/clock imports; a
   test enforces it). A worker loader builds `SliceInput`s and streams evidence through a `FileOpener`.
@@ -96,6 +96,12 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   marked context events. `Reconciler` fails loudly; the loader must pass `finish()` the count and
   `subject_digest` derived from the job's in-scope links, never from rendered output. Each referenced
   thread root goes in `SliceInput.roots` or `missing_roots`; anything else raises.
+- Loader (`edisc_worker.render_loader`): by id, per conversation; only sealed jobs. Every page or archive
+  entry behind a rendered item is read by pinned VersionId and checked (registry SHA-256 and size, each
+  item's `raw_hash` at `json_path`, `derived_hash`) BEFORE the slice reaches the renderer, outside DB
+  transactions. Files stream by pinned version and are checked as they pass.
+- Storage (`edisc_worker.render_store`): pass 1 reconciles with nothing written; pass 2 writes
+  `production` evidence (`EvidenceWriter.write_production`, origin `render`) tied to the rendered job.
 - Custody: each render has its own stream; its first event references the sealed job (id, final head,
   seal anchor). Never append to a sealed job chain.
 - Every manifest is validated against the vendored `rsmf_schema_2_0_0.json` (SHA-256 pinned, format

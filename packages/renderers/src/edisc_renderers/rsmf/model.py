@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, tzinfo
 from typing import Literal
@@ -150,6 +150,8 @@ class FileUnavailable:
 FileOutcome = FileAttachment | FileUnavailable
 FileOpener = Callable[[FileAttachment], Iterable[bytes]]
 """Streams a file's pinned bytes in chunks. The renderer checks size and SHA-256 as it goes."""
+AsyncFileOpener = Callable[[FileAttachment], AsyncIterator[bytes]]
+"""The same, async: the worker loader reads pinned evidence from object storage."""
 
 
 @dataclass(frozen=True)
@@ -170,7 +172,7 @@ class Identity:
 @dataclass(frozen=True)
 class ConversationInfo:
     id: str
-    slack_type: SlackConversationType
+    slack_type: SlackConversationType | None  # None: the source's metadata was not collected
     workspace_id: str
     name: str | None = None
     members: tuple[str, ...] | None = None  # known membership; else the observed participants
