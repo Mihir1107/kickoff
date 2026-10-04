@@ -14,8 +14,15 @@ Per fetched page (`Pipeline.process_batch`):
 2. **One short transaction** (one page, far below `lock_timeout`):
    - lock the work unit `FOR NO KEY UPDATE`. The NO KEY form leaves foreign-key checks from
      `job_items` unblocked;
-   - **checkpoint guard:** if the stored cursor is no longer the cursor this batch started from, the
-     batch was already applied, so return with **no writes at all**;
+   - **checkpoint guard:** if the stored checkpoint `(cursor, pages_done)` is no longer the one this
+     batch started from, or the unit is already `done`/`failed`, the batch was already applied, so
+     return with **no writes at all**. *Amended 2026-10-04:* the guard compared the cursor alone,
+     but a unit starts AND ends at cursor `NULL` (ABA). A zombie attempt that read the start, stalled
+     on its first page while the retry applied every page, then re-applied its stale page: an extra
+     empty `items_collected` event, the cursor and last page rewound (a finalized unit too), and the
+     whole unit re-collected. When the source changed between the two fetches, the stale page was
+     recorded as a NEW message version after the newer one. `pages_done` grows by one per applied
+     batch, so the pair never repeats (CI flake on 4404085: 30 batch events vs 26);
    - load prior state, normalize (pure), persist items (idempotent);
    - insert `job_items` links under a **pre-allocated custody event id** (the FK to `custody_events`
      is `DEFERRABLE INITIALLY DEFERRED`), learning exactly which links are new;
@@ -37,6 +44,10 @@ and never re-fetches the unit.
 - A resumed job records exactly the same number of custody batch events as a clean job.
 - **Two concurrent executors** of the same units (zombie plus retry) produce the clean result.
   Mutation-checked: without the checkpoint guard this test fails.
+- **A stale first batch after the unit is finished** (deterministic: the zombie is held after its
+  evidence write while the retry drains the unit; three cases: drained, drained and finalized, source
+  changed in between) writes nothing. Mutation-checked: a cursor-only guard fails all three, and a
+  guard without `pages_done` fails the drained case.
 
 ## Consequences
 - + Kill before commit means the page is replayed from the old cursor. Kill after commit means the

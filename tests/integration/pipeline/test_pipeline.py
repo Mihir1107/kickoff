@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from typing import Any
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
@@ -9,6 +12,7 @@ from types_aiobotocore_s3 import S3Client
 from edisc_connector_dummy.dataset import Dataset
 from edisc_core.schemas import JobStatus
 from edisc_core.settings import Settings
+from edisc_worker.pipeline import CrashHooks
 
 from ..normalizer.harness import new_tenant
 from .conftest import CrashAt, JobRun, assert_invariants, event_items, run_job, spec, units
@@ -418,6 +422,150 @@ async def test_two_concurrent_executors_of_the_same_unit_apply_each_batch_once(
     from .conftest import JobRun
 
     await assert_invariants(app_sessions, s3, settings, race_t, sp, JobRun(job, status, False), 0)
+
+
+class _HoldFirstBatch(CrashHooks):
+    """Holds the executor's FIRST batch after its evidence is written (checkpoint already read, the
+    transaction not yet started) until ``release`` is set: a zombie attempt stalled on a slow page."""
+
+    def __init__(self) -> None:
+        self.held, self.release, self.seen = asyncio.Event(), asyncio.Event(), 0
+
+    async def hit(self, point: str) -> None:
+        if point == "after_evidence":
+            self.seen += 1
+            if self.seen == 1:
+                self.held.set()
+                await self.release.wait()
+
+
+@pytest.mark.parametrize("case", ["drained", "drained_and_finalized", "source_changed"])
+async def test_a_stale_first_batch_is_a_no_op_after_another_executor_finished_the_unit(
+    app_sessions: Sessions, s3: S3Client, settings: Settings, case: str
+) -> None:
+    """ABA on the checkpoint: a unit starts at cursor NULL and ends at cursor NULL. An executor that read
+    the start checkpoint and stalled on its first page (zombie attempt) while another executor applied
+    EVERY page of the unit (and maybe finalized it) must find the checkpoint moved and write nothing:
+    no custody event, no rewind of the cursor or the last page, no counter changes, no re-collection.
+    ``source_changed``: the zombie fetched its page before an edit the retry saw (epoch 0 vs 1), so
+    applying it would record the older text as a NEW version, after the newer one."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import text
+
+    from edisc_connector_dummy.connector import DummyConnector, scope_for_days
+    from edisc_connectors_base.types import Connection
+    from edisc_core.ids import new_id
+    from edisc_db.session import tenant_tx
+    from edisc_worker.pipeline import CollectOutcome, Pipeline
+
+    from ...unit.dummy.conftest import RecordingLimiter
+    from .conftest import JobRun
+
+    sp = spec()
+    ds = Dataset(sp)
+    clean_t, race_t = await new_tenant(app_sessions), await new_tenant(app_sessions)
+    clean = await run_job(app_sessions, s3, settings, clean_t, sp, 0)
+    finalized, epoch = case != "drained", 1 if case == "source_changed" else 0
+
+    def connection(at: int) -> Connection:
+        return Connection(
+            race_t.tenant_id,
+            race_t.connection_id,
+            "dummy",
+            sp.workspace_id,
+            {"spec": sp.model_dump(mode="json"), "epoch": at},
+        )
+
+    conn, stale_conn = connection(epoch), connection(0)
+    scope = scope_for_days(
+        "*", datetime.combine(ds.day(0), datetime.min.time(), tzinfo=UTC), ds.n_days(0)
+    )
+    job = new_id()
+    hold = _HoldFirstBatch()
+    a = Pipeline(app_sessions, s3, settings, DummyConnector(RecordingLimiter()))
+    zombie = Pipeline(app_sessions, s3, settings, DummyConnector(RecordingLimiter()), hold)
+    await a.start_job(
+        tenant_id=race_t.tenant_id,
+        job_id=job,
+        matter_id=race_t.matter_id,
+        connection_id=race_t.connection_id,
+        scopes=[scope],
+        requested_by="tester",
+    )
+    await a.enumerate_units(tenant_id=race_t.tenant_id, job_id=job, conn=conn)
+
+    async def unit_state(unit_key: str) -> tuple[Any, ...]:
+        async with tenant_tx(app_sessions, race_t.tenant_id) as s:
+            u = (
+                await s.execute(
+                    text(
+                        "SELECT status, cursor, pages_done, file_gaps, day_anomalies,"
+                        " last_page_evidence_id FROM work_units WHERE job_id = :j AND unit_key = :k"
+                    ),
+                    {"j": job, "k": unit_key},
+                )
+            ).one()
+            counts = (
+                await s.execute(
+                    text(
+                        "SELECT (SELECT count(*) FROM custody_events WHERE stream_id = :j),"
+                        " (SELECT count(*) FROM job_items WHERE job_id = :j),"
+                        " (SELECT count(*) FROM items WHERE tenant_id = :t)"
+                    ),
+                    {"j": job, "t": race_t.tenant_id},
+                )
+            ).one()
+        return (*u, *counts)
+
+    async def drain(p: Pipeline, unit_key: str, via: Connection = conn) -> None:
+        while (
+            await p.collect_pages(
+                tenant_id=race_t.tenant_id, job_id=job, unit_key=unit_key, conn=via, max_pages=1
+            )
+            is CollectOutcome.MORE
+        ):
+            pass
+
+    async def finalize(unit_key: str) -> None:
+        await a.finalize_unit(tenant_id=race_t.tenant_id, job_id=job, unit_key=unit_key, conn=conn)
+
+    async with tenant_tx(app_sessions, race_t.tenant_id) as s:
+        target = (
+            await s.execute(
+                text(
+                    "SELECT unit_key FROM work_units WHERE job_id = :j AND kind <> 'directory'"
+                    " ORDER BY unit_key LIMIT 1"
+                ),
+                {"j": job},
+            )
+        ).scalar_one()
+    for unit_key in await a.pending_units(race_t.tenant_id, job):
+        if unit_key != target:
+            await drain(a, unit_key)
+            await finalize(unit_key)
+            continue
+        stale = asyncio.create_task(drain(zombie, unit_key, stale_conn))
+        await asyncio.wait_for(hold.held.wait(), 30)  # the zombie read cursor NULL, page 1 written
+        await drain(a, unit_key)  # the retry applies every page: cursor back to NULL
+        if finalized:
+            await finalize(unit_key)
+        before = await unit_state(unit_key)
+        assert before[1] is None and before[2] > 1  # a multi-page unit, fully applied
+        hold.release.set()
+        await asyncio.wait_for(stale, 60)
+        after = await unit_state(unit_key)
+        assert after == before, f"the stale batch changed the unit: {before} -> {after}"
+        if not finalized:
+            await finalize(unit_key)
+    status = await a.finalize_job(tenant_id=race_t.tenant_id, job_id=job)
+    assert status is JobStatus.COMPLETED
+    run = JobRun(job, status, False)
+    if epoch == 0:  # the clean run is an epoch-0 job over the same scope
+        assert await _batch_events(app_sessions, race_t, job) == await _batch_events(
+            app_sessions, clean_t, clean.job_id
+        )
+    await assert_invariants(app_sessions, s3, settings, race_t, sp, run, 0, oracle=epoch == 0)
 
 
 async def test_a_job_without_scopes_is_rejected_at_creation(

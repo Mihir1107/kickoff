@@ -4,8 +4,9 @@ Per batch (one source page):
   1. Network I/O first, OUTSIDE any transaction: the page and every file it references are written to
      WORM and completed (or the file's refusal is recorded). The transaction only references completed
      evidence, and stays short (one page), far below ``lock_timeout``.
-  2. ONE transaction: lock the work unit (``FOR NO KEY UPDATE``), confirm the checkpoint is still where
-     this batch started (otherwise the batch was already applied: no-op), normalize, persist items,
+  2. ONE transaction: lock the work unit (``FOR NO KEY UPDATE``), confirm the checkpoint (cursor AND
+     pages_done) is still where this batch started and the unit is not finished (otherwise the batch
+     was already applied: no-op), normalize, persist items,
      link them to the job (``in_scope`` on the LINK), append the custody batch event whose Merkle root
      covers exactly the NEW links, advance the checkpoint and counters. Commit.
   3. After commit: anchor the custody head if due.
@@ -581,6 +582,7 @@ class Pipeline:
                     conn=conn,
                     batch=batch,
                     cursor_before=cursor,
+                    pages_before=row.pages_done + pages,
                     unit=unit,
                     scope=scope,
                 )
@@ -703,10 +705,16 @@ class Pipeline:
         conn: Connection,
         batch: RawBatch,
         cursor_before: str | None,
+        pages_before: int,
         unit: WorkUnit | None,
         scope: UnitScope,
     ) -> bool:
-        """One batch, exactly once. Returns False if the checkpoint had already moved (no-op)."""
+        """One batch, exactly once. Returns False if the checkpoint had already moved (no-op).
+
+        The checkpoint is ``(cursor, pages_done)``, never the cursor alone: a unit starts AND ends at
+        cursor NULL, so an executor that read the start and stalled while another applied every page
+        would otherwise re-apply its stale first page (and re-collect the unit). ``pages_done`` grows by
+        one per applied batch, so the pair never repeats."""
         retention = await self._retention(tenant_id, job_id)
         dialect = self.connector.dialect
         # 1. network I/O first, outside any transaction: evidence written AND completed (or, for an
@@ -761,13 +769,17 @@ class Pipeline:
             current = (
                 await s.execute(
                     text(
-                        "SELECT cursor, pages_done FROM work_units WHERE job_id = :j AND unit_key = :k FOR NO KEY UPDATE"
+                        "SELECT status, cursor, pages_done FROM work_units WHERE job_id = :j AND unit_key = :k FOR NO KEY UPDATE"
                     ),
                     {"j": job_id, "k": unit_key},
                 )
             ).one()
-            if current.cursor != cursor_before:
-                return False  # this batch was already applied (retry after commit): no-op
+            if (
+                current.status in ("done", "failed")
+                or current.cursor != cursor_before
+                or current.pages_done != pages_before
+            ):
+                return False  # already applied (retry after commit, or a stalled zombie): no-op
             if directory:
                 subjects = directory_page_subjects(batch.body, ctx=ctx)
                 prior = await load_prior(
