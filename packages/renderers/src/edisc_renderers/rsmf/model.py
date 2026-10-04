@@ -10,9 +10,9 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, tzinfo
 from typing import Literal
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from edisc_core.time import ensure_utc
+from edisc_renderers.rsmf.runtime import UnknownZoneError, load_zone
 
 RENDER_CAP = 10_000
 """At most this many events per file, context events included (ADR 0015 §2)."""
@@ -201,10 +201,11 @@ class RenderOptions:
         self.zone()
 
     def zone(self) -> tzinfo:
+        """From the pinned tzdata package only, never the system zoneinfo (runtime.load_zone)."""
         try:
-            return ZoneInfo(self.time_zone)
-        except (ZoneInfoNotFoundError, ValueError) as exc:
-            raise RenderInputError(f"unknown time zone {self.time_zone!r}") from exc
+            return load_zone(self.time_zone)
+        except UnknownZoneError as exc:
+            raise RenderInputError(str(exc)) from exc
 
     def as_payload(self) -> dict[str, object]:
         return {

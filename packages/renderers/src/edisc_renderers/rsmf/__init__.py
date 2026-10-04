@@ -24,6 +24,13 @@ from edisc_renderers.rsmf.model import (
 )
 from edisc_renderers.rsmf.reconcile import Reconciler, Reconciliation, subject_digest
 from edisc_renderers.rsmf.render import RenderedFile, RenderResult, render_job, render_slice
+from edisc_renderers.rsmf.runtime import (
+    TZDATA_VERSION,
+    UNICODE_VERSION,
+    golden_key,
+    load_zone,
+    runtime_versions,
+)
 from edisc_renderers.rsmf.slicing import slice_bounds, slice_day
 from edisc_renderers.rsmf.version import RENDERER_VERSION, RSMF_VERSION
 
@@ -31,6 +38,8 @@ __all__ = [
     "RENDERER_VERSION",
     "RENDER_CAP",
     "RSMF_VERSION",
+    "TZDATA_VERSION",
+    "UNICODE_VERSION",
     "ConversationInfo",
     "EvidenceMismatchError",
     "FileAttachment",
@@ -54,8 +63,11 @@ __all__ = [
     "RenderedFile",
     "SliceInput",
     "ZipLimitError",
+    "golden_key",
+    "load_zone",
     "render_job",
     "render_slice",
+    "runtime_versions",
     "slice_bounds",
     "slice_day",
     "subject_digest",

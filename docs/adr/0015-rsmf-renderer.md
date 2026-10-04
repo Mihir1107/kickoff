@@ -138,12 +138,25 @@ Status: **Accepted** (2026-10-03) with the review decisions below (§9). Steps 1
 ### 6. Determinism
 The same inputs give byte-identical files:
 - zip entries sorted by name, with timestamps fixed at 1980-01-01 00:00 and fixed permissions;
-- deflate at a fixed level, no extra fields, no comments (implemented as STORED, for review: §10.1);
-- canonical JSON and derived boundary and ids.
+- entries STORED (no compression), no extra fields, no comments. *Decided 2026-10-04, replacing
+  "deflate at a fixed level":* deflate output depends on the zlib build (zlib versions and zlib-ng
+  produce different bytes for the same input and level), so it would tie byte identity to the machine.
+  STORED makes the zip bytes independent of the zlib build, so the same inputs give the same file on
+  any machine. The cost is size: manifests are text and compress about 5x, while most attachments are
+  already compressed;
+- canonical JSON and derived boundary and ids;
+- **pinned runtime inputs** (decided 2026-10-04): time zones come only from the pinned `tzdata` Python
+  package, never the system zoneinfo (`edisc_renderers.rsmf.runtime.load_zone`; a test poisons the
+  system path to prove it). Python is pinned to the patch version in `.python-version`, which fixes
+  `unicodedata` (NFC and the character categories used in zip names). `unicodedata.unidata_version`
+  and the tzdata (IANA) version go in the render summary (`Reconciliation`) and the render's custody
+  stream.
 
-A golden test compares bytes (`tests/golden/rsmf/`), keyed by renderer version. A change to the bytes
-without a version bump fails CI. The version is recorded in every file's headers and in the render's
-custody stream.
+A golden test compares bytes (`tests/golden/rsmf/<key>/`). The key is the renderer version plus the
+Unicode and tzdata versions (`golden_key()`, e.g. `1.0.0_unicode-15.0.0_tzdata-2026e`). A change to
+the bytes without a version bump fails CI, and a new Python or tzdata pin needs a newly recorded
+generation. The renderer version is recorded in every file's headers and in the render's custody
+stream.
 
 ### 7. Storage, custody, API
 - **Storage:** renders are derived products, never evidence. They go to
@@ -215,16 +228,12 @@ custody stream.
    <semver>`. Byte-identical output is tied to a specific renderer version.
 
 ## 10. Implementation notes, steps 1 and 2 (2026-10-04, for review)
-Steps 1 (vendored schema) and 2 (pure renderer) are done. Each item below is either a detail the ADR
-left open or a deviation, marked **for review**.
+Steps 1 (vendored schema) and 2 (pure renderer) are done. **Approved 2026-10-04**, including the
+items below (3, 4 and 7 were the gaps filled in code).
 
-1. **Zip entries are STORED, not deflated (deviation from §6, for review).** Deflate output depends on
-   the zlib build: this laptop has zlib 1.2.12, while CI's python-build-standalone may ship another
-   zlib or zlib-ng. A fixed level therefore does not give byte-identical files across machines.
-   Byte identity is the stronger promise, so it wins. The cost is size: manifests are text and
-   compress about 5x, while most attachments are already compressed. Evidence files are streamed once,
-   so they use a data descriptor (flag bit 3). The manifest and placeholders carry their CRC in the
-   local header.
+1. **Zip entries are STORED** (approved 2026-10-04 and moved into §6). Evidence files are streamed
+   once, so they use a data descriptor (flag bit 3). The manifest and placeholders carry their CRC in
+   the local header.
 2. **Render reconciliation (review requirement).**
    - Unit of reconciliation: the message subject (source item id). Earlier versions are its `edits`,
      and the latest reaction snapshot and the files fold into the same event.
@@ -277,8 +286,32 @@ left open or a deviation, marked **for review**.
 8. **Zip names:** NFC, then `_` for path separators, Windows-reserved characters, control, format,
    private and unassigned code points, and Unicode spaces other than U+0020. Leading and trailing dots
    and spaces are trimmed. A name collision between two file ids raises.
-9. **Limits:** no ZIP64. A file over 4 GiB or 65,535 entries raises `ZipLimitError` before any byte is
-   written (backlog). Evidence size and SHA-256 are verified while streaming
+9. **Limits:** no ZIP64. Until §11 is implemented, a file over 4 GiB or 65,535 entries raises
+   `ZipLimitError` before any byte is written. Evidence size and SHA-256 are verified while streaming
    (`EvidenceMismatchError`).
-10. **Runtime dependence:** byte identity also assumes Python 3.12's Unicode database and the tz
-    database in use (backlog: pin `tzdata` and record both versions in custody).
+10. **Runtime dependence:** pinned and recorded (§6).
+
+## 11. Oversized attachments (decided 2026-10-04; implement after step 5, required before production)
+An attachment must never fail a render because the zip would get too large. Oversized attachments
+leave the zip and travel next to it. This comes ahead of ZIP64, which stays in the backlog.
+
+- **Which attachments leave the zip:** each part's zip size and entry count are known before any byte
+  is written (sizes come from the inputs). While the planned zip exceeds the limits (4 GiB minus the
+  manifest and headroom, or 65,535 entries), attachments move out one at a time, largest first,
+  ties broken by file id. The choice depends only on the data, so the bytes stay deterministic. A
+  single attachment over the limit always leaves.
+- **In the RSMF:** the event keeps an attachment whose id is a placeholder text file
+  `{file_id}_EXTERNAL.txt`. The placeholder states the original name, size, SHA-256, the reason
+  (`exceeds_rsmf_zip_limit`) and the native's path in the render package. The event's `custom` gains
+  `edisc.file_external = <file id>: sha256:<hex>`. `display` is the original name.
+- **The native:** written once per render at `t/{tenant}/productions/{render}/natives/sha256/<hex>`,
+  content-addressed and streamed from the pinned evidence version, with the hash verified on read and
+  again on write. It is a production output like the `.rsmf` files: locked under the matter and
+  recorded with its VersionId and our SHA-256. A download or export of the render includes it, and
+  the render's file list references it by hash.
+- **Custody and reconciliation:** one `native_written` event per native (SHA-256, size, key, version,
+  referencing files). `rsmf_rendered` lists the external references. The summary gains
+  `external_attachments`. The reconciler fails if a referenced native was not written with the
+  recorded hash.
+- **Not a gap:** the bytes are delivered, so completeness is unchanged. `X-RSMF-SourceHash` still
+  covers the file item. The collection report (M16) lists the external natives.

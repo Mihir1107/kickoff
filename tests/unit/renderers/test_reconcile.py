@@ -18,6 +18,7 @@ from edisc_renderers.rsmf import (
     RenderOptions,
     SliceInput,
     render_slice,
+    runtime_versions,
     slice_day,
     subject_digest,
 )
@@ -95,6 +96,7 @@ def test_clean_slice_reconciles(rendered: tuple[SliceInput, list[RenderedFile]])
     assert summary.items_in == summary.events_out == len(subjects)
     assert summary.context_events == sum(f.context_event_count for f in files)
     assert summary.as_payload()["items_in"] == len(subjects)
+    assert summary.as_payload() | runtime_versions() == summary.as_payload()
 
 
 def _fails(inp: SliceInput, files: list[RenderedFile], match: str) -> None:

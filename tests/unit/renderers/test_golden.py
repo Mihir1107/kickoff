@@ -1,8 +1,10 @@
 """Golden bytes, keyed by renderer version (ADR 0015 §6).
 
-`tests/golden/rsmf/<RENDERER_VERSION>/<case>/` holds every file of a render plus `index.json`.
-Changing the output bytes without bumping `RENDERER_VERSION` fails here. After a deliberate bump,
-record the new generation (the old ones stay as history):
+`tests/golden/rsmf/<golden_key()>/<case>/` holds every file of a render plus `index.json`. The key is
+the renderer version plus the Unicode and tzdata versions (`edisc_renderers.rsmf.runtime`), every
+input to byte identity besides the data. Changing the output bytes without bumping `RENDERER_VERSION`
+fails here; a new Python or tzdata pin gives a new key that must be recorded (and should match the
+previous generation's bytes). Record a new generation (old ones stay as history):
 
     EDISC_RECORD_RSMF=1 uv run pytest tests/unit/renderers/test_golden.py
 
@@ -20,7 +22,7 @@ from dataclasses import dataclass
 import pytest
 
 from edisc_connector_dummy.spec import DatasetSpec
-from edisc_renderers.rsmf import RENDERER_VERSION, RenderOptions, render_job
+from edisc_renderers.rsmf import RENDERER_VERSION, RenderOptions, golden_key, render_job
 from tests.unit.renderers.emlcheck import check_eml
 from tests.unit.renderers.oracle import build_job
 
@@ -76,12 +78,12 @@ def test_golden_bytes(name: str) -> None:
     files, index = _render(CASES[name])
     for data in files.values():
         check_eml(data)
-    directory = GOLDEN / RENDERER_VERSION / name
+    directory = GOLDEN / golden_key() / name
     if not directory.exists():
         if os.environ.get("EDISC_RECORD_RSMF") != "1":
             pytest.fail(
-                f"no golden files for renderer {RENDERER_VERSION}/{name}; record them with "
-                "EDISC_RECORD_RSMF=1 (only after a deliberate RENDERER_VERSION bump)"
+                f"no golden files for {golden_key()}/{name}; record them with EDISC_RECORD_RSMF=1 "
+                "(only after a deliberate RENDERER_VERSION bump or a new Python/tzdata pin)"
             )
         directory.mkdir(parents=True)
         for file_name, data in files.items():
@@ -101,5 +103,5 @@ def test_golden_bytes(name: str) -> None:
 
 def test_every_recorded_version_has_its_cases() -> None:
     """Old generations stay as history; the current one must exist (no silent skip)."""
-    assert (GOLDEN / RENDERER_VERSION).is_dir()
-    assert sorted(p.name for p in (GOLDEN / RENDERER_VERSION).iterdir()) == sorted(CASES)
+    assert (GOLDEN / golden_key()).is_dir()
+    assert sorted(p.name for p in (GOLDEN / golden_key()).iterdir()) == sorted(CASES)

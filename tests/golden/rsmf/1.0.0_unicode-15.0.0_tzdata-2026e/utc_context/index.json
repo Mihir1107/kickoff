@@ -1,0 +1,66 @@
+{
+  "files": [
+    {
+      "name": "C00000DUMMY_2026-01-06_part001of001.rsmf",
+      "sha256": "207ffdc3461360602ca57093e80702ab07be16689f13c96eac4c9a8ad1ea8eae",
+      "size": 77777
+    },
+    {
+      "name": "C00000DUMMY_2026-01-07_part001of001.rsmf",
+      "sha256": "719003130317a981094872d811956c70bc36f94a1326dd531cfd6647dd29ac11",
+      "size": 23193
+    },
+    {
+      "name": "D00002DUMMY_2026-01-06_part001of001.rsmf",
+      "sha256": "76f46b216dc54c4c81ca649793028972fce20c30eb3845454f1a5d8f05981505",
+      "size": 19301
+    },
+    {
+      "name": "D00002DUMMY_2026-01-07_part001of001.rsmf",
+      "sha256": "6cf2426aa2f1408566dd46477f5837408a8809f2653768b0636e7a30d8480eb7",
+      "size": 132735
+    },
+    {
+      "name": "G00001DUMMY_2026-01-06_part001of001.rsmf",
+      "sha256": "6e934b78e782bd9c954d5cd6738aac4911014b7dc3480970d75f504e6bbe1150",
+      "size": 77501
+    },
+    {
+      "name": "G00001DUMMY_2026-01-07_part001of001.rsmf",
+      "sha256": "119da81b00141fa647315637dc95894072558d814c947ff94f7b17d979adf307",
+      "size": 23255
+    },
+    {
+      "name": "G00003DUMMY_2026-01-06_part001of001.rsmf",
+      "sha256": "71d636948f1d1a34fb4cb9f2d0403645a202f18a321800073cedf9572b44d5ef",
+      "size": 75248
+    },
+    {
+      "name": "G00003DUMMY_2026-01-07_part001of001.rsmf",
+      "sha256": "784b6396a687ccd4ae66c3bfbff5d8905d24f03bb952475abb0c6293082150e3",
+      "size": 17150
+    }
+  ],
+  "options": {
+    "cap": 10000,
+    "include_context": true,
+    "time_zone": "UTC"
+  },
+  "reconciliation": {
+    "attachments": 11,
+    "context_events": 8,
+    "context_events_out_of_scope": 4,
+    "edits": 3,
+    "events_out": 96,
+    "files": 8,
+    "items_in": 96,
+    "parents_not_rendered": 0,
+    "renderer_version": "1.0.0",
+    "slices": 8,
+    "subject_digest": "d1074566723859c56385e1de6c6385f13860b85597ceb582757ef24978cf370a",
+    "tzdata_version": "2026e",
+    "unavailable_attachments": 3,
+    "unicode_version": "15.0.0"
+  },
+  "renderer_version": "1.0.0"
+}

@@ -21,6 +21,7 @@ from datetime import date
 from typing import TYPE_CHECKING, Any
 
 from edisc_renderers.rsmf.model import ReconciliationError, RenderOptions, SliceInput
+from edisc_renderers.rsmf.runtime import runtime_versions
 
 if TYPE_CHECKING:
     from edisc_renderers.rsmf.render import RenderedFile
@@ -53,6 +54,10 @@ class Reconciliation:
     files: int
     slices: int
     subject_digest: str
+    # byte-identity inputs besides the data (runtime.py): recorded with every render
+    renderer_version: str
+    unicode_version: str
+    tzdata_version: str
 
     def as_payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -186,4 +191,5 @@ class Reconciler:
             files=self._files,
             slices=len(self._slices),
             subject_digest=digest,
+            **runtime_versions(),
         )

@@ -84,10 +84,14 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   bytes, by pinned version). The renderer `edisc_renderers.rsmf` is pure (no DB/S3/clock imports; a
   test enforces it). A worker loader builds `SliceInput`s and streams evidence through a `FileOpener`.
 - Byte-identical output for the same inputs AND renderer version: no clocks, fixed zip timestamps and
-  order, STORED entries (deflate differs per zlib build; ADR 0015 §10.1, for review), canonical JSON,
-  boundary and Message-ID derived from the source hash. Changing output bytes needs a
-  `RENDERER_VERSION` bump (`rsmf/version.py`); then record `tests/golden/rsmf/<version>/` with
-  `EDISC_RECORD_RSMF=1` (it never overwrites an existing generation).
+  order, STORED entries (deflate bytes depend on the zlib build; ADR 0015 §6), canonical JSON,
+  boundary and Message-ID derived from the source hash. Time zones ONLY via `rsmf.runtime.load_zone`
+  (pinned `tzdata` package, never system zoneinfo); Python pinned to the patch in `.python-version`
+  (fixes `unicodedata`). Changing output bytes needs a `RENDERER_VERSION` bump (`rsmf/version.py`);
+  goldens live in `tests/golden/rsmf/<golden_key()>/` (renderer + Unicode + tzdata versions), recorded
+  with `EDISC_RECORD_RSMF=1` (never overwrites an existing generation).
+- Oversized attachments leave the zip as natives referenced by hash (ADR 0015 §11, not yet built);
+  until then `ZipLimitError` refuses the render up front.
 - Reconciliation: every in-scope message appears as exactly ONE event across the render's files, plus
   marked context events. `Reconciler` fails loudly; the loader must pass `finish()` the count and
   `subject_digest` derived from the job's in-scope links, never from rendered output. Each referenced
