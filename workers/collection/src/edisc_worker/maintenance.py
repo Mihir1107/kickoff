@@ -33,6 +33,7 @@ from edisc_custody.retention_extension import extend_retention
 from edisc_custody.sweeper import sweep_anchors
 from edisc_db.connection_tokens import reconcile_token_refreshes
 from edisc_worker.contracts import MAINTENANCE_QUEUE
+from edisc_worker.render_routing import check_render_routing
 from edisc_worker.workflows import MaintenanceWorkflow
 
 
@@ -48,6 +49,7 @@ SWEEPS = (
     Sweep("reconcile-token-refreshes", "reconcile_token_refreshes", timedelta(minutes=10)),
     Sweep("sweep-stale-uploads", "sweep_stale_uploads", timedelta(hours=1)),
     Sweep("extend-retention", "extend_retention", timedelta(hours=6)),
+    Sweep("check-render-routing", "check_render_routing", timedelta(minutes=1)),
 )
 
 
@@ -60,6 +62,22 @@ class MaintenanceActivities:
     tenant_id: uuid.UUID | None = (
         None  # None (production): every tenant; set: one tenant (tests, ops)
     )
+    temporal: Client | None = None  # for the render routing check (DescribeTaskQueue)
+
+    @activity.defn(name="check_render_routing")
+    async def check_render_routing(self) -> dict[str, Any]:
+        if self.temporal is None:
+            raise RuntimeError("the render routing check needs a Temporal client")
+        result = await check_render_routing(
+            self.sweeper_sessions, self.sessions, self.temporal, self.settings,
+            tenant_id=self.tenant_id,
+        )  # fmt: skip
+        return {
+            "checked": result.checked,
+            "opened": result.opened,
+            "closed": result.closed,
+            "queues_without_workers": result.queues_without_workers,
+        }
 
     @activity.defn(name="sweep_anchors")
     async def sweep_anchors(self) -> dict[str, Any]:
@@ -109,6 +127,7 @@ class MaintenanceActivities:
             self.reconcile_token_refreshes,
             self.sweep_stale_uploads,
             self.extend_retention,
+            self.check_render_routing,
         ]
 
 

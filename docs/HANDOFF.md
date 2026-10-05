@@ -28,7 +28,7 @@ history.
 - the audit-burst measurement;
 - the anchor-storm fix (migration 0017).
 
-**Migrations at head:** 0027.
+**Migrations at head:** 0028.
 
 **Not done in Phase 1:** the 1M-message soak. Laptop disk is too small (~15 GB free; it needs ~21 GB). It is
 in the backlog for a cloud VM: `scripts/resume_soak.py --messages 1000000 --kills 10`.
@@ -98,7 +98,8 @@ refusals, audited downloads, productions blocked from the generic content endpoi
 carrying the render id with matter retention, and `edisc-verify` render packages. **Next: step 5**
 (fixture corpus, structural EML checks, the full render crash matrix), then §11 (external natives).
 Step 4 follow-ups (ADR 0015 §15): visible stuck sealing (migration 0027) and version-keyed render
-queues (`renders.r<renderer>.u<unicode>.tz<tzdata>`).
+queues (`renders.r<renderer>.u<unicode>.tz<tzdata>`); render episodes for unroutable renders and stuck
+sealing (§16, migration 0028). ADR 0017 (old triples) is a DRAFT waiting for review.
 
 **Fixed 2026-10-04 (3e47bec):** an ABA race in the batch checkpoint guard (a unit starts and ends at
 cursor NULL): a stalled zombie attempt re-applied its first page after the retry finished the unit.

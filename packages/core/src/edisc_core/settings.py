@@ -233,6 +233,17 @@ class Settings(BaseSettings):
         ge=0,
         description="a final render still unsealed after this long is flagged sealing_stuck (and alerted)",
     )
+    render_unroutable_seconds: float = Field(
+        default=300,
+        ge=0,
+        description="a render still requested after this long, with no worker polling the queue of"
+        " its versions, is flagged unroutable (and alerted)",
+    )
+    render_poller_max_age_seconds: float = Field(
+        default=120,
+        gt=0,
+        description="a render worker counts as present if it polled its queue within this long",
+    )
     render_start_to_close_seconds: float = Field(
         default=43_200, gt=0, description="the longest one render_files activity may run"
     )

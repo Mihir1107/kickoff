@@ -15,7 +15,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 from types_aiobotocore_s3 import S3Client
 
-from edisc_api.routes.renders import _out
+from edisc_api.routes.renders import RenderOut, render_out
 from edisc_core.settings import Settings
 from edisc_core.time import ensure_utc
 from edisc_custody.chain import anchor_key
@@ -48,6 +48,13 @@ async def _alerts(sessions: Sessions, t: Tenant, kind: str) -> list[str]:
                 await s.execute(text("SELECT message FROM alerts WHERE kind = :k"), {"k": kind})
             ).scalars()
         )
+
+
+async def _api(sessions: Sessions, t: Tenant, render_id: uuid.UUID) -> RenderOut:
+    """The render as the API presents it (state and episodes)."""
+    async with tenant_tx(sessions, t.tenant_id) as s:
+        row = (await s.execute(text("SELECT * FROM renders WHERE id = :r"), {"r": render_id})).one()
+        return await render_out(s, row)
 
 
 # ------------------------------------------------------------------ stuck sealing
@@ -85,8 +92,9 @@ async def test_stuck_sealing_is_flagged_once_and_cleared_by_the_seal(
         row = (await render_state(app_sessions, t.tenant_id, render_id))["row"]
         assert (row.status, row.seal_failures) == ("completed", attempt)
         stuck = attempt >= 3 if trigger == "attempts" else True
-        assert (row.sealing_stuck_at is not None) is stuck, attempt
-        assert _out(row).sealing_stuck is stuck
+        out = await _api(app_sessions, t, render_id)
+        assert out.sealing_stuck is stuck, attempt
+        assert out.state == ("sealing_stuck" if stuck else "completed")
     assert "WORM bucket unavailable" in row.last_seal_error
     alerts = await _alerts(app_sessions, t, "render_sealing_stuck")
     assert len(alerts) == 1 and str(render_id) in alerts[0]  # flagged once, not per attempt
@@ -95,13 +103,53 @@ async def test_stuck_sealing_is_flagged_once_and_cleared_by_the_seal(
     result = await run.complete(t.tenant_id, render_id)
     assert (result["status"], result["sealing_stuck"]) == ("completed", False)
     st = await render_state(app_sessions, t.tenant_id, render_id)
-    out = _out(st["row"])
-    assert out.sealed and not out.sealing_stuck and out.sealing_stuck_since is not None  # history
+    out = await _api(app_sessions, t, render_id)
+    assert out.sealed and not out.sealing_stuck and out.sealing_stuck_since is None
+    assert out.state == "completed"
+    (episode,) = out.episodes  # the episode stays, closed by the seal
+    assert (episode.kind, episode.end_reason) == ("sealing_stuck", "sealed")
     assert st["audits"] == ["audit.render_completed"]
     report = await verify_chain(
         app_sessions, s3, rs, tenant_id=t.tenant_id, stream_id=render_id, require_seal=True
     )
     assert report.ok, report.errors
+
+
+async def test_a_sealed_render_cannot_get_stuck_again(
+    app_sessions: Sessions, s3: S3Client, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stuck, sealed, then the WORM bucket fails again: a seal is final and recorded once, so later
+    seal attempts are no-ops. No new episode, no new alert; the closed episode stays as history."""
+    rs = settings.model_copy(update={"render_seal_stuck_attempts": 1})
+    t = await new_tenant(app_sessions)
+    job_id = await _job(app_sessions, s3, rs, t, epoch=0)
+    render_id = await new_render(app_sessions, t.tenant_id, job_id)
+    run = RenderRun(app_sessions, s3, rs)
+    await run.begin(t.tenant_id, render_id)
+    await run.render_files(t.tenant_id, render_id)
+    real = renders.anchor_if_due
+
+    async def worm_down(*args: Any, force: bool = False, **kwargs: Any) -> str | None:
+        if force:
+            raise ConnectionError("WORM bucket unavailable")
+        return await real(*args, force=force, **kwargs)
+
+    monkeypatch.setattr(renders, "anchor_if_due", worm_down)
+    with pytest.raises(ConnectionError):
+        await run.complete(t.tenant_id, render_id)  # stuck (threshold 1)
+    assert (await _api(app_sessions, t, render_id)).sealing_stuck
+    monkeypatch.setattr(renders, "anchor_if_due", real)
+    await run.complete(t.tenant_id, render_id)  # sealed
+    sealed = await _api(app_sessions, t, render_id)
+    monkeypatch.setattr(renders, "anchor_if_due", worm_down)
+    for _ in range(3):  # a retried or duplicate completion after the seal
+        result = await run.complete(t.tenant_id, render_id)
+        assert (result["status"], result["sealing_stuck"]) == ("completed", False)
+    again = await _api(app_sessions, t, render_id)
+    assert again.sealed and not again.sealing_stuck and again.state == "completed"
+    assert again.seal_storage_key == sealed.seal_storage_key and again.head_seq == sealed.head_seq
+    assert [(e.kind, e.end_reason) for e in again.episodes] == [("sealing_stuck", "sealed")]
+    assert len(await _alerts(app_sessions, t, "render_sealing_stuck")) == 1
 
 
 # ------------------------------------------------------------------ the sweeper
@@ -236,3 +284,104 @@ async def test_a_misrouted_render_fails_instead_of_rendering_other_bytes(
     assert result["status"] == "failed"
     st = await render_state(app_sessions, t.tenant_id, made.render_id)
     assert st["types"] == ["render_failed"] and st["productions"] == {}
+
+
+# ------------------------------------------------------------------ unroutable renders
+def _unserved() -> dict[str, str]:
+    """A triple no worker serves (unique per test, so no other test's worker polls its queue)."""
+    tag = uuid.uuid4().hex[:8]
+    return {
+        "renderer_version": f"0.0.0-{tag}",
+        "unicode_version": "0.0.0",
+        "tzdata_version": "1970a",
+    }
+
+
+async def _requested(
+    sessions: Sessions, s3: S3Client, settings: Settings, versions: dict[str, str]
+) -> tuple[Tenant, uuid.UUID]:
+    t = await new_tenant(sessions)
+    job_id = await _job(sessions, s3, settings, t, epoch=0)
+    async with tenant_tx(sessions, t.tenant_id) as s:
+        made = await create_render(
+            s, tenant_id=t.tenant_id, job_id=job_id, matter_id=t.matter_id,
+            options=renders.RenderOptions(), requested_by="tests", versions=versions,
+        )  # fmt: skip
+    return t, made.render_id
+
+
+async def test_a_render_no_worker_serves_is_flagged_unroutable_once(
+    app_sessions: Sessions,
+    sweeper_sessions: Sessions,
+    s3: S3Client,
+    settings: Settings,
+    temporal: Client,
+) -> None:
+    from edisc_worker.render_routing import check_render_routing
+
+    rs = settings.model_copy(update={"render_unroutable_seconds": 0})
+    versions = _unserved()
+    t, render_id = await _requested(app_sessions, s3, rs, versions)
+    await start_render_workflow(temporal, rs, t.tenant_id, render_id, versions)
+
+    for _ in range(2):  # the check runs every minute: one episode, one alert
+        await check_render_routing(
+            sweeper_sessions, app_sessions, temporal, rs, tenant_id=t.tenant_id
+        )
+    out = await _api(app_sessions, t, render_id)
+    assert (out.status, out.state, out.unroutable) == ("requested", "unroutable", True)
+    (episode,) = out.episodes
+    assert episode.kind == "unroutable" and episode.ended_at is None
+    assert renders.render_task_queue(**versions) in (episode.detail or "")
+    alerts = await _alerts(app_sessions, t, "render_unroutable")
+    assert len(alerts) == 1 and str(render_id) in alerts[0]
+
+    # a worker of that triple appears: the render is picked up and the episode ends
+    acts = RenderActivities(app_sessions, s3, rs, versions=versions)
+    async with Worker(temporal, task_queue=acts.task_queue, workflows=[RenderWorkflow],
+                      activities=acts.all()):  # fmt: skip
+        async with asyncio.timeout(90):
+            result = await temporal.get_workflow_handle(f"render-{render_id}").result()
+    assert result["status"] == "completed"
+    done = await _api(app_sessions, t, render_id)
+    assert (done.state, done.unroutable) == ("completed", False)
+    assert [(e.kind, e.end_reason) for e in done.episodes] == [("unroutable", "picked_up")]
+
+
+async def test_losing_the_workers_again_opens_a_new_episode(
+    app_sessions: Sessions,
+    sweeper_sessions: Sessions,
+    s3: S3Client,
+    settings: Settings,
+    temporal: Client,
+) -> None:
+    """No worker (episode 1), a worker polls (episode 1 ends), the workers go away (episode 2, a new
+    alert). The render's workflow is not started here, so the worker does not pick it up."""
+    from edisc_worker.render_routing import check_render_routing
+
+    rs = settings.model_copy(
+        update={"render_unroutable_seconds": 0, "render_poller_max_age_seconds": 3}
+    )
+    versions = _unserved()
+    t, render_id = await _requested(app_sessions, s3, rs, versions)
+
+    async def check() -> None:
+        await check_render_routing(
+            sweeper_sessions, app_sessions, temporal, rs, tenant_id=t.tenant_id
+        )
+
+    await check()
+    acts = RenderActivities(app_sessions, s3, rs, versions=versions)
+    async with Worker(temporal, task_queue=acts.task_queue, workflows=[RenderWorkflow],
+                      activities=acts.all()):  # fmt: skip
+        await asyncio.sleep(0.5)  # its first poll
+        await check()
+    await asyncio.sleep(4)  # older than the poller max age
+    await check()
+    out = await _api(app_sessions, t, render_id)
+    assert [(e.kind, e.end_reason) for e in out.episodes] == [
+        ("unroutable", "worker_available"),
+        ("unroutable", None),
+    ]
+    assert out.state == "unroutable" and out.unroutable_since == out.episodes[1].started_at
+    assert len(await _alerts(app_sessions, t, "render_unroutable")) == 2

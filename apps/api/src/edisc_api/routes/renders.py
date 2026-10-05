@@ -52,6 +52,14 @@ class RenderIn(Strict):
     include_context: bool = True
 
 
+class EpisodeOut(Strict):
+    kind: str  # unroutable | sealing_stuck
+    started_at: datetime
+    ended_at: datetime | None
+    end_reason: str | None
+    detail: str | None
+
+
 class RenderOut(Strict):
     id: uuid.UUID
     job_id: uuid.UUID
@@ -79,9 +87,14 @@ class RenderOut(Strict):
     seal_storage_key: str | None
     seal_version_id: str | None
     sealed: bool
-    # sealing is retried without limit; this flags a render whose seal is overdue (ADR 0015 §15)
+    # `status`, or the condition holding it up (ADR 0015 §16): "unroutable" (requested, and no
+    # worker serves its versions) or "sealing_stuck" (final, and the seal keeps failing)
+    state: str
+    unroutable: bool
+    unroutable_since: datetime | None
     sealing_stuck: bool
-    sealing_stuck_since: datetime | None
+    sealing_stuck_since: datetime | None  # the CURRENT episode; past ones are in `episodes`
+    episodes: list[EpisodeOut]
     seal_failures: int
     last_seal_error: str | None
 
@@ -143,7 +156,29 @@ async def _authorize_render(
     return row
 
 
-def _out(row: Any) -> RenderOut:
+async def _episodes(s: AsyncSession, render_ids: list[uuid.UUID]) -> dict[uuid.UUID, list[Any]]:
+    rows = (
+        await s.execute(
+            text(
+                "SELECT render_id, kind, started_at, ended_at, end_reason, detail FROM render_episodes"
+                " WHERE render_id = ANY(:r) ORDER BY started_at, id"
+            ),
+            {"r": render_ids},
+        )
+    ).all()
+    out: dict[uuid.UUID, list[Any]] = {r: [] for r in render_ids}
+    for e in rows:
+        out[e.render_id].append(e)
+    return out
+
+
+async def render_out(s: AsyncSession, row: Any) -> RenderOut:
+    return _out(row, (await _episodes(s, [row.id]))[row.id])
+
+
+def _out(row: Any, episodes: list[Any]) -> RenderOut:
+    open_ = {e.kind: e for e in episodes if e.ended_at is None}
+    unroutable, stuck = open_.get("unroutable"), open_.get("sealing_stuck")
     return RenderOut(
         id=row.id,
         job_id=row.job_id,
@@ -171,8 +206,21 @@ def _out(row: Any) -> RenderOut:
         seal_storage_key=row.seal_storage_key,
         seal_version_id=row.seal_version_id,
         sealed=row.seal_storage_key is not None,
-        sealing_stuck=row.sealing_stuck_at is not None and row.seal_storage_key is None,
-        sealing_stuck_since=row.sealing_stuck_at,
+        state="unroutable" if unroutable else "sealing_stuck" if stuck else row.status,
+        unroutable=unroutable is not None,
+        unroutable_since=unroutable.started_at if unroutable else None,
+        sealing_stuck=stuck is not None,
+        sealing_stuck_since=stuck.started_at if stuck else None,
+        episodes=[
+            EpisodeOut(
+                kind=e.kind,
+                started_at=e.started_at,
+                ended_at=e.ended_at,
+                end_reason=e.end_reason,
+                detail=e.detail,
+            )
+            for e in episodes
+        ],
         seal_failures=row.seal_failures,
         last_seal_error=row.last_seal_error,
     )
@@ -241,12 +289,13 @@ async def create_render_route(
     await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         row = (await s.execute(text("SELECT * FROM renders WHERE id = :r"), {"r": render_id})).one()
+        out = await render_out(s, row)
     # on the queue of the render's recorded versions, which only workers of those versions poll
     await start_render_workflow(
         res.temporal, res.settings, caller.tenant_id, render_id,
         {k: getattr(row, k) for k in ("renderer_version", "unicode_version", "tzdata_version")},
     )  # fmt: skip
-    return _out(row)
+    return out
 
 
 # ------------------------------------------------------------------ read
@@ -270,13 +319,14 @@ async def list_renders(
                 {"j": job_id, "after": after, "n": limit + 1},
             )
         ).all()
-    return page_of([_out(r) for r in rows], limit, lambda r: r.id)
+        episodes = await _episodes(s, [r.id for r in rows])
+    return page_of([_out(r, episodes[r.id]) for r in rows], limit, lambda r: r.id)
 
 
 @router.get("/renders/{render_id}", response_model=RenderOut, openapi_extra=perm(P.CUSTODY_READ))
 async def get_render(render_id: uuid.UUID, caller: CallerDep, res: ResourcesDep) -> RenderOut:
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
-        return _out(await _authorize_render(s, caller, P.CUSTODY_READ, render_id))
+        return await render_out(s, await _authorize_render(s, caller, P.CUSTODY_READ, render_id))
 
 
 @router.get(

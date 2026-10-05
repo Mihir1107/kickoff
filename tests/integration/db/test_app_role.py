@@ -146,6 +146,7 @@ async def test_security_definer_functions_are_hardened(connect: Connect) -> None
         "due_anchor_streams",
         "pending_token_refreshes",
         "stale_pending_evidence",
+        "stale_requested_renders",
         "tenant_id_for_subdomain",
     }
     for r in rows:

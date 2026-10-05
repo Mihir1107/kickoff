@@ -41,7 +41,7 @@ async def test_schedules_are_idempotent_skip_overlaps_and_run(
             assert [json.loads(a.data) for a in action.args] == [sweep.activity]  # type: ignore[union-attr]
         # scoped to an empty tenant: the shared test DB holds deliberately tampered chains
         acts = MaintenanceActivities(
-            sweeper_sessions, app_sessions, s3, settings, tenant_id=uuid.uuid4()
+            sweeper_sessions, app_sessions, s3, settings, tenant_id=uuid.uuid4(), temporal=temporal
         )
         async with Worker(
             temporal, task_queue=queue, workflows=[MaintenanceWorkflow], activities=acts.all()
@@ -73,6 +73,7 @@ def test_every_sweep_has_a_sane_interval() -> None:
         "reconcile_token_refreshes",
         "sweep_stale_uploads",
         "extend_retention",
+        "check_render_routing",
     }
     # retention extension works against a 60-day floor: every 6 hours is plenty
     assert all(timedelta(minutes=1) <= s.every <= timedelta(hours=6) for s in SWEEPS)

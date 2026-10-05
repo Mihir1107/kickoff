@@ -285,6 +285,12 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
             ids["event"],
         )
         await conn.execute(
+            "INSERT INTO render_episodes (id, tenant_id, render_id, kind) VALUES ($1, $2, $3, 'unroutable')",
+            new_id(),
+            t,
+            render,
+        )
+        await conn.execute(
             "INSERT INTO retention_gaps (id, tenant_id, evidence_object_id, owner_type, owner_id,"
             " unprotected_from, unprotected_until, outcome) VALUES ($1, $2, $3, 'matter', $4, now(),"
             " now(), 'relocked')",
@@ -350,5 +356,6 @@ TENANT_TABLES = [
     "export_threads",
     "renders",
     "render_files",
+    "render_episodes",
 ]
 ALL_TABLES = ["tenants", *TENANT_TABLES]

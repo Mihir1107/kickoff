@@ -835,7 +835,6 @@ class Render(Base):
     sealed_at: Mapped[datetime | None] = mapped_column(TZ)
     seal_failures: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     last_seal_error: Mapped[str | None] = mapped_column(Text)
-    sealing_stuck_at: Mapped[datetime | None] = mapped_column(TZ)
 
 
 class RenderFile(Base):
@@ -867,3 +866,27 @@ class RenderFile(Base):
     record: Mapped[dict[str, Any]] = mapped_column(JSONB)
     custody_event_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+
+
+class RenderEpisode(Base):
+    __tablename__ = "render_episodes"
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id", "render_id"], ["renders.tenant_id", "renders.id"]),
+        Index(None, "render_id"),
+        Index(
+            "uq_render_episodes_open",
+            "render_id",
+            "kind",
+            unique=True,
+            postgresql_where=text("ended_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    render_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    kind: Mapped[str] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    ended_at: Mapped[datetime | None] = mapped_column(TZ)
+    end_reason: Mapped[str | None] = mapped_column(Text)
+    detail: Mapped[str | None] = mapped_column(Text)

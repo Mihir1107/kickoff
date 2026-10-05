@@ -18,5 +18,6 @@
 | 0014 | Slack export ingestion: lock-first upload, entries verifiable in the zip, hostile-archive limits, archive-relative completeness |
 | 0015 | RSMF renderer: slicing, mapping, deterministic EML, render custody stream (accepted; M15) |
 | 0016 | Browser sessions, CSRF, re-authentication, source install flows, internal-app token (accepted; M17) |
+| 0017 | Render worker versions over time: images per renderer/Unicode/tzdata triple, reproductions, no fallback (**draft**) |
 
 New ADRs: copy the structure (Status / Context / Decision / Consequences). Superseded ADRs are kept and marked.

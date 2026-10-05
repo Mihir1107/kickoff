@@ -501,3 +501,26 @@ Implements the step 4 plan approved 2026-10-04 with its four decisions. Code: `e
    - Consequence: a render whose triple no worker serves waits in `requested` until such a worker
      polls (for example an API deployed before its workers). Detecting queues without pollers is not
      built yet.
+
+## 16. Render episodes: unroutable renders, stuck sealing with history (2026-10-05, for review)
+Migration 0028, `edisc_worker.render_routing`, maintenance schedule `check-render-routing` (every
+minute). Supersedes `renders.sealing_stuck_at` of §15.
+
+1. **Episodes.** `render_episodes` holds one row per episode of a condition (`unroutable`,
+   `sealing_stuck`): at most one open per render and kind (partial unique index), so exactly one
+   alert (`render_unroutable`, `render_sealing_stuck`) per episode. A closed episode is history and
+   never changes; its `end_reason` says why it ended (`picked_up`, `worker_available`, `sealed`,
+   `render_final`). The API shows `state` (the status, or `unroutable` / `sealing_stuck` while an
+   episode is open), `unroutable_since`, `sealing_stuck_since` (the current episode) and every
+   episode.
+2. **Unroutable.** Renders still `requested` after `EDISC_RENDER_UNROUTABLE_SECONDS` (300) are
+   checked with DescribeTaskQueue on the queue of their triple. No worker polled it within
+   `EDISC_RENDER_POLLER_MAX_AGE_SECONDS` (120, above Temporal's long-poll interval, so an idle live
+   worker is not mistaken for a missing one): an episode opens. A worker polls again: the episode
+   closes (`worker_available`); leaving `requested` closes it in `begin`'s transaction
+   (`picked_up`). Losing the workers again opens a new episode with a new alert. The cross-tenant
+   listing is a sweeper-owned SECURITY DEFINER function returning ids only.
+3. **Stuck sealing.** The thresholds of §15 now open a `sealing_stuck` episode; the seal closes it in
+   the transaction that records the seal. A seal is final and recorded once (the guard trigger
+   refuses any change), so a sealed render cannot get stuck again: later seal attempts are no-ops,
+   with no new episode or alert (tested). A render therefore has at most one stuck-sealing episode.

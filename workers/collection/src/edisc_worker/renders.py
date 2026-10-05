@@ -167,6 +167,53 @@ async def create_render(
     return CreatedRender(existing, False)
 
 
+async def open_episode(
+    s: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    render_id: uuid.UUID,
+    job_id: uuid.UUID,
+    kind: str,
+    detail: str,
+    message: str,
+) -> bool:
+    """Open an episode of ``kind`` unless one is open (partial unique index), with ONE alert per
+    episode. Returns whether this call opened it."""
+    opened = (
+        await s.execute(
+            text(
+                "INSERT INTO render_episodes (id, tenant_id, render_id, kind, detail)"
+                " VALUES (:i, :t, :r, :k, :d)"
+                " ON CONFLICT (render_id, kind) WHERE ended_at IS NULL DO NOTHING RETURNING id"
+            ),
+            {"i": new_id(), "t": tenant_id, "r": render_id, "k": kind, "d": detail[:2000]},
+        )
+    ).first()
+    if opened is None:
+        return False
+    await s.execute(
+        text(
+            "INSERT INTO alerts (id, tenant_id, kind, job_id, message) VALUES (:i, :t, :k, :j, :m)"
+        ),
+        {"i": new_id(), "t": tenant_id, "k": f"render_{kind}", "j": job_id, "m": message[:2000]},
+    )
+    return True
+
+
+async def close_episodes(
+    s: AsyncSession, render_id: uuid.UUID, reason: str, *, kind: str | None = None
+) -> int:
+    """Close the open episode(s) of a render (all kinds, or one); closed episodes are history."""
+    result = await s.execute(
+        text(
+            "UPDATE render_episodes SET ended_at = now(), end_reason = :why WHERE render_id = :r"
+            " AND ended_at IS NULL AND (CAST(:k AS text) IS NULL OR kind = :k)"
+        ),
+        {"why": reason, "r": render_id, "k": kind},
+    )
+    return int(result.rowcount)  # type: ignore[attr-defined]
+
+
 @dataclass(frozen=True)
 class SourceCheck:
     refusal: tuple[str, str] | None  # (reason, detail)
@@ -247,6 +294,7 @@ class RenderRun:
                 **({"request_id": cur.request_id} if cur.request_id else {}),
                 **({"idempotency_key": cur.idempotency_key} if cur.idempotency_key else {}),
             }
+            await close_episodes(s, render_id, "picked_up", kind="unroutable")
             if check.refusal is not None:
                 reason, detail = check.refusal
                 await self._append(
@@ -580,6 +628,7 @@ class RenderRun:
                             "batches_done": cur.batches_done,
                         },
                     )
+                    await close_episodes(s, render_id, "render_final", kind="unroutable")
                     await s.execute(
                         text(
                             "UPDATE renders SET status = 'failed', reason = :r, detail = :d,"
@@ -627,18 +676,39 @@ class RenderRun:
             "file_count": row.file_count,
             "head_seq": row.head_seq,
             "seal_storage_key": row.seal_storage_key,
-            "sealing_stuck": row.sealing_stuck_at is not None and row.seal_storage_key is None,
+            "sealing_stuck": await self._open_episode(tenant_id, render_id, "sealing_stuck"),
         }
+
+    async def _open_episode(self, tenant_id: uuid.UUID, render_id: uuid.UUID, kind: str) -> bool:
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            return (
+                await s.execute(
+                    text(
+                        "SELECT 1 FROM render_episodes WHERE render_id = :r AND kind = :k"
+                        " AND ended_at IS NULL"
+                    ),
+                    {"r": render_id, "k": kind},
+                )
+            ).first() is not None
 
     async def _flag_if_stuck(
         self, tenant_id: uuid.UUID, render_id: uuid.UUID, error: str | None
     ) -> None:
-        """Count a failed seal attempt (``error``), and flag the render once when sealing is stuck."""
+        """Count a failed seal attempt (``error``), and open a ``sealing_stuck`` episode (one alert)
+        when sealing is stuck and no episode is open. Only the seal closes it."""
         async with tenant_tx(self.sessions, tenant_id) as s:
             cur = await self._locked(s, render_id)
             if cur.seal_storage_key is not None:
                 return
             failures = cur.seal_failures + (error is not None)
+            if error is not None:
+                await s.execute(
+                    text(
+                        "UPDATE renders SET seal_failures = :f, last_seal_error = :e, updated_at = now()"
+                        " WHERE id = :i"
+                    ),
+                    {"f": failures, "e": error, "i": render_id},
+                )
             overdue = bool(
                 (
                     await s.execute(
@@ -650,28 +720,13 @@ class RenderRun:
                     )
                 ).scalar_one()
             )
-            stuck = cur.sealing_stuck_at is None and (
-                failures >= self.settings.render_seal_stuck_attempts or overdue
-            )
-            if error is None and not stuck:
-                return
-            await s.execute(
-                text(
-                    "UPDATE renders SET seal_failures = :f, last_seal_error = coalesce(:e, last_seal_error),"
-                    " sealing_stuck_at = CASE WHEN :stuck THEN now() ELSE sealing_stuck_at END,"
-                    " updated_at = now() WHERE id = :i"
-                ),
-                {"f": failures, "e": error, "stuck": stuck, "i": render_id},
-            )
-            if stuck:
-                await s.execute(
-                    text(
-                        "INSERT INTO alerts (id, tenant_id, kind, job_id, message)"
-                        " VALUES (:i, :t, 'render_sealing_stuck', :j, :m)"
-                    ),
-                    {"i": new_id(), "t": tenant_id, "j": cur.job_id,
-                     "m": f"render {render_id} ({cur.status}) is not sealed after {failures} failed"
-                          f" attempt(s): {error or cur.last_seal_error or 'no error recorded'}"[:2000]},
+            if failures >= self.settings.render_seal_stuck_attempts or overdue:
+                await open_episode(
+                    s, tenant_id=tenant_id, render_id=render_id, job_id=cur.job_id,
+                    kind="sealing_stuck",
+                    detail=f"{failures} failed attempt(s); last: {error or cur.last_seal_error}",
+                    message=f"render {render_id} ({cur.status}) is not sealed after {failures} failed"
+                    f" attempt(s): {error or cur.last_seal_error or 'no error recorded'}",
                 )  # fmt: skip
 
     async def _seal_once(self, tenant_id: uuid.UUID, row: Any) -> None:
@@ -718,6 +773,7 @@ class RenderRun:
                 )
             ).first()
             if sealed is not None:
+                await close_episodes(s, render_id, "sealed")
                 await append(
                     s,
                     tenant_id=tenant_id,
