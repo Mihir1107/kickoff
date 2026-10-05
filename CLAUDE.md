@@ -156,6 +156,15 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Every manifest is validated against the vendored `rsmf_schema_2_0_0.json` (SHA-256 pinned, format
   checks on). The Relativity validator is not used until the licence is confirmed.
 
+## Collection report and preview (M16, ADR 0018; designed and spiked, NOT built)
+- Read ADR 0018 in full before writing M16 code; `docs/HANDOFF.md` has the build order. The report
+  has its own custody stream (a sealed job chain is never appended to); facts come from the verified
+  job chain first, database disagreements are reported as divergences, never resolved silently.
+- PDF bytes are promised only inside the pinned linux/amd64 report image (`spikes/m16-pdf/` is the
+  prototype: vendored fonts by SHA-256, fontconfig isolated, Debian snapshot, TrueType CJK fonts).
+  PDF goldens are authoritative only in CI on amd64; locally they run in the image or skip with a
+  visible reason, never silently.
+
 ## Conventions
 - Python 3.12, `uv` only (no pip). Add deps with `uv add --package <member> <dep>`.
 - mypy `--strict` on all source (packages/apps/workers). ruff is the formatter and linter.

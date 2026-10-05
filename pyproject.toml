@@ -91,6 +91,8 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106", "S311", "S603", "S607", "S608", "T20", "BLE001", "TRY301", "PT018", "RUF059"]
 "scripts/**" = ["T20", "S311", "PERF401"]
+# spikes run inside throwaway containers: printing, /tmp, subprocess and fetching pinned URLs are the point
+"spikes/**" = ["T20", "S108", "S310", "S603", "S607", "PERF401", "RUF001"]
 # migrations interpolate only module-level constants and fixed identifiers into DDL
 "packages/db/migrations/**" = ["S608"]
 

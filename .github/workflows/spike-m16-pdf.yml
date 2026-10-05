@@ -1,0 +1,40 @@
+# M16 spike S1 (docs/plans/m16.md §2.3): the same amd64 image on two GitHub-hosted runners.
+# Runs only on pushes to spike/m16-pdf and by hand; the image built in job 1 is saved and LOADED in
+# job 2 (same image id, another host).
+name: spike-m16-pdf
+on:
+  push:
+    branches: [spike/m16-pdf]
+  workflow_dispatch:
+
+jobs:
+  host-a:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image (linux/amd64)
+        run: docker buildx build --platform linux/amd64 --load -t edisc-pdf-spike:s1 spikes/m16-pdf
+      - name: S1 checks
+        run: bash spikes/m16-pdf/run.sh out-host-a /usr/share/fonts
+      - name: Save the image
+        run: docker save edisc-pdf-spike:s1 | gzip -1 > image.tar.gz
+      - uses: actions/upload-artifact@v4
+        with: { name: image, path: image.tar.gz, retention-days: 7 }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: out-host-a, path: out-host-a, retention-days: 7 }
+
+  host-b:
+    needs: host-a
+    runs-on: ubuntu-24.04  # a fresh VM: another host (ubuntu-22.04 runners were never acquired)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: image }
+      - name: Load the image built on host A
+        run: gunzip -c image.tar.gz | docker load
+      - name: S1 checks
+        run: bash spikes/m16-pdf/run.sh out-host-b /usr/share/fonts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: out-host-b, path: out-host-b, retention-days: 7 }
