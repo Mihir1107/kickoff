@@ -223,6 +223,16 @@ class Settings(BaseSettings):
         le=10_000,
         description="render output files per render_files_batch custody event (ADR 0015 §14)",
     )
+    render_seal_stuck_attempts: int = Field(
+        default=5,
+        ge=1,
+        description="failed seal attempts after which a render is flagged sealing_stuck (and alerted)",
+    )
+    render_seal_stuck_seconds: float = Field(
+        default=900,
+        ge=0,
+        description="a final render still unsealed after this long is flagged sealing_stuck (and alerted)",
+    )
     render_start_to_close_seconds: float = Field(
         default=43_200, gt=0, description="the longest one render_files activity may run"
     )

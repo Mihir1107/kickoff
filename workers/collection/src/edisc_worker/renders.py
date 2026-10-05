@@ -32,7 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import wraps
 from typing import Any
@@ -40,6 +40,9 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio import activity
+from temporalio.client import Client
+from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+from temporalio.exceptions import WorkflowAlreadyStartedError
 from types_aiobotocore_s3 import S3Client
 
 from edisc_core.canonical import canonical_json
@@ -62,8 +65,14 @@ from edisc_evidence.worm import get_bytes, list_versions
 from edisc_evidence.writer import EvidenceIntegrityError
 from edisc_renderers.rsmf import RenderError, RenderOptions, runtime_versions
 from edisc_worker.activities import _ticking
-from edisc_worker.contracts import ErrorClass, RenderFailure, RenderRef
-from edisc_worker.errors import classify, to_application_error
+from edisc_worker.contracts import (
+    ErrorClass,
+    RenderFailure,
+    RenderRef,
+    render_task_queue,
+    render_workflow_id,
+)
+from edisc_worker.errors import classify, describe, to_application_error
 from edisc_worker.pipeline import CrashHooks
 from edisc_worker.render_loader import RenderInputIntegrityError, RenderRefusedError
 from edisc_worker.render_store import StoredFile, render_and_store
@@ -108,11 +117,12 @@ async def create_render(
     requested_by: str,
     request_id: str | None = None,
     idempotency_key: str | None = None,
+    versions: Mapping[str, str] | None = None,
 ) -> CreatedRender:
     """Insert a render, or find the live one with the same identity (job, options hash, renderer,
     Unicode and tzdata versions). Concurrent identical calls: the unique index makes all but one wait
     and do nothing, then they read the winner. Failed and refused renders do not count."""
-    versions = runtime_versions()
+    versions = versions or runtime_versions()
     identity = {
         "t": tenant_id,
         "j": job_id,
@@ -169,6 +179,8 @@ class RenderRun:
     s3: S3Client
     settings: Settings
     hooks: CrashHooks = field(default_factory=CrashHooks)
+    # the versions this worker renders (its queue); only tests pass anything but the runtime's
+    versions: Mapping[str, str] = field(default_factory=runtime_versions)
 
     # ------------------------------------------------------------------ helpers
     async def row(self, tenant_id: uuid.UUID, render_id: uuid.UUID) -> Any:
@@ -205,9 +217,10 @@ class RenderRun:
             self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=render_id
         )
 
-    @staticmethod
-    def _check_versions(row: Any) -> None:
-        mine = runtime_versions()
+    def _check_versions(self, row: Any) -> None:
+        """The safety net behind version routing: a render that reaches a worker of other versions
+        (misrouted) fails rather than being rendered to bytes its identity does not promise."""
+        mine = dict(self.versions)
         theirs = {k: getattr(row, k) for k in mine}
         if theirs != mine:
             raise RenderIntegrityError(
@@ -227,7 +240,7 @@ class RenderRun:
                 return str(cur.status)
             base = {
                 "render_id": str(render_id),
-                **runtime_versions(),
+                **self.versions,
                 "options": dict(cur.options),
                 "options_hash": cur.options_hash,
                 "requested_by": cur.requested_by,
@@ -588,77 +601,25 @@ class RenderRun:
     # ------------------------------------------------------------------ the seal
     async def seal(self, tenant_id: uuid.UUID, render_id: uuid.UUID) -> dict[str, Any]:
         """Anchor the final head (forced) and record it once on the render, with the tenant audit
-        event in the same transaction, so a retry neither re-records nor re-audits."""
+        event in the same transaction, so a retry neither re-records nor re-audits.
+
+        Retried without limit by the workflow. Every failed attempt is counted on the render; past
+        ``render_seal_stuck_attempts`` failures, or ``render_seal_stuck_seconds`` after the render
+        became final (checked at every attempt, so attempts killed before they could count are
+        covered too), the render is flagged ``sealing_stuck`` once, with an alert."""
         row = await self.row(tenant_id, render_id)
         if row.status not in FINAL:
             raise RenderIntegrityError(f"render {render_id} is {row.status}: not final, not sealed")
         if row.seal_storage_key is None:
-            key = await anchor_if_due(
-                self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=render_id,
-                force=True,
-            )  # fmt: skip
-            await self.hooks.hit("after_seal_anchor")
-            async with tenant_tx(self.sessions, tenant_id) as s:
-                head = (
-                    await s.execute(
-                        text(
-                            "SELECT last_seq, last_hash FROM custody_chain_heads WHERE stream_id = :r"
-                        ),
-                        {"r": render_id},
-                    )
-                ).one()
-                if key != anchor_key(str(tenant_id), str(render_id), head.last_seq):
-                    raise RenderIntegrityError(
-                        f"render {render_id}: seal {key} is not the head anchor"
-                    )
-                version: str = (
-                    await s.execute(
-                        text(
-                            "SELECT version_id FROM evidence_objects WHERE storage_key = :k"
-                            " AND state = 'complete' AND render_id = :r"
-                        ),
-                        {"k": key, "r": render_id},
-                    )
-                ).scalar_one()
-                sealed = (
-                    await s.execute(
-                        text(
-                            "UPDATE renders SET seal_storage_key = :k, seal_version_id = :v, head_seq = :seq,"
-                            " head_hash = :h, sealed_at = now(), updated_at = now()"
-                            " WHERE id = :i AND seal_storage_key IS NULL RETURNING id"
-                        ),
-                        {
-                            "k": key,
-                            "v": version,
-                            "seq": head.last_seq,
-                            "h": head.last_hash,
-                            "i": render_id,
-                        },
-                    )
-                ).first()
-                if sealed is not None:
-                    await append(
-                        s,
-                        tenant_id=tenant_id,
-                        stream_id=tenant_id,
-                        event_type=f"audit.render_{row.status}",
-                        actor=ACTOR,
-                        payload={
-                            "render_id": str(render_id),
-                            "job_id": str(row.job_id),
-                            "matter_id": str(row.matter_id),
-                            "status": row.status,
-                            **({"reason": row.reason} if row.reason else {}),
-                            **(
-                                {"file_count": row.file_count} if row.file_count is not None else {}
-                            ),
-                            "head": {"seq": head.last_seq, "hash": head.last_hash},
-                            "seal": {"key": key, "version_id": version},
-                        },
-                    )
-            await anchor_if_due(
-                self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=tenant_id
-            )
+            await self._flag_if_stuck(tenant_id, render_id, None)
+            try:
+                await self._seal_once(tenant_id, row)
+            except Exception as exc:
+                try:
+                    await self._flag_if_stuck(tenant_id, render_id, describe(exc))
+                except Exception as bookkeeping:  # noqa: BLE001 - reported on the original, which is raised
+                    exc.add_note(f"recording the failed seal attempt also failed: {bookkeeping!r}")
+                raise
             row = await self.row(tenant_id, render_id)
         return {
             "status": row.status,
@@ -666,7 +627,117 @@ class RenderRun:
             "file_count": row.file_count,
             "head_seq": row.head_seq,
             "seal_storage_key": row.seal_storage_key,
+            "sealing_stuck": row.sealing_stuck_at is not None and row.seal_storage_key is None,
         }
+
+    async def _flag_if_stuck(
+        self, tenant_id: uuid.UUID, render_id: uuid.UUID, error: str | None
+    ) -> None:
+        """Count a failed seal attempt (``error``), and flag the render once when sealing is stuck."""
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            cur = await self._locked(s, render_id)
+            if cur.seal_storage_key is not None:
+                return
+            failures = cur.seal_failures + (error is not None)
+            overdue = bool(
+                (
+                    await s.execute(
+                        text(
+                            "SELECT now() - finished_at >= make_interval(secs => :t) FROM renders"
+                            " WHERE id = :i"
+                        ),
+                        {"t": self.settings.render_seal_stuck_seconds, "i": render_id},
+                    )
+                ).scalar_one()
+            )
+            stuck = cur.sealing_stuck_at is None and (
+                failures >= self.settings.render_seal_stuck_attempts or overdue
+            )
+            if error is None and not stuck:
+                return
+            await s.execute(
+                text(
+                    "UPDATE renders SET seal_failures = :f, last_seal_error = coalesce(:e, last_seal_error),"
+                    " sealing_stuck_at = CASE WHEN :stuck THEN now() ELSE sealing_stuck_at END,"
+                    " updated_at = now() WHERE id = :i"
+                ),
+                {"f": failures, "e": error, "stuck": stuck, "i": render_id},
+            )
+            if stuck:
+                await s.execute(
+                    text(
+                        "INSERT INTO alerts (id, tenant_id, kind, job_id, message)"
+                        " VALUES (:i, :t, 'render_sealing_stuck', :j, :m)"
+                    ),
+                    {"i": new_id(), "t": tenant_id, "j": cur.job_id,
+                     "m": f"render {render_id} ({cur.status}) is not sealed after {failures} failed"
+                          f" attempt(s): {error or cur.last_seal_error or 'no error recorded'}"[:2000]},
+                )  # fmt: skip
+
+    async def _seal_once(self, tenant_id: uuid.UUID, row: Any) -> None:
+        render_id = row.id
+        key = await anchor_if_due(
+            self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=render_id,
+            force=True,
+        )  # fmt: skip
+        await self.hooks.hit("after_seal_anchor")
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            head = (
+                await s.execute(
+                    text(
+                        "SELECT last_seq, last_hash FROM custody_chain_heads WHERE stream_id = :r"
+                    ),
+                    {"r": render_id},
+                )
+            ).one()
+            if key != anchor_key(str(tenant_id), str(render_id), head.last_seq):
+                raise RenderIntegrityError(f"render {render_id}: seal {key} is not the head anchor")
+            version: str = (
+                await s.execute(
+                    text(
+                        "SELECT version_id FROM evidence_objects WHERE storage_key = :k"
+                        " AND state = 'complete' AND render_id = :r"
+                    ),
+                    {"k": key, "r": render_id},
+                )
+            ).scalar_one()
+            sealed = (
+                await s.execute(
+                    text(
+                        "UPDATE renders SET seal_storage_key = :k, seal_version_id = :v, head_seq = :seq,"
+                        " head_hash = :h, sealed_at = now(), updated_at = now()"
+                        " WHERE id = :i AND seal_storage_key IS NULL RETURNING id"
+                    ),
+                    {
+                        "k": key,
+                        "v": version,
+                        "seq": head.last_seq,
+                        "h": head.last_hash,
+                        "i": render_id,
+                    },
+                )
+            ).first()
+            if sealed is not None:
+                await append(
+                    s,
+                    tenant_id=tenant_id,
+                    stream_id=tenant_id,
+                    event_type=f"audit.render_{row.status}",
+                    actor=ACTOR,
+                    payload={
+                        "render_id": str(render_id),
+                        "job_id": str(row.job_id),
+                        "matter_id": str(row.matter_id),
+                        "status": row.status,
+                        **({"reason": row.reason} if row.reason else {}),
+                        **({"file_count": row.file_count} if row.file_count is not None else {}),
+                        "head": {"seq": head.last_seq, "hash": head.last_hash},
+                        "seal": {"key": key, "version_id": version},
+                    },
+                )
+        await anchor_if_due(
+            self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=tenant_id
+        )
 
 
 # ------------------------------------------------------------------ activities
@@ -706,9 +777,14 @@ class RenderActivities:
     s3: S3Client
     settings: Settings
     hooks: CrashHooks = field(default_factory=CrashHooks)
+    versions: Mapping[str, str] = field(default_factory=runtime_versions)
+
+    @property
+    def task_queue(self) -> str:
+        return render_task_queue(**self.versions)
 
     def _run(self) -> RenderRun:
-        return RenderRun(self.sessions, self.s3, self.settings, self.hooks)
+        return RenderRun(self.sessions, self.s3, self.settings, self.hooks, self.versions)
 
     @activity.defn(name="begin_render")
     @_ticking
@@ -739,3 +815,31 @@ class RenderActivities:
 
     def all(self) -> list[Any]:
         return [self.begin_render, self.render_files, self.complete_render, self.fail_render]
+
+
+async def start_render_workflow(
+    client: Client,
+    settings: Settings,
+    tenant_id: uuid.UUID,
+    render_id: uuid.UUID,
+    versions: Mapping[str, str],
+) -> None:
+    """Start a render's workflow once, on the queue of the versions it recorded (ADR 0015 §15). A
+    replayed request after a crash between commit and start starts it; "already started" is fine."""
+    from edisc_worker.workflows import RenderWorkflow
+
+    try:
+        await client.start_workflow(
+            RenderWorkflow.run,
+            RenderRef.from_settings(str(tenant_id), str(render_id), settings),
+            id=render_workflow_id(str(render_id)),
+            task_queue=render_task_queue(
+                versions["renderer_version"],
+                versions["unicode_version"],
+                versions["tzdata_version"],
+            ),
+            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+            id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
+        )
+    except WorkflowAlreadyStartedError:
+        return

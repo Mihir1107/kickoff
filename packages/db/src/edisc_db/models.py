@@ -833,6 +833,9 @@ class Render(Base):
     started_at: Mapped[datetime | None] = mapped_column(TZ)
     finished_at: Mapped[datetime | None] = mapped_column(TZ)
     sealed_at: Mapped[datetime | None] = mapped_column(TZ)
+    seal_failures: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    last_seal_error: Mapped[str | None] = mapped_column(Text)
+    sealing_stuck_at: Mapped[datetime | None] = mapped_column(TZ)
 
 
 class RenderFile(Base):

@@ -20,7 +20,7 @@ def task_queue(source: str) -> str:
 
 MAINTENANCE_QUEUE = "maintenance"
 EXPORTS_QUEUE = "exports"  # Slack export hash-lock-validate (ADR 0014)
-RENDERS_QUEUE = "renders"  # RSMF renders of sealed jobs (ADR 0015)
+RENDERS_QUEUE = "renders"  # prefix: one queue per renderer/Unicode/tzdata triple (ADR 0015 §15)
 
 
 def export_workflow_id(export_id: str) -> str:
@@ -29,6 +29,13 @@ def export_workflow_id(export_id: str) -> str:
 
 def render_workflow_id(render_id: str) -> str:
     return f"render-{render_id}"
+
+
+def render_task_queue(renderer_version: str, unicode_version: str, tzdata_version: str) -> str:
+    """The queue of the workers that render exactly these versions (ADR 0015 §15): a render runs on
+    the queue of the versions it recorded at creation, so it never reaches a worker whose output
+    bytes would differ."""
+    return f"{RENDERS_QUEUE}.r{renderer_version}.u{unicode_version}.tz{tzdata_version}"
 
 
 def unit_workflow_id(job_id: str, unit_key: str) -> str:

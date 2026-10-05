@@ -474,3 +474,30 @@ Implements the step 4 plan approved 2026-10-04 with its four decisions. Code: `e
    verified too and must hold the referenced head and seal.
 9. **Not in step 4:** the full render crash matrix and fixture corpus (step 5); oversized attachments
    as external natives (§11); a package download endpoint (the exporter is a library function).
+
+## 15. Operations: stuck sealing and version routing (2026-10-05, for review)
+1. **Stuck sealing (migration 0027).** Sealing stays retried without limit. Every failed seal attempt
+   is counted on the render (`seal_failures`, `last_seal_error`). When the failures reach
+   `EDISC_RENDER_SEAL_STUCK_ATTEMPTS` (5), or the render has been final for
+   `EDISC_RENDER_SEAL_STUCK_SECONDS` (900) without a seal, `sealing_stuck_at` is set once and one
+   `render_sealing_stuck` alert is raised. The elapsed check also runs at the start of every attempt,
+   so attempts killed before they could record a failure still count. The API shows `sealing_stuck`
+   (stuck and not yet sealed), `sealing_stuck_since`, `seal_failures` and `last_seal_error`; after a
+   later seal, `sealing_stuck` is false and the timestamp stays as history.
+2. **The anchor sweeper covers render streams.** `due_anchor_streams` selects any chain head with an
+   overdue or idle unanchored tail, render streams included, and the anchor's retention and
+   `render_id` resolve through the render (tested with a worker that died after unanchored batches).
+3. **Version routing: a version-keyed task queue, not Temporal worker versioning.** A render runs on
+   `renders.r<renderer>.u<unicode>.tz<tzdata>`, the queue of the versions it recorded at creation;
+   each worker polls the queue of its own runtime versions (`RenderActivities.task_queue`).
+   - Why not build-id versioning (Worker Deployments): it routes by code build, sending new workflows
+     to the deployment marked current and keeping started ones on their build. A render must be
+     routed by data (the triple fixed when it was created, possibly by an API on another build), and
+     several triples may be served at once during a rollout. A queue per triple says exactly that,
+     needs no deployment operations (registering builds, promoting a current version) and works on
+     the pinned server unchanged.
+   - The fail-on-mismatch check stays as the safety net: a misrouted render fails, never renders
+     bytes its identity does not promise.
+   - Consequence: a render whose triple no worker serves waits in `requested` until such a worker
+     polls (for example an API deployed before its workers). Detecting queues without pollers is not
+     built yet.

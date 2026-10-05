@@ -18,7 +18,7 @@ from temporalio.worker import Worker
 from edisc_connector_dummy.connector import DummyConnector
 from edisc_db.session import tenant_tx
 from edisc_worker.activities import Activities
-from edisc_worker.contracts import RENDERS_QUEUE, task_queue
+from edisc_worker.contracts import task_queue
 from edisc_worker.renders import RenderActivities
 from edisc_worker.workflows import RenderWorkflow
 
@@ -39,14 +39,17 @@ async def render_worker(api: Api) -> AsyncIterator[None]:
         api.temporal,
     )
     settings = api.settings.model_copy(update={"render_files_batch_size": 2})
+    rendering = RenderActivities(
+        api.sessions, api.s3, settings
+    )  # its queue: this runtime's versions
     async with (
         Worker(
             api.temporal, task_queue=task_queue("dummy"), workflows=WORKFLOWS,
             activities=collect.all(),
         ),
         Worker(
-            api.temporal, task_queue=RENDERS_QUEUE, workflows=[RenderWorkflow],
-            activities=RenderActivities(api.sessions, api.s3, settings).all(),
+            api.temporal, task_queue=rendering.task_queue, workflows=[RenderWorkflow],
+            activities=rendering.all(),
         ),
     ):  # fmt: skip
         yield

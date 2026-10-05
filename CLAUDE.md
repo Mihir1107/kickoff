@@ -115,6 +115,9 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Render steps are fenced by the render's STATUS, moved in the same transaction as the event; a batch
   commits only when `batches_done` equals its index (never fence on a value that can repeat: see the
   ABA fix in ADR 0006). Anything that fails for good goes to `fail_render` (retried without limit).
+  A seal still failing after `EDISC_RENDER_SEAL_STUCK_ATTEMPTS` / `_SECONDS` flags `sealing_stuck` once
+  (alert). Renders run on the queue of their recorded versions (`render_task_queue`); workers poll
+  their own runtime's queue; the version check in the activities is only the safety net (ADR 0015 §15).
 - One live render per (job, options hash, renderer, Unicode, tzdata versions); failed/refused do not
   count. API: `export.create` / `export.read` (matter managers, tenant admins), reads `custody.read`.
   `require_recent_sign_in` is the ADR 0016 §4 hook (no-op until M17). The generic evidence content

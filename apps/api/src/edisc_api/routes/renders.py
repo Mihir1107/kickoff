@@ -25,11 +25,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
-from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from edisc_api import audit
-from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
+from edisc_api.app import CallerDep, RequestIdDep, ResourcesDep
 from edisc_api.auth import Caller, require_recent_sign_in
 from edisc_api.authz import P, Permission, Scope, authorize, perm
 from edisc_api.errors import ApiError, conflict, not_found, unprocessable
@@ -40,9 +38,7 @@ from edisc_custody.log import verify_chain
 from edisc_db.session import tenant_tx
 from edisc_evidence.writer import EvidenceWriter
 from edisc_renderers.rsmf import RenderInputError, RenderOptions
-from edisc_worker.contracts import RENDERS_QUEUE, RenderRef, render_workflow_id
-from edisc_worker.renders import create_render, options_hash
-from edisc_worker.workflows import RenderWorkflow
+from edisc_worker.renders import create_render, options_hash, start_render_workflow
 
 router = APIRouter(prefix="/v1")
 
@@ -83,6 +79,11 @@ class RenderOut(Strict):
     seal_storage_key: str | None
     seal_version_id: str | None
     sealed: bool
+    # sealing is retried without limit; this flags a render whose seal is overdue (ADR 0015 §15)
+    sealing_stuck: bool
+    sealing_stuck_since: datetime | None
+    seal_failures: int
+    last_seal_error: str | None
 
 
 class RenderFileOut(Strict):
@@ -170,23 +171,11 @@ def _out(row: Any) -> RenderOut:
         seal_storage_key=row.seal_storage_key,
         seal_version_id=row.seal_version_id,
         sealed=row.seal_storage_key is not None,
+        sealing_stuck=row.sealing_stuck_at is not None and row.seal_storage_key is None,
+        sealing_stuck_since=row.sealing_stuck_at,
+        seal_failures=row.seal_failures,
+        last_seal_error=row.last_seal_error,
     )
-
-
-async def _ensure_workflow(res: Resources, tenant_id: uuid.UUID, render_id: uuid.UUID) -> None:
-    """Start the render's workflow once (its id never reused). A replayed or deduplicated request
-    after a crash between commit and start starts it; otherwise "already started" is expected."""
-    try:
-        await res.temporal.start_workflow(
-            RenderWorkflow.run,
-            RenderRef.from_settings(str(tenant_id), str(render_id), res.settings),
-            id=render_workflow_id(str(render_id)),
-            task_queue=RENDERS_QUEUE,
-            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
-            id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
-        )
-    except WorkflowAlreadyStartedError:
-        return
 
 
 # ------------------------------------------------------------------ create
@@ -250,9 +239,13 @@ async def create_render_route(
             if not made.created:
                 response.status_code = 200
     await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
-    await _ensure_workflow(res, caller.tenant_id, render_id)
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         row = (await s.execute(text("SELECT * FROM renders WHERE id = :r"), {"r": render_id})).one()
+    # on the queue of the render's recorded versions, which only workers of those versions poll
+    await start_render_workflow(
+        res.temporal, res.settings, caller.tenant_id, render_id,
+        {k: getattr(row, k) for k in ("renderer_version", "unicode_version", "tzdata_version")},
+    )  # fmt: skip
     return _out(row)
 
 

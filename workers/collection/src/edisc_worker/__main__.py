@@ -36,7 +36,7 @@ from edisc_db.connection_tokens import reconcile_token_refreshes
 from edisc_db.session import create_engine, session_factory
 from edisc_evidence.s3 import s3_client
 from edisc_worker.activities import Activities
-from edisc_worker.contracts import EXPORTS_QUEUE, MAINTENANCE_QUEUE, RENDERS_QUEUE, task_queue
+from edisc_worker.contracts import EXPORTS_QUEUE, MAINTENANCE_QUEUE, task_queue
 from edisc_worker.exports import ExportActivities
 from edisc_worker.maintenance import MaintenanceActivities, ensure_schedules
 from edisc_worker.renders import RenderActivities
@@ -112,7 +112,7 @@ async def run(
     exports: bool = False,
     renders: bool = False,
     queue: str | None = None,
-    renders_queue: str = RENDERS_QUEUE,
+    renders_queue: str | None = None,
 ) -> None:
     settings = Settings()
     client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
@@ -146,13 +146,16 @@ async def run(
                     activities=ExportActivities(acts.sessions, acts.s3, settings).all(),
                 )
             )
-        if renders:
+        if (
+            renders
+        ):  # this worker's renderer/Unicode/tzdata versions decide its queue (ADR 0015 §15)
+            rendering = RenderActivities(acts.sessions, acts.s3, settings)
             workers.append(
                 Worker(
                     client,
-                    task_queue=renders_queue,
+                    task_queue=renders_queue or rendering.task_queue,
                     workflows=[RenderWorkflow],
-                    activities=RenderActivities(acts.sessions, acts.s3, settings).all(),
+                    activities=rendering.all(),
                 )
             )
         log.info("worker started", task_queues=[w.task_queue for w in workers])
@@ -166,7 +169,7 @@ def main() -> None:
     ap.add_argument("--exports", action="store_true", help="also hash, lock and validate exports")
     ap.add_argument("--renders", action="store_true", help="also run RSMF renders")
     ap.add_argument("--queue", help="task queue override (one source only; tests and soak runs)")
-    ap.add_argument("--renders-queue", default=RENDERS_QUEUE, help="renders queue override (tests)")
+    ap.add_argument("--renders-queue", help="renders queue override (tests; default: by versions)")
     args = ap.parse_args()
     sources = args.sources or ["dummy"]
     if args.queue and len(sources) != 1:
