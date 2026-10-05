@@ -83,6 +83,9 @@ class RenderPackagePlan:
     objects: tuple[PackageObject, ...]  # anchor and seal bodies, by SHA-256
     page_size: int = 1000
     zip_size: int = 0  # the exact size of the zip of these members (Content-Length)
+    # differences between the bucket's anchor listing and the database's anchor rows: served anyway
+    # (the package holds what the bucket holds), recorded and alerted by the caller
+    anchor_divergences: tuple[dict[str, Any], ...] = ()
 
     @property
     def manifest_sha256(self) -> str:
@@ -179,6 +182,36 @@ async def _registry(
     return {(r.storage_key, r.version_id): (r.sha256, r.size_bytes) for r in rows}
 
 
+async def _render_anchor_rows(
+    sessions: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, render_id: uuid.UUID
+) -> dict[str, Any]:
+    async with tenant_tx(sessions, tenant_id) as s:
+        rows = (
+            await s.execute(
+                text(
+                    "SELECT storage_key, version_id, sha256, size_bytes, state FROM evidence_objects"
+                    " WHERE render_id = :r AND kind = 'anchor'"
+                ),
+                {"r": render_id},
+            )
+        ).all()
+    return {r.storage_key: r for r in rows}
+
+
+def _divergence(
+    kind: str, key: str, version_id: str | None, row: Any, obj: PackageObject | None = None
+) -> dict[str, Any]:
+    """One difference between the bucket listing and the database (ADR 0015 §19.14)."""
+    return {
+        "kind": kind,  # delete_marker | missing_row | extra_version | hash_mismatch | missing_object
+        "key": key,
+        "version_id": version_id,
+        "db": None if row is None else {"version_id": row.version_id, "sha256": row.sha256,
+                                        "size": row.size_bytes, "state": row.state},
+        "listed": None if obj is None else {"sha256": obj.sha256, "size": obj.size},
+    }  # fmt: skip
+
+
 # ------------------------------------------------------------------ pass 1: the plan
 async def plan_render_package(
     sessions: async_sessionmaker[AsyncSession],
@@ -218,31 +251,45 @@ async def plan_render_package(
             reference = dict(line["fields"]["payload"]["job"])
 
     seal_ref = reference["seal"] if reference is not None else None
-    keys = [v.key for v in versions if not v.is_delete_marker]
-    registry = await _registry(
-        sessions, tenant_id, [*keys, *([seal_ref["key"]] if seal_ref else [])]
-    )
+    registry = await _registry(sessions, tenant_id, [seal_ref["key"]] if seal_ref else [])
+    db_anchors = await _render_anchor_rows(sessions, tenant_id, render_id)
 
-    async def described(key: str, version_id: str) -> PackageObject:
-        known = registry.get((key, version_id))
-        if known is None:  # not recorded (a shadow version, an incident): hashed once, here
-            body = await get_bytes(s3, bucket=bucket, key=key, version_id=version_id)
-            known = (hashlib.sha256(body).hexdigest(), len(body))
-        return PackageObject(key, version_id, known[0], known[1])
-
+    # anchors.jsonl is what the bucket LISTS (it must survive a compromised database); each anchor
+    # body is small and hashed here, then compared with the database's anchor rows (divergences)
     anchors: list[dict[str, Any]] = []
     objects: dict[str, PackageObject] = {}
+    divergences: list[dict[str, Any]] = []
+    listed: set[tuple[str, str]] = set()
     for v in versions:
+        listed.add((v.key, v.version_id))
+        row = db_anchors.get(v.key)
         if v.is_delete_marker:
             anchors.append({"key": v.key, "version_id": v.version_id, "delete_marker": True})
+            divergences.append(_divergence("delete_marker", v.key, v.version_id, row))
             continue
-        obj = await described(v.key, v.version_id)
+        body = await get_bytes(s3, bucket=bucket, key=v.key, version_id=v.version_id)
+        obj = PackageObject(v.key, v.version_id, hashlib.sha256(body).hexdigest(), len(body))
         objects.setdefault(obj.sha256, obj)
         anchors.append({"key": v.key, "version_id": v.version_id, "sha256": obj.sha256,
                         "size": obj.size})  # fmt: skip
+        if row is None:
+            divergences.append(_divergence("missing_row", v.key, v.version_id, None, obj))
+        elif row.version_id != v.version_id:
+            divergences.append(_divergence("extra_version", v.key, v.version_id, row, obj))
+        elif (row.sha256, row.size_bytes) != (obj.sha256, obj.size):
+            divergences.append(_divergence("hash_mismatch", v.key, v.version_id, row, obj))
+    for key, row in sorted(db_anchors.items()):
+        if (key, row.version_id) not in listed:
+            divergences.append(_divergence("missing_object", key, row.version_id, row))
     seal: dict[str, Any] = {"key": None, "version_id": None, "sha256": None, "size": None}
-    if seal_ref is not None:
-        obj = await described(seal_ref["key"], seal_ref["version_id"])
+    if seal_ref is not None:  # from the records (render_started + registry), checked when streamed
+        known = registry.get((seal_ref["key"], seal_ref["version_id"]))
+        if known is None:
+            body = await get_bytes(
+                s3, bucket=bucket, key=seal_ref["key"], version_id=seal_ref["version_id"]
+            )
+            known = (hashlib.sha256(body).hexdigest(), len(body))
+        obj = PackageObject(seal_ref["key"], seal_ref["version_id"], known[0], known[1])
         objects.setdefault(obj.sha256, obj)
         seal = {"key": obj.key, "version_id": obj.version_id, "sha256": obj.sha256,
                 "size": obj.size}  # fmt: skip
@@ -296,6 +343,7 @@ async def plan_render_package(
         objects=tuple(objects[sha] for sha in sorted(objects)),
         page_size=page_size,
         zip_size=sizer.total(),
+        anchor_divergences=tuple(divergences),
     )
 
 

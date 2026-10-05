@@ -515,6 +515,23 @@ async def render_package(
             "matter_id": str(row.matter_id), "mode": outputs, "format": RENDER_PACKAGE_FORMAT,
             "manifest_sha256": plan.manifest_sha256, "file_count": plan.file_count}  # fmt: skip
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        if plan.anchor_divergences:
+            # the bucket and the database disagree about the render's anchors: served anyway (the
+            # package holds what the bucket holds, so the expert sees it), recorded and alerted
+            await audit.record(
+                s, tenant_id=caller.tenant_id, actor=caller.actor,
+                event_type="render_package_anchor_divergence",
+                payload={**base, "divergences": list(plan.anchor_divergences)}, request_id=rid,
+            )  # fmt: skip
+            kinds = sorted({d["kind"] for d in plan.anchor_divergences})
+            await s.execute(
+                text(
+                    "INSERT INTO alerts (id, tenant_id, kind, job_id, message)"
+                    " VALUES (:i, :t, 'render_anchor_divergence', :j, :m)"
+                ),
+                {"i": new_id(), "t": caller.tenant_id, "j": row.job_id,
+                 "m": f"render {render_id}: anchor listing differs from the records: {kinds}"},
+            )  # fmt: skip
         read = await audit.record(
             s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="render_package_read",
             payload=base, request_id=rid,

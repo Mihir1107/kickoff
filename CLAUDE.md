@@ -142,6 +142,8 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   audit AND calls `audit.anchor_now` before the response starts; tested at the first byte
   (`tests/integration/api/first_byte.py`). A new content route must do the same and add that test.
   `edisc-verify` is strict (unlisted files fail); `--tolerate-os-metadata` only for directories.
+- The package's `anchors.jsonl` stays LISTED from S3 (survives a compromised DB); any difference from
+  the DB anchor rows is served anyway, recorded (`audit.render_package_anchor_divergence`) and alerted.
 - Every manifest is validated against the vendored `rsmf_schema_2_0_0.json` (SHA-256 pinned, format
   checks on). The Relativity validator is not used until the licence is confirmed.
 

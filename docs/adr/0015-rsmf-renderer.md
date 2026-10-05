@@ -678,16 +678,27 @@ Review round (2026-10-05, after part C):
     verify the downloaded zip itself, not an extracted folder (a file manager may have touched it).
     The job custody package verifier (`verify_package`) does not check for unlisted files at all;
     making it strict is a separate change (backlog).
-14. **What the S3 listing feeds (open, awaiting a decision).** In pass 1, `list_versions` over the
-    render's own anchor prefix (`custody-anchors/{tenant}/{render}/`, not the bucket) gives the
-    anchor lines of `anchors.jsonl`: one per object version or delete marker found, with SHA-256 and
-    size from the registry, or read once if the registry does not hold that version. So the listing
-    decides WHICH anchor versions the manifest lists (including shadows and delete markers, for the
-    verifier to flag); the database decides their hashes. The job seal comes from the database only.
-    Proposed change in the review report, not made.
+14. **What the S3 listing feeds, and divergence (decided 2026-10-05).** In pass 1, `list_versions`
+    over the render's own anchor prefix (`custody-anchors/{tenant}/{render}/`, one render's anchors,
+    not the bucket) decides which anchor versions `anchors.jsonl` lists, delete markers included;
+    each anchor body (small) is read and hashed there. *Decision: this stays.* Anchors must survive a
+    compromised database (CLAUDE.md: anchors are listed from S3, never from the DB), so the package
+    holds what the bucket holds. In addition the listing is compared with the database's anchor rows
+    for the render. Any difference is a divergence: `delete_marker` (a version is hidden),
+    `extra_version` (a version the row does not record, e.g. a shadow), `missing_row` (an object no
+    row knows), `hash_mismatch` (the row's SHA-256 or size differs from the listed bytes) and
+    `missing_object` (a row whose version is not listed). The download is STILL served, so the
+    expert sees exactly what the bucket holds, and the route records
+    `audit.render_package_anchor_divergence` (every divergence: kind, key, version, the row's and the
+    listed hash and size) and raises one `render_anchor_divergence` alert, in the transaction that
+    records the read, before any byte. Each kind is tested through the API; breaking the record, the
+    hash comparison, the missing-object scan or the delete-marker check each fails a test. The job
+    seal is taken from the records (`render_started` + registry) and checked when streamed; a
+    mismatch there aborts the download (§19.5).
 
-## 20. Plan for §11, oversized attachments as separate natives (2026-10-05, PLAN ONLY, for review)
-Refines §11 into a buildable plan. Nothing here is built.
+## 20. Plan for §11, oversized attachments as separate natives (2026-10-05, APPROVED with changes, not built)
+Refines §11 into a buildable plan. Approved 2026-10-05 with the changes in 9-13 below, which
+override 1-8 where they differ. Nothing here is built.
 
 1. **Threshold and who sets it.** Two rules, both from data the render records, never from worker
    settings (two workers with different settings must not give different bytes for one identity):
@@ -753,3 +764,42 @@ Refines §11 into a buildable plan. Nothing here is built.
    Retention: natives resolve to the matter and are extended by the extension job. API: permissions,
    first-byte audit, mismatch abort. A real multi-GB native is a measurement for the cloud VM
    (backlog), not a laptop test.
+
+Review decisions (2026-10-05), overriding the plan above where they differ:
+
+9. **Natives are copied into the production** (the open question in 3 is closed): collected files
+   belong to the client, productions to the matter, and a matter-owned production must not depend on
+   a client-owned object. The copy is SERVER-SIDE: `CreateMultipartUpload` on the native key (Object
+   Lock COMPLIANCE and retain-until set at create, as for every production), then `UploadPartCopy`
+   with `CopySourceVersionId` = the pinned evidence version, in fixed part ranges, then
+   `CompleteMultipartUpload`; any failure aborts the upload. Then ONE streaming SHA-256 read of the
+   destination's pinned VersionId must equal the source's recorded SHA-256 and size before the
+   native is recorded complete. Native bytes never pass through the worker except that one
+   verification read (never twice). MinIO ignores If-None-Match on copies, so the write is serialized
+   by the advisory content lock, like `EvidenceWriter`; a key already complete in the registry is
+   reused (retry). The native's evidence row stores our SHA-256, never S3's composite checksum.
+10. **Externalization handles BYTES only.** The entry count never externalizes a file. A part whose
+    zip would exceed 65,535 entries is split instead, by this rule: the zip of a part holds a fixed
+    set of entries (the manifest and the EML, `F` = 2 today) plus one entry per attachment or
+    placeholder of its events, primaries and context. After the existing event-cap split, walk each
+    part's events in render order and close the part before the first event whose entries would bring
+    the total over 65,535 - `F`; the context roots a part needs are recomputed for each resulting
+    part exactly as `split_parts` does today (a reply's root goes with it as context). Parts are then
+    renumbered `part`/`parts` over the slice. The rule depends only on the ordered events and their
+    attachment counts, so it is deterministic. A single event whose own entries cannot fit raises
+    `RenderInputError` (impossible for Slack, which caps files per message).
+11. **The 4 GiB check is exact.** The renderer moves to `edisc_custody.zipwriter` in this same
+    version bump (the BACKLOG item "unify the renderer's zip writer" is done by §11: the bump that
+    changes the bytes anyway). The structural rule is "the part's zip needs no ZIP64": computed with
+    `ZipSizer` (the same code that gives the package's `Content-Length`; to gain a `needs_zip64()`
+    answer: any entry of 0xFFFFFFFF bytes or more, any offset, directory size or directory end at
+    0xFFFFFFFF or more, or 65,535 entries or more). No guessed headroom. Externalization: policy
+    externals first, then largest first (ties by file id) until `needs_zip64()` is false.
+12. **Placeholder bytes are fully pinned.** `{file_id}_EXTERNAL.txt` (and, unchanged,
+    `_UNAVAILABLE.txt`): UTF-8 without BOM, LF line endings, one `field: value` line per field in a
+    fixed order (`name`, `size`, `sha256`, `reason`, `native`), the name NFC-normalized, a final LF,
+    no timestamps, no locale-dependent formatting (sizes as plain decimal integers). Covered by the
+    renderer goldens (whole `rsmf.zip` bytes) and by a unit test on the exact bytes.
+13. **Backlog:** cross-render native dedupe (one native object per matter and SHA-256 shared by
+    renders), after measuring the storage and copy cost on the cloud VM.
+

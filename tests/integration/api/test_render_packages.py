@@ -186,11 +186,11 @@ async def test_an_object_that_differs_from_its_record_aborts_the_stream(
 ) -> None:
     _, render = await _rendered(api, tenant)
     conn = await superuser(api.settings)
-    try:  # the registry's record of the render's seal anchor no longer matches the WORM bytes
+    try:  # the registry's record of the JOB's seal anchor no longer matches the WORM bytes
         await conn.execute(
             "UPDATE evidence_objects SET sha256 = $1, source_sha256 = $1 WHERE storage_key = $2",
             "ab" * 32,
-            render["seal_storage_key"],
+            render["job_seal_key"],
         )
     finally:
         await conn.close()
@@ -213,3 +213,81 @@ async def test_an_object_that_differs_from_its_record_aborts_the_stream(
     assert len(alerts) == 1 and render["id"] in alerts[0].message
     head, anchored = await _anchored_seq(api, tenant)
     assert anchored == head  # the abort is anchored too
+
+
+# ------------------------------------------------------------------ anchor divergence (§19.14)
+async def _alerts(api: Api, t: TenantCtx, kind: str) -> list[Any]:
+    async with tenant_tx(api.sessions, t.tenant_id) as s:
+        return list(
+            (await s.execute(text("SELECT message FROM alerts WHERE kind = :k"), {"k": kind})).all()
+        )
+
+
+async def _diverge(api: Api, render: dict[str, Any], kind: str) -> str:
+    """Make the bucket and the database disagree about one render anchor; return the key."""
+    bucket = api.settings.s3_evidence_bucket
+    conn = await superuser(api.settings)
+    try:
+        row = await conn.fetchrow(
+            "SELECT id, storage_key, version_id FROM evidence_objects WHERE render_id = $1"
+            " AND kind = 'anchor' ORDER BY storage_key LIMIT 1",
+            uuid.UUID(render["id"]),
+        )
+        key = str(row["storage_key"])
+        if kind == "extra_version":  # a second, unrecorded version shadows the anchor
+            await api.s3.put_object(Bucket=bucket, Key=key, Body=b'{"forged":true}')
+        elif kind == "delete_marker":  # someone tries to hide the anchor
+            await api.s3.delete_object(Bucket=bucket, Key=key)
+        elif kind == "missing_row":  # an object under the prefix the database does not know
+            key = key.rsplit("/", 1)[0] + "/99999999999999999999.json"
+            await api.s3.put_object(Bucket=bucket, Key=key, Body=b'{"planted":true}')
+        elif kind == "hash_mismatch":  # the database row's hash was rewritten
+            await conn.execute(
+                "UPDATE evidence_objects SET sha256 = $1, source_sha256 = $1 WHERE id = $2",
+                "cd" * 32, row["id"],
+            )  # fmt: skip
+        elif kind == "missing_object":  # the database lists an anchor the bucket does not hold
+            key = key.rsplit("/", 1)[0] + "/00000000000000000000.json"
+            await conn.execute(
+                "INSERT INTO evidence_objects (id, tenant_id, render_id, storage_key, kind, state,"
+                " sha256, size_bytes, retain_until, version_id, source_sha256, source_hash_origin, completed_at)"
+                " SELECT gen_random_uuid(), tenant_id, render_id, $1, 'anchor', 'complete', $2, 10,"
+                " retain_until, 'ghost', $2, 'collection', now() FROM evidence_objects WHERE id = $3",
+                key, "ef" * 32, row["id"],
+            )  # fmt: skip
+    finally:
+        await conn.close()
+    return key
+
+
+@pytest.mark.parametrize(
+    "kind", ["extra_version", "delete_marker", "missing_row", "hash_mismatch", "missing_object"]
+)
+async def test_an_anchor_divergence_is_recorded_and_alerted_and_still_served(
+    api: Api, tenant: TenantCtx, render_worker: None, tmp_path: Path, kind: str
+) -> None:
+    _, render = await _rendered(api, tenant)
+    async with api.client(tenant.subdomain, tenant.token(api.settings)) as c:
+        clean = await c.get(f"/v1/renders/{render['id']}/package")
+    assert await _alerts(api, tenant, "render_anchor_divergence") == []  # a clean render: none
+    key = await _diverge(api, render, kind)
+    async with api.client(tenant.subdomain, tenant.token(api.settings)) as c:
+        got = await c.get(f"/v1/renders/{render['id']}/package")
+    assert got.status_code == 200 and int(got.headers["content-length"]) == len(got.content)
+    events = [
+        e
+        for e in await custody(api, tenant, str(tenant.tenant_id))
+        if e.event_type == "audit.render_package_anchor_divergence"
+    ]
+    assert len(events) == 1
+    divergences = events[0].payload["divergences"]
+    assert [(d["kind"], d["key"]) for d in divergences] == [(kind, key)], divergences
+    alerts = await _alerts(api, tenant, "render_anchor_divergence")
+    assert len(alerts) == 1 and kind in alerts[0].message
+    # the package holds what the bucket LISTS: a shadow or a marker is there for the expert to see
+    with zipfile.ZipFile(io.BytesIO(got.content)) as zf:
+        anchors = zf.read("anchors.jsonl")
+    assert (key.encode() in anchors) == (kind != "missing_object")
+    if kind in ("hash_mismatch", "missing_object"):  # the bucket is intact: the package is too
+        with zipfile.ZipFile(io.BytesIO(clean.content)) as zf:
+            assert zf.read("anchors.jsonl") == anchors

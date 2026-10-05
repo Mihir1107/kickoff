@@ -69,7 +69,10 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - At the next `RENDERER_VERSION` bump: unify the renderer's zip writer (`edisc_renderers.rsmf.zipstream`)
   with `edisc_custody.zipwriter` (one deterministic STORED writer with ZIP64; the renderer's in-memory
   entries then also take a data descriptor, which changes `rsmf.zip` bytes, hence only with a bump and
-  new golden generations). ADR 0015 §19.6.
+  new golden generations). ADR 0015 §19.6. Scheduled: done by the §11 build (renderer 1.3.0, ADR 0015 §20.11).
+- Cross-render native dedupe for oversized attachments (one native per matter and SHA-256, shared by
+  renders instead of one copy per render): measure the storage and server-side copy cost on the cloud
+  VM first (ADR 0015 §20.13).
 - **[hard requirement of the Phase 3 live Slack connector]** Emit conversation metadata as versioned
   `conversation_snapshot` items through the directory unit: name, type, topic, purpose, members,
   archived state (channels are renamed; every state is kept). Normalizer, loader and renderer already

@@ -118,7 +118,11 @@ order) and `docs/adr/0017-render-worker-versions.md`.
 - `9dec343` the 2026-10-05 review round (renderer 1.2.0: reactions before deletion as history; legacy
   export layout case; real SIGKILLs in the seal via a test-only barrier; routing check once per
   queue; ADR 0017 accepted; push-after-commit rule).
-- the commit after `9dec343` (see `git log`): step 5 part C, the render package download (§19).
+- `efd385f` step 5 part C, the render package download (§19).
+- `3a8a572` part C review round: every content read anchored before its first byte, strict
+  `edisc-verify` with `--tolerate-os-metadata`, `Content-Length` (§19.11-13), §11 plan (§20).
+- the commit after `3a8a572` (see `git log`): anchor divergence recorded and alerted (§19.14), §11
+  plan approved with changes (§20.9-13), this handoff.
 
 ### Decisions taken in the 2026-10-05 reviews (all recorded in ADRs)
 1. Package zip: extend our own deterministic STORED zip writer with ZIP64. Do NOT record CRC32 at
@@ -163,12 +167,69 @@ order) and `docs/adr/0017-render-worker-versions.md`.
   byte; `Content-Length` on the package (`ZipSizer`); `edisc-verify` strict, with
   `--tolerate-os-metadata` for directories only; backlog: unify the renderer's zip writer at the next
   renderer bump, strict job-package verification.
-- **Open decision (§19.14):** the package's `anchors.jsonl` is driven by the S3 listing of the render's
-  anchor prefix (which versions), with hashes from the registry. The proposal to make the database
-  the only source, with a bounded listing cross-check that fails loudly, is waiting for sign-off
-  because CLAUDE.md says anchors are listed from S3, never from the DB.
-- Next: the rest of M15, §11 (oversized attachments as external natives, required before production).
-  The build plan is in the 2026-10-05 review report and ADR 0015 §20 (plan only, not built).
+- **Anchor divergence (§19.14, decided):** `anchors.jsonl` stays listed from S3 (anchors must survive a
+  compromised database). Any difference from the DB anchor rows (`delete_marker`, `extra_version`,
+  `missing_row`, `hash_mismatch`, `missing_object`) is served anyway, recorded as
+  `audit.render_package_anchor_divergence` and alerted (`render_anchor_divergence`); each kind tested.
+
+### Next: §11, oversized attachments as separate natives (APPROVED 2026-10-05, build in a new session)
+Read ADR 0015 §11, then §20 in full: §20.1-8 is the plan, §20.9-13 the approved changes, which win
+where they differ. The essentials, so this list alone is enough to start:
+
+1. **Renderer 1.3.0** (new golden generations, renderer and corpus; `EDISC_RECORD_RSMF=1` /
+   `EDISC_RECORD_CORPUS=1` under the new key). The renderer moves to `edisc_custody.zipwriter` in
+   this bump (data descriptor on every entry; closes the BACKLOG unify item). Its structural rule is
+   "the part's zip needs no ZIP64", computed with `ZipSizer` (add `needs_zip64()`: any entry
+   >= 0xFFFFFFFF bytes, any offset / directory size / directory end >= 0xFFFFFFFF, or >= 65,535
+   entries). No guessed headroom. The same `ZipSizer` gives the package's Content-Length.
+2. **Threshold:** new `RenderOptions.external_over_bytes` (renderer constant default, proposed 1 GiB;
+   bounded 1 MiB..4 GiB; set by whoever has `export.create`; in `as_payload()`, so in the options hash
+   and the render identity; never from worker settings). Selection per part, after splitting:
+   attachments over the threshold first, then largest first (ties by file id) until `needs_zip64()`
+   is false. A file is never read for an external attachment (the opener is not called; test it).
+3. **Entry count never externalizes:** after the existing event-cap split, a part whose zip would
+   exceed 65,535 entries is split: walk the events in render order, close the part before the first
+   event whose entries (one per attachment or placeholder, primaries and context) would take it over
+   65,535 - F (F = fixed entries per part: manifest + EML = 2 today); recompute each new part's
+   context roots exactly as `split_parts` does; renumber `part`/`parts`. One event that cannot fit
+   raises `RenderInputError`.
+4. **In the RSMF:** placeholder `{file_id}_EXTERNAL.txt`, `display` = original name, `custom`
+   `edisc.file_external = <file id>: sha256:<hex>`. Placeholder bytes pinned: UTF-8 no BOM, LF, lines
+   `name: ..`, `size: ..`, `sha256: ..`, `reason: ..` (`over_external_threshold` |
+   `exceeds_rsmf_zip_limit`), `native: natives/<sha256>`, NFC name, final LF, no timestamps; unit test
+   on the exact bytes plus the goldens.
+5. **Native copy (server-side only):** key `t/{tenant}/productions/{render}/natives/sha256/<hex>`,
+   `evidence_objects` kind `production`, `render_id` set (retention render -> job -> matter). Under
+   the advisory content lock (MinIO ignores If-None-Match on copy): CreateMultipartUpload with
+   COMPLIANCE lock + retain-until, UploadPartCopy with `CopySourceVersionId` = pinned evidence
+   version, CompleteMultipartUpload, abort on any failure; then ONE streaming SHA-256 read of the
+   destination's pinned VersionId, equal to the source's recorded SHA-256 and size, before the row is
+   complete. Never stream native bytes through the worker twice. Registry complete = reuse (retry).
+6. **Custody:** insert-only `render_natives` (render, ord, SHA-256, size, key, VersionId, referencing
+   file ords), deferred FK to its batch event (migration 0029 + RLS + grants + drift-model update). A
+   native is written before the batch that first references it; `render_files_batch` gains
+   `natives_root` (RFC 6962 over that batch's native records), `render_completed` the native count
+   and total root, the summary `external_attachments`. `FILE_FIELDS` gain `external_count` (the
+   verifier keeps the old leaf for renders before 1.3.0, by the renderer version in
+   `render_started`). The reconciler fails on a missing native, a wrong hash or an unreferenced one.
+7. **Package `edisc-render-package/3`** (verifier accepts /1, /2, /3): `natives.jsonl` in the manifest;
+   `natives/<sha256>` after `outputs/` when embedded, else referenced by hash and supplied with
+   `--file`. The verifier checks each native's hash and size, the natives roots, and opens each
+   `.rsmf` (hardened reader) to match its `edisc.file_external` references to native records.
+8. **API:** `GET /v1/renders/{id}/natives` (`custody.read`) and
+   `GET /v1/renders/{id}/natives/{sha256}/content` (`export.read`, audit + `audit.anchor_now` before
+   the first byte, re-hashed while streaming; first-byte test with `tests/integration/api/first_byte.py`).
+9. **Tests** (§20.8): selection and split boundaries (exactly at a limit stays, one over moves), ties,
+   placeholder bytes, opener never called, reconciler failures; corpus cases (tiny threshold, the same
+   file in two slices copied once, external next to unavailable, external in a context root, a part
+   split by entry count using a tiny per-test entry limit); crash matrix (crash after the copy before
+   the row completes, after native rows before the batch commits, a real SIGKILL during the copy or
+   the verification read; one object version per native key on resume); package attacks (altered,
+   missing, unreferenced native; an `.rsmf` naming an unlisted native); Content-Length with natives;
+   retention extension covers natives; API permissions, first byte, mismatch abort. A real multi-GB
+   native is a cloud-VM measurement (BACKLOG), not a laptop test.
+10. Mutation-check every protection; `make check`, the full integration suite on a fresh stack, push,
+    watch CI. BACKLOG keeps: cross-render native dedupe (measure first).
 
 ### Open questions / waiting on the user
 1. Relativity licence (validator in CI) - see "Open decisions" above.
