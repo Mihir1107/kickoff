@@ -91,7 +91,10 @@ def _decode(cursor: Cursor | None) -> int:
 
 class DummyConnector:
     source = "dummy"
-    version = "0.3.0"  # 0.3.0: leaves, thread broadcasts, me_message, uninterpretable subtypes
+    # 0.3.0: leaves, thread broadcasts, me_message, uninterpretable subtypes; 0.4.0: file sizes from
+    # the spec (file_size_min, file_size_span; the defaults give 0.3.0's bytes). Every default of the
+    # spec is pinned with this version in tests/golden/dummy/small.json.
+    version = "0.4.0"
     item_source = "slack"  # both dialects simulate the Slack Web API
     dialect = "api"
     archive_backed = False

@@ -211,10 +211,28 @@ class EvidenceWriter:
 
         A stream that raises (evidence that fails verification, a render error) aborts the upload,
         so no object exists and the row stays pending. Nothing partial can be completed.
+
+        Serialized per key by the advisory content lock: two executors of one render (a zombie
+        attempt and its retry) never race on the registration or the source hash; the second finds
+        the first's row and checks its own re-render against it.
         """
         if "/" in name or not name:
             raise ValueError(f"unsafe production name {name!r}")
         key = production_key(tenant_id, render_id, name)
+        async with self._content_lock(key):
+            return await self._write_production_locked(
+                tenant_id, job_id, render_id, key, matter_retention_until, stream
+            )
+
+    async def _write_production_locked(
+        self,
+        tenant_id: uuid.UUID,
+        job_id: uuid.UUID,
+        render_id: uuid.UUID,
+        key: str,
+        matter_retention_until: datetime,
+        stream: Callable[[], AsyncIterable[bytes]],
+    ) -> WrittenEvidence:
         retain = effective_retain_until(self._settings, matter_retention_until)
         existing = await self._row_by_key(tenant_id, key)
         if existing is None:
@@ -378,14 +396,18 @@ class EvidenceWriter:
             raise EvidenceIntegrityError(f"{key}: unexpected registry state {row.state}")
 
         versions = [v for v, marker in await self._versions(key) if not marker]
+        if not versions:
+            # an earlier attempt that died mid-copy left its upload open (recorded or not, if it
+            # died before recording it): under the content lock no other copy runs, so abort all.
+            # Then list again: a copy that completed in between (a writer that lost its lock while
+            # copying) is verified, never copied a second time.
+            await self._abort_open_uploads(key, row.upload_id)
+            versions = [v for v, marker in await self._versions(key) if not marker]
         if len(versions) > 1:
             raise EvidenceIntegrityError(f"{key}: {len(versions)} versions of one native")
-        if versions:  # an earlier attempt copied it and died before completing: verify, complete
+        if versions:  # copied by an earlier attempt that did not complete the row: verify, complete
             version = versions[0]
         else:
-            # an earlier attempt that died mid-copy left its upload open (recorded or not, if it
-            # died before recording it): under the content lock no other copy runs, so abort all
-            await self._abort_open_uploads(key, row.upload_id)
             version = await self._copy_native(
                 tenant_id, row.id, key, size, row.retain_until, source_key, source_version_id, hit
             )

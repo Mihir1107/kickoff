@@ -318,30 +318,60 @@ async def test_sigkill_during_a_native_copy_or_its_verification_read(
 
 
 # ------------------------------------------------------------------ retention
-async def test_natives_are_extended_with_the_matter(
-    app_sessions: Sessions, sweeper_sessions: Sessions, s3: S3Client, settings: Settings
+async def _extended_natives(
+    sessions: Sessions, sweeper: Sessions, s3: S3Client, settings: Settings, cut: str | None
 ) -> None:
+    """Render, optionally cut one of the two routes from the natives to their matter (``job_id`` or
+    ``render_id`` set NULL on their registry rows), run the extension job, require every native
+    extended to the matter's target, in the registry and on its object version."""
+    from ..custody.conftest import superuser
+
     rs = window_settings(settings)
-    t, _, render_id = await _rendered(app_sessions, s3, settings)
-    await drive(RenderRun(app_sessions, s3, settings), t.tenant_id, render_id)
-    before = {
-        n.sha256: ensure_utc(n.retain_until) for n in await _natives(app_sessions, t, render_id)
-    }
-    assert before
+    t, _, render_id = await _rendered(sessions, s3, settings)
+    await drive(RenderRun(sessions, s3, settings), t.tenant_id, render_id)
+    natives = await _natives(sessions, t, render_id)
+    assert natives
+    if cut is not None:
+        conn = await superuser(settings)
+        try:
+            await conn.execute(
+                "SET session_replication_role = replica"
+            )  # past the immutability guard
+            await conn.execute(
+                f"UPDATE evidence_objects SET {cut} = NULL WHERE id = ANY($1::uuid[])",
+                [n.evidence_object_id for n in natives],
+            )
+        finally:
+            await conn.close()
+    before = {n.sha256: ensure_utc(n.retain_until) for n in natives}
     now = utc_now()
-    await extend_retention(sweeper_sessions, app_sessions, s3, rs, now=now, tenant_id=t.tenant_id)
-    after = {
-        n.sha256: (ensure_utc(n.retain_until), n)
-        for n in await _natives(app_sessions, t, render_id)
-    }
+    await extend_retention(sweeper, sessions, s3, rs, now=now, tenant_id=t.tenant_id)
     target = effective_retain_until(rs, t.retention, now=now)
-    for sha, (until, n) in after.items():
-        assert until > before[sha]
+    for n in await _natives(sessions, t, render_id):
+        until = ensure_utc(n.retain_until)
+        assert until > before[n.sha256], (cut, n.sha256)
         assert abs((until - target).total_seconds()) < 5, (until, target)
         lock = await s3.get_object_retention(
             Bucket=rs.s3_evidence_bucket, Key=n.storage_key, VersionId=n.version_id
         )
         assert abs((ensure_utc(lock["Retention"]["RetainUntilDate"]) - until).total_seconds()) < 1
+
+
+async def test_natives_are_extended_with_the_matter(
+    app_sessions: Sessions, sweeper_sessions: Sessions, s3: S3Client, settings: Settings
+) -> None:
+    await _extended_natives(app_sessions, sweeper_sessions, s3, settings, None)
+
+
+@pytest.mark.parametrize(
+    "cut", ["render_id", "job_id"], ids=["only-via-job_id", "only-via-render_id"]
+)
+async def test_each_retention_route_alone_extends_natives(
+    app_sessions: Sessions, sweeper_sessions: Sessions, s3: S3Client, settings: Settings, cut: str
+) -> None:
+    """Natives reach their matter by job_id (render's job) AND render_id (render -> job -> matter),
+    like the `.rsmf` productions. Each route alone must suffice, so breaking either fails a test."""
+    await _extended_natives(app_sessions, sweeper_sessions, s3, settings, cut)
 
 
 # ------------------------------------------------------------------ protections of the copy
@@ -458,3 +488,125 @@ async def test_a_native_missing_from_the_batches_fails_the_render(
         await RenderRun(app_sessions, s3, rs).render_files(t.tenant_id, render_id)
     st = await render_state(app_sessions, t.tenant_id, render_id)
     assert st["row"].status == "rendering"
+
+
+# ------------------------------------------------------------------ concurrent executors
+async def _open_uploads(s3: S3Client, settings: Settings, prefix: str) -> list[Any]:
+    resp = await s3.list_multipart_uploads(Bucket=settings.s3_evidence_bucket, Prefix=prefix)
+    return list(resp.get("Uploads", []))
+
+
+async def test_two_writers_copying_one_native_concurrently(
+    app_sessions: Sessions, s3: S3Client, settings: Settings
+) -> None:
+    """Writer A holds its multipart copy OPEN (parts copied, not completed) while writer B asks for
+    the same native. B waits on the per-native content lock instead of aborting A's upload, then
+    reuses A's object: both finish, one version, one registry row, no open upload."""
+    from edisc_evidence.writer import EvidenceWriter
+
+    t, job_id, render_id = await _rendered(app_sessions, s3, settings)
+    key, version, sha, size = await _first_native_source(app_sessions, t, job_id)
+    holding = asyncio.Event()
+
+    async def slow(point: str) -> None:
+        if point == "native_parts_copied":
+            holding.set()
+            await asyncio.sleep(2)  # B is waiting meanwhile; its abort-all would break this copy
+
+    def write(on: Any) -> Any:
+        return EvidenceWriter(app_sessions, s3, settings).write_native(
+            tenant_id=t.tenant_id, job_id=job_id, render_id=render_id, sha256=sha, size=size,
+            source_key=key, source_version_id=version, matter_retention_until=t.retention, on=on,
+        )  # fmt: skip
+
+    async def b() -> Any:
+        await holding.wait()
+        return await write(None)
+
+    async with asyncio.timeout(60):  # no livelock
+        a_done, b_done = await asyncio.gather(write(slow), b())
+    assert (a_done.deduplicated, b_done.deduplicated) == (False, True)
+    assert a_done.version_id == b_done.version_id and a_done.evidence_id == b_done.evidence_id
+    versions = await s3.list_object_versions(
+        Bucket=settings.s3_evidence_bucket, Prefix=a_done.storage_key
+    )
+    assert len(versions.get("Versions", [])) == 1
+    assert await _open_uploads(s3, settings, a_done.storage_key) == []
+    async with tenant_tx(app_sessions, t.tenant_id) as s:
+        rows = (
+            await s.execute(
+                text("SELECT state FROM evidence_objects WHERE storage_key = :k"),
+                {"k": a_done.storage_key},
+            )
+        ).all()
+    assert [r.state for r in rows] == ["complete"]
+
+
+async def test_two_executors_render_the_same_render_concurrently(
+    app_sessions: Sessions, s3: S3Client, settings: Settings, tmp_path: Path
+) -> None:
+    """Two executors run the files step of one render at once (a zombie and its retry). Each retries
+    a transient failure as the workflow would. Both finish; one native object version and one
+    render_natives row per SHA-256; no open multipart upload; the render verifies."""
+    from edisc_db.session import is_retryable_db_error
+
+    rs = _settings(settings)
+    t, job_id, render_id = await _rendered(app_sessions, s3, rs)
+    await RenderRun(app_sessions, s3, rs).begin(t.tenant_id, render_id)
+
+    async def executor() -> str:
+        for _ in range(10):
+            try:
+                return await RenderRun(app_sessions, s3, rs).render_files(t.tenant_id, render_id)
+            except Exception as exc:
+                from sqlalchemy.exc import IntegrityError
+
+                if not (isinstance(exc, IntegrityError) or is_retryable_db_error(exc)):
+                    raise
+                await asyncio.sleep(0.2)
+        raise AssertionError("an executor kept failing")
+
+    async with asyncio.timeout(240):  # no livelock
+        first, second = await asyncio.gather(executor(), executor())
+    assert {first, second} == {"rendered"}
+    result = await RenderRun(app_sessions, s3, rs).complete(t.tenant_id, render_id)
+    assert result["status"] == "completed", result
+    want = await expected_files(app_sessions, s3, rs, t.tenant_id, job_id, OPTIONS)
+    expected = await _expected_natives(app_sessions, s3, rs, t, job_id)
+    st = await assert_final(
+        app_sessions, s3, rs, t, render_id, "completed", _types(len(want), len(expected)), tmp_path
+    )
+    assert st["files"] == want
+    natives = await _natives(app_sessions, t, render_id)
+    assert sorted(n.sha256 for n in natives) == sorted(expected)
+    assert await _open_uploads(s3, rs, f"t/{t.tenant_id}/productions/{render_id}/") == []
+
+
+async def test_a_copy_completed_by_a_writer_that_lost_its_lock_is_reused(
+    app_sessions: Sessions, s3: S3Client, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A zombie writer (its lock connection dropped while it kept copying) completes its copy just as
+    we abort open uploads. We list again after the abort and verify that version: still one version
+    at the key, never a second copy."""
+    from edisc_evidence.writer import EvidenceWriter, native_key
+
+    t, job_id, render_id = await _rendered(app_sessions, s3, settings)
+    key, version, sha, size = await _first_native_source(app_sessions, t, job_id)
+    target = native_key(t.tenant_id, render_id, sha)
+    original = EvidenceWriter._abort_open_uploads
+
+    async def zombie_completes(self: EvidenceWriter, k: str, recorded: str | None) -> None:
+        await original(self, k, recorded)
+        await s3.copy_object(  # the zombie's copy lands now
+            Bucket=settings.s3_evidence_bucket, Key=target,
+            CopySource={"Bucket": settings.s3_evidence_bucket, "Key": key, "VersionId": version},
+            ObjectLockMode="COMPLIANCE", ObjectLockRetainUntilDate=t.retention,
+        )  # fmt: skip
+
+    monkeypatch.setattr(EvidenceWriter, "_abort_open_uploads", zombie_completes)
+    done = await EvidenceWriter(app_sessions, s3, settings).write_native(
+        tenant_id=t.tenant_id, job_id=job_id, render_id=render_id, sha256=sha, size=size,
+        source_key=key, source_version_id=version, matter_retention_until=t.retention,
+    )  # fmt: skip
+    versions = await s3.list_object_versions(Bucket=settings.s3_evidence_bucket, Prefix=target)
+    assert [v["VersionId"] for v in versions.get("Versions", [])] == [done.version_id]

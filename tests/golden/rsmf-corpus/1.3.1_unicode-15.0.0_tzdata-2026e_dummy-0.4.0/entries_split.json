@@ -1,0 +1,18 @@
+{
+  "events": 78,
+  "files": [
+    "C00000DUMMY_2026-01-05_part001of002.rsmf",
+    "C00000DUMMY_2026-01-05_part002of002.rsmf",
+    "C00000DUMMY_2026-01-06_part001of003.rsmf",
+    "C00000DUMMY_2026-01-06_part002of003.rsmf",
+    "C00000DUMMY_2026-01-06_part003of003.rsmf",
+    "G00001DUMMY_2026-01-05_part001of003.rsmf",
+    "G00001DUMMY_2026-01-05_part002of003.rsmf",
+    "G00001DUMMY_2026-01-05_part003of003.rsmf",
+    "G00001DUMMY_2026-01-06_part001of004.rsmf",
+    "G00001DUMMY_2026-01-06_part002of004.rsmf",
+    "G00001DUMMY_2026-01-06_part003of004.rsmf",
+    "G00001DUMMY_2026-01-06_part004of004.rsmf"
+  ],
+  "projection_sha256": "7d666e1295a43c2bff564516500446a61b76a01b268870edc3d50e50c103777d"
+}

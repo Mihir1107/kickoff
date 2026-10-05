@@ -157,3 +157,39 @@ def test_a_line_not_ending_in_crlf_fails_even_if_it_decodes(tmp_path: Path) -> N
     assert eml[end : end + 2] == b"\r\n"
     with pytest.raises(RsmfCheckError, match="CRLF"):
         external_refs(_write(tmp_path, eml[:end] + b"AA" + eml[end + 2 :]))
+
+
+def _render_named(name: str) -> bytes:
+    big = FileAttachment(
+        "F1", name, 3 * MIB, hashlib.sha256(b"F1").hexdigest(), ref("T0TEST/file/F1"), "F1"
+    )
+    m = msg("2026-01-05T09:00:00Z", files=("F1",))
+    [f] = render_slice(
+        slice_input(date(2026, 1, 5), [m], files={"F1": big}),
+        RenderOptions(external_over_bytes=MIB),
+    )
+    return b"".join(f.stream(opener_for({})))
+
+
+def test_names_decode_back_through_the_verifiers_reader(tmp_path: Path) -> None:
+    """A filename with the literal text \\u000A and one with a real newline: different placeholders,
+    and the verifier decodes each back to the exact name (equal to the manifest's display)."""
+    literal, newline = "a\\u000Ab.txt", "a\nb.txt"
+    got = {}
+    for label, name in (("literal", literal), ("newline", newline)):
+        eml = _render_named(name)
+        with zipfile.ZipFile(io.BytesIO(_zip_of(eml))) as z:
+            got[label] = z.read("F1_EXTERNAL.txt")
+        (tmp_path / label).mkdir()
+        [r] = external_refs(_write(tmp_path / label, eml))
+        assert r.name == name
+    assert got["literal"] != got["newline"]
+
+
+def test_a_placeholder_name_that_differs_from_the_display_fails(tmp_path: Path) -> None:
+    eml = _render_named("report.pdf")
+    blob = _zip_of(eml)
+    with zipfile.ZipFile(io.BytesIO(blob)) as z:
+        text = z.read("F1_EXTERNAL.txt").replace(b"name: report.pdf", b"name: other.pdf")
+    with pytest.raises(RsmfCheckError, match="display"):
+        external_refs(_write(tmp_path, _rewrap(eml, _edit_zip(blob, "F1_EXTERNAL.txt", text))))

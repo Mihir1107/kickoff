@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from edisc_connector_dummy.connector import DummyConnector
 from edisc_connector_dummy.dataset import Dataset
 from edisc_connectors_base.types import BatchKind
 
@@ -51,8 +52,15 @@ async def test_seed_and_epoch_change_the_output() -> None:
 
 
 async def test_golden_digest_is_stable_across_code_changes() -> None:
-    """Changing the generator's output is a connector version bump: update the golden file deliberately."""
+    """Changing the generator's output is a connector version bump: update the golden file deliberately.
+    The golden pins the connector version together with the FULL effective spec (every default,
+    file sizes included), so a changed default fails here even when the digest's spec does not use
+    it, and the renderer and corpus golden keys (`_dummy-<version>`) name exactly one generator."""
     golden = json.loads(GOLDEN.read_text())
+    assert golden["connector_version"] == DummyConnector.version
+    assert golden["effective_spec"] == make_spec(**golden["spec"]).model_dump(mode="json"), (
+        "a spec default changed: bump DummyConnector.version and record the golden deliberately"
+    )
     for entry in golden["epochs"]:
         digest, counts = await dataset_digest(golden["spec"], entry["epoch"])
         assert (digest, counts) == (entry["sha256"], entry["counts"]), f"epoch {entry['epoch']}"

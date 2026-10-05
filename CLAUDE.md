@@ -79,7 +79,7 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Layout/tier rules: `edisc_connector_slack_export.layout`. Format details marked *(confirm on real
   export)* in ADR 0014 stay provisional until the real exports are fixtures.
 
-## RSMF renders (M15, ADR 0015; steps 1-5 and §11 natives done, renderer 1.3.0)
+## RSMF renders (M15, ADR 0015; steps 1-5 and §11 natives done, renderer 1.3.1)
 - Renders read normalized items and derivations, never raw pages (raw evidence only to embed file
   bytes, by pinned version). The renderer `edisc_renderers.rsmf` is pure (no DB/S3/clock imports; a
   test enforces it). A worker loader builds `SliceInput`s and streams evidence through a `FileOpener`.
@@ -99,7 +99,8 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   never reads it. The entry count never externalizes: it splits parts (`MAX_PART_ENTRIES`). The
   renderer writes zips only through `edisc_custody.zipwriter`. Natives are copied SERVER-SIDE from the
   pinned evidence version (`EvidenceWriter.write_native`, content lock, one verification read), one
-  per (render, SHA-256), before the batch that first references them; `render_natives` + each
+  per (render, SHA-256), before the batch that first references them. `write_production` is under the
+  same per-key lock (two executors of one render are possible: a zombie attempt and its retry); `render_natives` + each
   batch's `natives_root`. The file leaf and natives checks follow the renderer version in
   `render_started` (`edisc_custody.render_files.has_natives`).
 - Reconciliation: every in-scope message appears as exactly ONE event across the render's files, plus
@@ -221,8 +222,9 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - `completed_unverified` is never presented as a clean completion (ADR 0005).
 - Secrets: `.env.example` has placeholders only. Never commit `.env`. Wrap secrets in `SecretStr`.
 - Dummy connector (`edisc_connector_dummy`): the golden dataset and its own oracle. Expected values in tests come
-  from `Dataset`, never from collected data. Output is byte-identical per (spec, epoch); changing it requires a
-  `DummyConnector.version` bump and regenerating `tests/golden/dummy/small.json`.
+  from `Dataset`, never from collected data. Output is byte-identical per (spec, epoch); changing it, or ANY
+  spec field or default, requires a `DummyConnector.version` bump and regenerating `tests/golden/dummy/small.json`
+  (it pins the full effective spec with the version, so golden keys `_dummy-<version>` name one generator).
 - Thread-parent policy (ADR 0011, PROPOSED): default `include_parent_and_thread`; do not change without sign-off.
 - Rate limits (ADR 0010): every source request goes through `edisc_connectors_base.ratelimit.call_with_limits`
   with a `BucketKey(tenant, source, workspace, method)`; limits only from `EDISC_RATE_LIMITS`; raise
@@ -244,6 +246,11 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - `scripts/measure_breakdown.py` (storage per component + per-stage throughput), `scripts/bench_pipeline.py`,
   `scripts/measure_audit_burst.py` (audited reads), `scripts/resume_soak.py` (SIGKILL soak; 50k is the CI test).
   Run them on a FRESH test stack (`make test-env-up`); the laptop is noisy, so compare paired runs.
+
+## Mutation checks (`scripts/mutation/`, README there)
+- Every new protection gets a catalog entry (one exact edit + the test that must fail); run
+  `uv run python scripts/mutation/run.py --kind unit` (and `--kind integration` on the test stack).
+  `tests/unit/test_mutation_catalog.py` fails when an entry no longer applies: update it with the refactor.
 
 ## Working agreement
 - One milestone at a time: implement → tests → run → commit (message ends with the attribution trailer).

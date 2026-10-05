@@ -8,7 +8,9 @@ directory, the manifest and the small placeholders are ever read; the evidence e
 
 ``external_refs`` reads the manifest's ``edisc.file_external`` references (``<file id>:
 sha256:<hex>``) and checks each one's ``<file id>_EXTERNAL.txt`` placeholder (pinned layout: name,
-size, sha256, reason, native; LF line endings) against it. Anything else raises ``RsmfCheckError``.
+size, sha256, reason, native; LF line endings) against it, including that the placeholder's name
+decodes (``decode_name``) to the attachment's ``display`` in the manifest. Anything else raises
+``RsmfCheckError``.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from __future__ import annotations
 import binascii
 import json
 import re
+import unicodedata
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from pathlib import Path
@@ -159,11 +162,43 @@ def _run[T](awaitable: Awaitable[T]) -> T:
     raise RuntimeError("rsmf read suspended: not a synchronous source")
 
 
+_ESCAPED_CATEGORIES = frozenset({"Cc", "Cs", "Zl", "Zp"})
+_HEX4 = re.compile(r"[0-9a-f]{4}")
+
+
+def decode_name(encoded: str) -> str:
+    """The inverse of the renderer's placeholder name encoding (ADR 0015 §21.4): ``\\\\`` is a
+    backslash, ``\\uXXXX`` (lowercase hex) one of the escaped characters. Strict: any other escape, an
+    escape of a character that is never escaped, or a raw character that must have been escaped
+    raises, so each name has exactly one encoding."""
+    out, i = [], 0
+    while i < len(encoded):
+        c = encoded[i]
+        if c != "\\":
+            if unicodedata.category(c) in _ESCAPED_CATEGORIES:
+                raise RsmfCheckError(f"placeholder name: raw U+{ord(c):04X} not escaped")
+            out.append(c)
+            i += 1
+        elif encoded[i + 1 : i + 2] == "\\":
+            out.append("\\")
+            i += 2
+        elif encoded[i + 1 : i + 2] == "u" and _HEX4.fullmatch(encoded[i + 2 : i + 6]):
+            ch = chr(int(encoded[i + 2 : i + 6], 16))
+            if unicodedata.category(ch) not in _ESCAPED_CATEGORIES:
+                raise RsmfCheckError(f"placeholder name: U+{ord(ch):04X} must not be escaped")
+            out.append(ch)
+            i += 6
+        else:
+            raise RsmfCheckError(f"placeholder name: bad escape at {i}")
+    return "".join(out)
+
+
 @dataclass(frozen=True)
 class ExternalRef:
     file_id: str
     sha256: str
     size: int  # from the placeholder
+    name: str  # decoded from the placeholder (NFC); equals the manifest's display
 
 
 def external_refs(reader: RangeReader) -> list[ExternalRef]:
@@ -193,6 +228,10 @@ def external_refs(reader: RangeReader) -> list[ExternalRef]:
             for pair in event.get("custom", [])
             if pair.get("name") == "edisc.file_external"
         ]
+        displays: dict[str, set[str]] = {}
+        for event in manifest["events"]:
+            for a in event.get("attachments", []):
+                displays.setdefault(str(a["id"]), set()).add(str(a.get("display", "")))
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise RsmfCheckError(f"manifest: {exc}") from exc
     refs: dict[str, ExternalRef] = {}
@@ -205,14 +244,21 @@ def external_refs(reader: RangeReader) -> list[ExternalRef]:
             if refs[fid].sha256 != sha:
                 raise RsmfCheckError(f"file {fid} references two natives")
             continue
-        refs[fid] = ExternalRef(fid, sha, _placeholder(src, entries, fid, sha))
+        size, name = _placeholder(src, entries, fid, sha)
+        shown = displays.get(f"{fid}_EXTERNAL.txt", set())
+        want = {unicodedata.normalize("NFC", d) for d in shown}
+        if len(want) != 1 or (name not in want and not (name == "" and want == {fid})):
+            raise RsmfCheckError(
+                f"file {fid}: placeholder name differs from the manifest's display"
+            )
+        refs[fid] = ExternalRef(fid, sha, size, name)
     placeholders = sorted(n for n in entries if n.endswith("_EXTERNAL.txt"))
     if placeholders != sorted(f"{fid}_EXTERNAL.txt" for fid in refs):
         raise RsmfCheckError("external placeholders and references differ")
     return sorted(refs.values(), key=lambda r: r.file_id)
 
 
-def _placeholder(src: Base64Zip, entries: dict[str, Any], fid: str, sha: str) -> int:
+def _placeholder(src: Base64Zip, entries: dict[str, Any], fid: str, sha: str) -> tuple[int, str]:
     entry = entries.get(f"{fid}_EXTERNAL.txt")
     if entry is None or entry.uncompressed_size > _PLACEHOLDER_MAX:
         raise RsmfCheckError(f"file {fid}: no placeholder for its native")
@@ -237,4 +283,4 @@ def _placeholder(src: Base64Zip, entries: dict[str, Any], fid: str, sha: str) ->
         or not fields["size"].isdigit()
     ):
         raise RsmfCheckError(f"file {fid}: placeholder disagrees with its reference")
-    return int(fields["size"])
+    return int(fields["size"]), decode_name(fields["name"])

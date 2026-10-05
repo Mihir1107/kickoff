@@ -803,7 +803,7 @@ Review decisions (2026-10-05), overriding the plan above where they differ:
 13. **Backlog:** cross-render native dedupe (one native object per matter and SHA-256 shared by
     renders), after measuring the storage and copy cost on the cloud VM.
 
-## 21. Implementation notes, §11 natives (2026-10-05, renderer 1.3.0, for review)
+## 21. Implementation notes, §11 natives (2026-10-05, renderer 1.3.0; reviewed, see §22)
 Built as §20 says (9-13 over 1-8). Where §20 left a choice open or did not match the code, this is
 what was done and why.
 
@@ -821,10 +821,12 @@ what was done and why.
    (ties by file id ascending), re-planning the manifest each time (its size depends on the
    placeholders). Placeholder reasons: `over_external_threshold` / `exceeds_rsmf_zip_limit`.
    `ZipLimitError` remains only for a zip whose manifest alone would need ZIP64.
-4. **Placeholder bytes** as §20.12, plus one rule §20.12 did not state: control characters, line
-   and paragraph separators and lone surrogates in the name are written as `\uXXXX`, so a name cannot
-   break the one-field-per-line layout (the manifest's `display` keeps the exact name). The `.rsmf`
-   summary gains one line when a file has natives. `X-RSMF-SourceHash` still covers the file item.
+4. **Placeholder bytes** as §20.12, plus one rule §20.12 did not state: the name is encoded so it
+   cannot break the one-field-per-line layout and decodes to exactly one name (§22.1): a backslash
+   is written as two backslashes, `\\`; control characters, line and paragraph separators and lone surrogates
+   `\uXXXX` (four lowercase hex digits); every other character as itself. The manifest's `display`
+   keeps the exact name, and the verifier checks the decoded name against it. The `.rsmf` summary
+   gains one line when a file has natives. `X-RSMF-SourceHash` still covers the file item.
 5. **Threshold bounds** (1 MiB .. 4 GiB) are enforced by `RenderOptions` itself, not only the API, so
    tests cannot use tiny files. The dummy connector gained `file_size_min` / `file_size_span` (defaults
    reproduce every existing spec byte for byte: the dummy golden is unchanged, so no connector version
@@ -873,4 +875,66 @@ what was done and why.
    matter's retention by `job_id` AND `render_id`, so only cutting both is a real break).
 10. **Not done here:** a real multi-GB native (cloud VM, BACKLOG); cross-render native dedupe
     (BACKLOG, measure first).
+
+## 22. Review of §21 (2026-10-05), renderer 1.3.1, dummy connector 0.4.0
+1. **Unambiguous placeholder names.** 1.3.0 escaped control characters as `\uXXXX` but not the
+   backslash, so a name holding the literal text `\u000A` and a name holding a newline gave the same
+   line. Now a backslash is written as two, `\\` (§21.4), and `edisc_custody.rsmf_check.decode_name` decodes
+   strictly: any other escape, an escape of a character that is never escaped, uppercase hex or a raw
+   character that must be escaped is refused, so each name has exactly one encoding. Tested with
+   both names (different placeholders, each decoding to its exact name, through the renderer and
+   through the verifier's reader) and with the escapes the decoder must refuse. This changes output
+   bytes for names containing a backslash, so `RENDERER_VERSION` is 1.3.1 with new golden
+   generations; every corpus projection is identical to 1.3.0.
+2. **Concurrent writers of one native.** Abort-all (§21.6) is safe because it only ever runs while
+   holding the per-native advisory content lock: a second writer waits for the lock instead of
+   aborting the first one's upload, then finds the row complete and reuses it. Tested: writer A holds
+   its copy open (parts copied, not completed) for two seconds while writer B asks for the same
+   native; both finish, one version, one registry row, no open upload. Kept, with one hardening:
+   after the abort the versions are listed again, so a copy completed by a writer that lost its lock
+   while copying (its lock connection dropped) is verified and reused, never copied a second time
+   (tested by completing such a copy inside the abort step; without the re-list MinIO's
+   `If-None-Match` on `CompleteMultipartUpload` refuses our copy and the write fails instead).
+   The two-executor test (two whole `render_files` steps of one render at once, as a zombie attempt
+   and its retry) found a race in the `.rsmf` productions, not in the natives: both registered the
+   same production key and the loser failed as an integrity error, failing the render for good.
+   `EvidenceWriter.write_production` is now serialized per key by the same content lock; the waiter
+   finds the row and checks its own re-render against it. Both executors finish; one object version
+   and one `render_natives` row per SHA-256; no open upload; the render verifies.
+3. **Retention routes.** Natives reach their matter through `job_id` (the rendered job) and through
+   `render_id` (render -> job -> matter), like the `.rsmf` productions. Each route now has a test
+   with the other cut on the natives' registry rows, so breaking either route alone fails a test.
+   The mutation harness is in the repo: `scripts/mutation/` (README, catalog, runner), 84 breaks
+   over four rounds (§19.9 and §19.11-14 re-created from their recorded lists, §20/§21, this review),
+   all caught; `tests/unit/test_mutation_catalog.py` keeps every edit applicable. Building it found
+   a flaw in the ad-hoc runner used for §21: two same-sized edits of one file within one second could
+   load a stale `.pyc`, so a break could run unbroken; each run now gets a fresh `PYTHONPYCACHEPREFIX`.
+4. **Why the part's zip avoids ZIP64, and what the consumers actually require.** The reason recorded
+   so far was not consumer compatibility: the renderer's own zip writer had no ZIP64 when renders were
+   designed (§10.9), §11 put natives "ahead of ZIP64", and §20.11 kept "no ZIP64" as the structural
+   rule after the writer gained it. We hold no evidence about ZIP64 support in RSMF importers:
+   Relativity's published RSMF documentation does not mention ZIP64, and no importer (RelativityOne
+   processing and its Short Message Viewer, Nuix) has been tested. What Relativity does document,
+   checked 2026-10-05, matters more and is NOT met today:
+   - "The rsmf.zip file must be a ZIP attachment that uses DEFLATE compression and must not leverage
+     ZIP encryption." (Relativity 10.3 documentation, "Relativity Short Message Format".) Our zips are
+     STORED (§10, for byte identity across zlib builds).
+   - "RSMF files greater than 2 GB are not supported and may be unable to process." (RelativityOne,
+     "Processing an RSMF file".) Our structural rule allows a part's zip up to about 4 GiB, which base64
+     makes about 5.4 GB of `.rsmf`; the default policy threshold (1 GiB) still allows several large
+     attachments in one part.
+   **Open decisions (for the product owner, not built):** (a) a structural limit from the consumer:
+   the `.rsmf` (after base64, with the envelope) at most 2 GB, so the part's zip at most about
+   1.45 GiB, applied with the same exact sizing (`ZipSizer` plus the EML envelope size) instead of
+   the ZIP64 rule, and a default threshold well below it; (b) DEFLATE: either produce it (byte
+   identity then needs a pinned deflate implementation, not the system zlib) or confirm with
+   Relativity that STORED is accepted and record that. Both change output bytes (a renderer bump).
+   Testing against the validator remains blocked on the licence (phase-2 decision 4).
+5. **The golden key and the dummy's file sizes.** The key (`<renderer>_unicode-<v>_tzdata-<v>_dummy-
+   <DummyConnector.version>`) did NOT cover the file-size settings: they were added without a
+   connector version bump, so `dummy-0.3.0` named two generators. Fixed: the dummy connector is 0.4.0,
+   and `tests/golden/dummy/small.json` pins the connector version together with the full effective
+   spec (every default, file sizes included), so changing a default without a bump fails
+   (`test_golden_digest_is_stable_across_code_changes`). Golden generations are now keyed
+   `1.3.1_unicode-15.0.0_tzdata-2026e_dummy-0.4.0`.
 

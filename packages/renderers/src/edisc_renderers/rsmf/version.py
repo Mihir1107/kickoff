@@ -2,6 +2,6 @@
 
 RSMF_VERSION = "2.0.0"
 
-RENDERER_VERSION = "1.3.0"
+RENDERER_VERSION = "1.3.1"
 """Byte-identical output is promised for the same inputs AND this version. Any change to the output
 bytes needs a bump; the golden tests (`tests/golden/rsmf/<version>/`) are keyed by it."""

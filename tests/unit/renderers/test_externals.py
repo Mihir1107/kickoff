@@ -317,3 +317,55 @@ def test_an_external_reference_that_was_not_planned_fails() -> None:
     uncounted = dataclasses.replace(f, external_count=0)
     with pytest.raises(ReconciliationError, match="differ from the plan"):
         Reconciler(options).add_slice(inp, [uncounted])
+
+
+# ------------------------------------------------------------------ the name encoding is unambiguous
+LITERAL = "a\\u000Ab.txt"  # the literal characters backslash, u, 0, 0, 0, A
+NEWLINE = "a\nb.txt"  # a real newline
+
+
+def _name_line(f: RenderedFile) -> str:
+    [entry] = [e for e in f.entries if e.name.endswith("_EXTERNAL.txt")]
+    assert entry.data is not None
+    return entry.data.decode().splitlines()[0].removeprefix("name: ")
+
+
+@pytest.mark.parametrize(
+    ("name", "encoded"),
+    [
+        (LITERAL, "a\\\\u000Ab.txt"),
+        (NEWLINE, "a\\u000ab.txt"),
+        ("back\\slash", "back\\\\slash"),
+        ("\\\\u0041", "\\\\\\\\u0041"),
+        ("tab\there\u2028end", "tab\\u0009here\\u2028end"),
+        ("plain \u00e9.pdf", "plain \u00e9.pdf"),
+    ],
+)
+def test_placeholder_names_round_trip_exactly(name: str, encoded: str) -> None:
+    from edisc_custody.rsmf_check import decode_name
+
+    line = _name_line(
+        one_file(sized("F1", 2 * MIB, name=name), RenderOptions(external_over_bytes=MIB))
+    )
+    assert line == encoded
+    assert decode_name(line) == name
+
+
+def test_a_literal_escape_and_a_real_newline_give_different_placeholders() -> None:
+    from edisc_custody.rsmf_check import decode_name
+
+    options = RenderOptions(external_over_bytes=MIB)
+    literal = _name_line(one_file(sized("F1", 2 * MIB, name=LITERAL), options))
+    newline = _name_line(one_file(sized("F1", 2 * MIB, name=NEWLINE), options))
+    assert literal != newline
+    assert (decode_name(literal), decode_name(newline)) == (LITERAL, NEWLINE)
+
+
+@pytest.mark.parametrize(
+    "bad", ["a\nb", "a\\", "a\\x41", "a\\u004", "a\\u000A", "a\\u0041", "a\\\\\\"]
+)
+def test_the_decoder_accepts_one_encoding_only(bad: str) -> None:
+    from edisc_custody.rsmf_check import RsmfCheckError, decode_name
+
+    with pytest.raises(RsmfCheckError):
+        decode_name(bad)

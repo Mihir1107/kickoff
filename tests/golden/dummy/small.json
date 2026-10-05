@@ -1,6 +1,6 @@
 {
-  "_about": "SHA-256 over every byte the dummy source returns for a full collection (all pages, the directory, all files). Changing it means the generator's output changed: bump DummyConnector.version and regenerate deliberately.",
-  "connector_version": "0.3.0",
+  "_about": "SHA-256 over every byte the dummy source returns for a full collection (all pages, the directory, all files). Changing it means the generator's output changed: bump DummyConnector.version and regenerate deliberately. effective_spec pins every default of the spec (file sizes included) with connector_version.",
+  "connector_version": "0.4.0",
   "spec": {
     "seed": 20260930,
     "conversations": 3,
@@ -29,5 +29,44 @@
       },
       "total_messages": 216
     }
-  ]
+  ],
+  "effective_spec": {
+    "seed": 20260930,
+    "dialect": "slack",
+    "workspace_id": "T0DUMMY01",
+    "conversations": 3,
+    "days": 2,
+    "messages_per_unit": 24,
+    "start_day": "2026-01-05",
+    "users": 12,
+    "page_size": 10,
+    "messy_pagination": true,
+    "count_mode": "true",
+    "failures": {
+      "seed": 0,
+      "exception_rate": 0.0,
+      "timeout_rate": 0.0,
+      "throttle_rate": 0.0,
+      "drop_rate": 0.0,
+      "max_consecutive": 2,
+      "retry_after_seconds": 0.05,
+      "file_unavailable_rate": 0.0,
+      "inaccessible_from_epoch": {},
+      "corrupt_conversations": [],
+      "unavailable_conversations": []
+    },
+    "p_thread_parent": 0.15,
+    "p_reply_same_day": 0.2,
+    "p_reply_prev_day": 0.06,
+    "p_file": 0.1,
+    "file_size_min": 200,
+    "file_size_span": 3800,
+    "p_broadcast": 0.1,
+    "p_me_message": 0.03,
+    "p_uninterpretable": 0.02,
+    "p_edit": 0.06,
+    "p_hint_only_edit": 0.03,
+    "p_delete": 0.03,
+    "p_reaction_change": 0.1
+  }
 }

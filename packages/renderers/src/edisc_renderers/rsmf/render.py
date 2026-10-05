@@ -357,10 +357,17 @@ _ESCAPED_CATEGORIES = frozenset({"Cc", "Cs", "Zl", "Zp"})
 
 
 def _one_line(text: str) -> str:
-    """A value that cannot break the one-field-per-line layout: control characters, line and paragraph
-    separators and lone surrogates become `\\uXXXX` (the manifest's `display` keeps the exact name)."""
+    """A value that cannot break the one-field-per-line layout, encoded unambiguously (ADR 0015
+    §21.4): a backslash becomes `\\\\`; control characters, line and paragraph separators and lone
+    surrogates become `\\uXXXX` (four lowercase hex digits); everything else is itself. Decoded by
+    `edisc_custody.rsmf_check.decode_name`. The manifest's `display` keeps the exact name."""
     return "".join(
-        f"\\u{ord(c):04x}" if unicodedata.category(c) in _ESCAPED_CATEGORIES else c for c in text
+        "\\\\"
+        if c == "\\"
+        else f"\\u{ord(c):04x}"
+        if unicodedata.category(c) in _ESCAPED_CATEGORIES
+        else c
+        for c in text
     )
 
 

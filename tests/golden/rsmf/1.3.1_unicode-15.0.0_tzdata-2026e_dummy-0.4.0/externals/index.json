@@ -1,0 +1,38 @@
+{
+  "files": [
+    {
+      "name": "C00000DUMMY_2026-01-05_part001of001.rsmf",
+      "sha256": "a882c5ed0a1322d249d8b1e63d14cef2631271b7dc252175240888b9b1c085bf",
+      "size": 132046
+    },
+    {
+      "name": "G00001DUMMY_2026-01-05_part001of001.rsmf",
+      "sha256": "20c4464bd1f41faf8de6d891d88554bf7c0d2927909fae9213c349b9e5fe2fed",
+      "size": 76556
+    }
+  ],
+  "options": {
+    "cap": 10000,
+    "external_over_bytes": 1048576,
+    "include_context": true,
+    "time_zone": "UTC"
+  },
+  "reconciliation": {
+    "attachments": 9,
+    "context_events": 0,
+    "context_events_out_of_scope": 0,
+    "edits": 0,
+    "events_out": 24,
+    "external_attachments": 9,
+    "files": 2,
+    "items_in": 24,
+    "parents_not_rendered": 0,
+    "renderer_version": "1.3.1",
+    "slices": 2,
+    "subject_digest": "51d447a6b9c78b8dad80df73c95f5db720f69831d02d87f193c82c2b9b1463f8",
+    "tzdata_version": "2026e",
+    "unavailable_attachments": 7,
+    "unicode_version": "15.0.0"
+  },
+  "renderer_version": "1.3.1"
+}
