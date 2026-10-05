@@ -468,3 +468,59 @@ async def test_an_output_whose_registry_disagrees_with_its_record_aborts_the_pac
             row["version_id"],
         )
         await conn.close()
+
+
+# ------------------------------------------------------------------ OS metadata (strict by default)
+OS_METADATA = [".DS_Store", "outputs/._render.rsmf", "__MACOSX/outputs/._a", "Thumbs.db",
+               "objects/desktop.ini"]  # fmt: skip
+
+
+@pytest.mark.parametrize("name", OS_METADATA)
+async def test_os_metadata_fails_by_default_and_is_tolerated_and_listed_with_the_option(
+    pkg: Path, name: str
+) -> None:
+    (pkg / name).parent.mkdir(parents=True, exist_ok=True)
+    (pkg / name).write_bytes(b"\x00\x05\x16\x07")
+    code, out = _cli(pkg)
+    assert code == 1 and f"ERROR {name}: not" in out
+    code, out = _cli(pkg, "--tolerate-os-metadata")
+    assert code == 0, out
+    assert f"TOLERATED {name} (OS metadata, not part of the package)" in out
+    code, out = _cli(pkg, "--tolerate-os-metadata", "--json")
+    assert code == 0 and json.loads(out)["tolerated"] == [name]
+
+
+@pytest.mark.parametrize(
+    "name", ["notes.txt", "outputs/planted.rsmf", ".DS_Store.bak", "objects/x._y", "MACOSX/a"]
+)
+async def test_anything_else_still_fails_with_the_option(pkg: Path, name: str) -> None:
+    (pkg / ".DS_Store").write_bytes(b"x")
+    (pkg / name).parent.mkdir(parents=True, exist_ok=True)
+    (pkg / name).write_bytes(b"planted")
+    code, out = _cli(pkg, "--tolerate-os-metadata")
+    assert code == 1 and f"ERROR {name}: not" in out
+    assert "TOLERATED .DS_Store" in out
+
+
+async def test_the_option_never_applies_to_a_zip(rendered: Rendered, tmp_path: Path) -> None:
+    import zipfile
+
+    entries = _unzipped((rendered.root / "embed.zip").read_bytes())
+    with zipfile.ZipFile(tmp_path / "mac.zip", "w") as zf:
+        for n, d in entries.items():
+            zf.writestr(n, d)
+        zf.writestr("__MACOSX/._manifest.json", b"\x00")
+    code, out = _cli(tmp_path / "mac.zip", "--tolerate-os-metadata")
+    assert code == 1 and "ERROR __MACOSX/._manifest.json: not part of this package" in out
+    assert "does not apply to a zip" in out
+
+
+async def test_the_planned_zip_size_is_the_streamed_size(
+    rendered: Rendered, app_sessions: Sessions, s3: S3Client, settings: Settings
+) -> None:
+    for mode in ("embed", "reference"):
+        plan = await plan_render_package(
+            app_sessions, s3, settings, tenant_id=rendered.t.tenant_id,
+            render_id=rendered.render_id, outputs=mode,  # type: ignore[arg-type]
+        )  # fmt: skip
+        assert plan.zip_size == (rendered.root / f"{mode}.zip").stat().st_size, mode

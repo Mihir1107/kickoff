@@ -41,13 +41,14 @@ from edisc_custody.chain import anchor_prefix
 from edisc_custody.log import event_record_from_row
 from edisc_custody.render_files import RENDER_STARTED
 from edisc_custody.render_package import RENDER_PACKAGE_FORMAT
-from edisc_custody.zipwriter import ZipMember
+from edisc_custody.zipwriter import ZipMember, ZipSizer
 from edisc_db.session import tenant_tx
 from edisc_evidence.worm import get_bytes, list_versions
 
 Outputs = Literal["embed", "reference"]
 CHUNK = 1 << 20
 _LINES_CHUNK = 64 << 10
+_JSONL_ORDER = ("events.jsonl", "files.jsonl", "anchors.jsonl", "job_seal.json")
 
 
 class PackageIntegrityError(Exception):
@@ -81,6 +82,7 @@ class RenderPackagePlan:
     seal: dict[str, Any]
     objects: tuple[PackageObject, ...]  # anchor and seal bodies, by SHA-256
     page_size: int = 1000
+    zip_size: int = 0  # the exact size of the zip of these members (Content-Length)
 
     @property
     def manifest_sha256(self) -> str:
@@ -245,8 +247,11 @@ async def plan_render_package(
         seal = {"key": obj.key, "version_id": obj.version_id, "sha256": obj.sha256,
                 "size": obj.size}  # fmt: skip
 
+    output_sizes: list[tuple[str, int]] = []  # name, recorded size: the zip's size before any byte
+
     async def files_lines() -> AsyncIterator[dict[str, Any]]:
         async for row in _file_rows(sessions, tenant_id, render_id, file_count, page_size):
+            output_sizes.append((f"outputs/{row.record['name']}", int(row.size_bytes)))
             yield _file_line(row)
 
     files = {
@@ -268,12 +273,21 @@ async def plan_render_package(
         "outputs_included": outputs == "embed",
         "files": files,
     }
+    manifest_bytes = canonical_json(manifest)
+    ordered = [("manifest.json", len(manifest_bytes))]  # package_members' order, exactly
+    ordered += [(name, files[name]["bytes"]) for name in _JSONL_ORDER]
+    ordered += [(f"objects/{sha}", objects[sha].size) for sha in sorted(objects)]
+    if outputs == "embed":
+        ordered += output_sizes
+    sizer = ZipSizer()
+    for name, size in ordered:
+        sizer.add(name, size)
     return RenderPackagePlan(
         tenant_id=tenant_id,
         render_id=render_id,
         job_id=render.job_id,
         outputs=outputs,
-        manifest=canonical_json(manifest),
+        manifest=manifest_bytes,
         head_seq=head_seq,
         file_count=file_count,
         files=files,
@@ -281,6 +295,7 @@ async def plan_render_package(
         seal=seal,
         objects=tuple(objects[sha] for sha in sorted(objects)),
         page_size=page_size,
+        zip_size=sizer.total(),
     )
 
 

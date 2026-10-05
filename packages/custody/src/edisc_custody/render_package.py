@@ -65,6 +65,7 @@ class RenderPackageReport:
     chain: VerificationReport | None = None
     job: PackageReport | None = None
     manifest_sha256: str = ""
+    tolerated: list[str] = field(default_factory=list)  # OS metadata accepted by the option
     files_checked: int = 0
     outputs_checked: int = 0
     errors: list[str] = field(default_factory=list)
@@ -85,6 +86,7 @@ class RenderPackageReport:
             "files_checked": self.files_checked,
             "outputs_checked": self.outputs_checked,
             "errors": self.errors,
+            "tolerated": self.tolerated,
             "chain": self.chain.as_dict() if self.chain else None,
             "job": self.job.as_dict() if self.job else None,
         }
@@ -131,22 +133,42 @@ def _sha256_entry(source: PackageSource, name: str) -> tuple[str, int]:
     return h.hexdigest(), size
 
 
+def is_os_metadata(name: str) -> bool:
+    """Files an operating system may drop into an extracted folder: ``.DS_Store``, AppleDouble
+    ``._*``, anything under ``__MACOSX/``, ``Thumbs.db``, ``desktop.ini``. Nothing else."""
+    parts = name.split("/")
+    base = parts[-1]
+    return (
+        "__MACOSX" in parts[:-1]
+        or base in (".DS_Store", "Thumbs.db", "desktop.ini")
+        or base.startswith("._")
+    )
+
+
 def verify_render_package(
-    root: Path, outputs: Sequence[Path] = (), job_package: Path | None = None
+    root: Path,
+    outputs: Sequence[Path] = (),
+    job_package: Path | None = None,
+    *,
+    tolerate_os_metadata: bool = False,
 ) -> RenderPackageReport:
     """``root``: the package directory or zip. ``outputs``: output files supplied for a package that
     references them by hash (matched by SHA-256). ``job_package``: the rendered job's custody
-    package, verified and matched too."""
+    package, verified and matched too. Strict: any file the manifest does not account for fails.
+    ``tolerate_os_metadata`` accepts only OS metadata files (``is_os_metadata``) in a DIRECTORY
+    package, each listed in ``report.tolerated``; it never applies to a zip, which is what experts
+    should verify (an extracted folder is a copy someone's file manager may have touched)."""
     source = open_source(root)
+    tolerate = tolerate_os_metadata and not isinstance(source, ZipSource)
     try:
-        return _verify(source, outputs, job_package)
+        return _verify(source, outputs, job_package, tolerate)
     finally:
         if isinstance(source, ZipSource):
             source.close()
 
 
 def _verify(
-    source: PackageSource, outputs: Sequence[Path], job_package: Path | None
+    source: PackageSource, outputs: Sequence[Path], job_package: Path | None, tolerate: bool
 ) -> RenderPackageReport:
     report = RenderPackageReport()
     manifest_bytes = read_all(source, "manifest.json")
@@ -251,7 +273,9 @@ def _verify(
     if manifest.get("outputs_included"):
         allowed |= {f"outputs/{r.get('name')}" for r in records}
     for extra in sorted(set(source.names()) - allowed):
-        if extra.startswith("outputs/"):
+        if tolerate and is_os_metadata(extra):
+            report.tolerated.append(extra)
+        elif extra.startswith("outputs/"):
             report.errors.append(f"{extra}: not an output file of this render")
         else:
             report.errors.append(f"{extra}: not part of this package")

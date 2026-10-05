@@ -656,8 +656,8 @@ async def evidence_content(
     rid: RequestIdDep,
     purpose: Annotated[Literal["preview", "download", "export", "rsmf"], Query()],
 ) -> StreamingResponse:
-    """The pinned evidence bytes. The audit event is committed BEFORE any byte is returned (ADR 0013
-    decision d): a read that is not recorded never happens."""
+    """The pinned evidence bytes. The audit event is committed AND anchored BEFORE any byte is
+    returned (ADR 0013 decision d, ADR 0015 §19.11): a read that is not recorded never happens."""
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         row = (
             await s.execute(
@@ -672,13 +672,14 @@ async def evidence_content(
         if row is None or row.matter_id is None or row.kind == "production":
             raise not_found()
         await authorize(s, caller, P.EVIDENCE_READ, Scope("matter", row.matter_id))
-        await audit.record(
+        read = await audit.record(
             s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="evidence_content_read",
             payload={"evidence_id": str(evidence_id), "sha256": row.sha256, "size": row.size_bytes,
                      "purpose": purpose, "matter_id": str(row.matter_id), "job_id": str(row.job_id)},
             request_id=rid,
         )  # fmt: skip
-    await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
+    # committed AND anchored (forced, checked to cover the read) before any byte
+    await audit.anchor_now(res.sessions, res.s3, res.settings, caller.tenant_id, read)
     writer = EvidenceWriter(res.sessions, res.s3, res.settings)
 
     async def body() -> AsyncIterator[bytes]:

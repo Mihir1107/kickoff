@@ -6,7 +6,6 @@ downloads, and an aborted stream (audited, with an alert) when an object differs
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import io
 import subprocess
@@ -19,7 +18,6 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 
-from edisc_api.app import create_app
 from edisc_custody.render_export import PackageIntegrityError
 from edisc_db.session import tenant_tx
 from edisc_renderers.rsmf import RenderOptions
@@ -27,6 +25,7 @@ from edisc_worker.renders import create_render
 
 from ..custody.conftest import superuser
 from .conftest import Api, TenantCtx, add_principal
+from .first_byte import first_byte
 from .test_jobs import custody
 from .test_renders import render_worker, sealed_job, wait_render
 
@@ -139,6 +138,7 @@ async def test_downloaded_packages_verify_and_are_byte_identical(
             manifest = zf.read("manifest.json")
             outputs = [n for n in zf.namelist() if n.startswith("outputs/")]
         assert hashlib.sha256(manifest).hexdigest() == resp.headers["x-manifest-sha256"]
+        assert int(resp.headers["content-length"]) == len(resp.content)  # computed before byte one
         assert len(outputs) == (render["file_count"] if mode == "embed" else 0)
         assert resp.headers["content-disposition"] == (
             f'attachment; filename="render-{render["id"]}-{mode}.zip"'
@@ -169,42 +169,15 @@ async def test_downloaded_packages_verify_and_are_byte_identical(
 async def test_the_read_is_audited_and_anchored_before_the_first_byte(
     api: Api, tenant: TenantCtx, render_worker: None
 ) -> None:
-    """Driven at the ASGI level: the state is read at the moment the first body byte is sent."""
     _, render = await _rendered(api, tenant)
-    app = create_app(api.settings, api.resources)
-    host = f"{tenant.subdomain}.{api.settings.api_base_domain}"
-    scope = {
-        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET",
-        "scheme": "http", "path": f"/v1/renders/{render['id']}/package",
-        "raw_path": f"/v1/renders/{render['id']}/package".encode(), "root_path": "",
-        "query_string": b"outputs=embed", "client": ("127.0.0.1", 50000), "server": (host, 80),
-        "headers": [(b"host", host.encode()),
-                    (b"authorization", f"Bearer {tenant.token(api.settings)}".encode())],
-    }  # fmt: skip
-    at_first_byte: dict[str, Any] = {}
-    status: list[int] = []
-
-    requested = asyncio.Event()
-
-    async def receive() -> dict[str, Any]:
-        if requested.is_set():  # the client stays connected until the response ends
-            await asyncio.Event().wait()
-        requested.set()
-        return {"type": "http.request", "body": b"", "more_body": False}
-
-    async def send(message: dict[str, Any]) -> None:
-        if message["type"] == "http.response.start":
-            status.append(message["status"])
-        elif message.get("body") and not at_first_byte:
-            reads = await _package_events(api, tenant)
-            head, anchored = await _anchored_seq(api, tenant)
-            at_first_byte.update(reads=reads, head=head, anchored=anchored)
-
-    await app(scope, receive, send)
-    assert status == [200]
-    assert [e.event_type for e in at_first_byte["reads"]] == ["audit.render_package_read"]
-    # the read is the newest audit event, and the anchor covers it
-    assert at_first_byte["anchored"] == at_first_byte["head"]
+    for mode in ("embed", "reference"):
+        got = await first_byte(
+            api, tenant, f"/v1/renders/{render['id']}/package", f"outputs={mode}"
+        )
+        assert got.status == 200
+        assert got.newest.event_type == "audit.render_package_read", got.newest
+        assert got.newest.payload["mode"] == mode
+        assert got.anchored >= got.newest.seq  # committed AND anchored before the first byte
 
 
 # ------------------------------------------------------------------ abort

@@ -447,7 +447,7 @@ async def render_file_content(
             raise not_found()
         if f.registry_sha != f.sha256:
             raise ApiError(409, "integrity", "the registry disagrees with the render's record")
-        await audit.record(
+        read = await audit.record(
             s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="render_file_read",
             payload={"render_id": str(render_id), "job_id": str(row.job_id),
                      "matter_id": str(row.matter_id), "ord": file_ord, "name": f.name,
@@ -455,7 +455,8 @@ async def render_file_content(
                      "size": f.size_bytes, "purpose": "rsmf"},
             request_id=rid,
         )  # fmt: skip
-    await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
+    # committed AND anchored (forced, checked to cover the read) before any byte
+    await audit.anchor_now(res.sessions, res.s3, res.settings, caller.tenant_id, read)
     writer = EvidenceWriter(res.sessions, res.s3, res.settings)
 
     async def body() -> AsyncIterator[bytes]:
@@ -535,6 +536,8 @@ async def render_package(
         media_type="application/zip",
         headers={
             "x-manifest-sha256": plan.manifest_sha256,
+            # exact, from the planned entries; an aborted stream ends short of it
+            "content-length": str(plan.zip_size),
             "content-disposition": f'attachment; filename="render-{render_id}-{outputs}.zip"',
             "cache-control": "no-store",
         },

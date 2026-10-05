@@ -600,7 +600,7 @@ Implements the part C spec agreed in the 2026-10-05 review (§18.5). Code: `edis
    `reference` is the default. A render without a seal gets 409 `render_not_sealed`; a sealed refused
    or failed render is packaged (its custody is what the expert checks). Response `application/zip`,
    `x-manifest-sha256`, `content-disposition: attachment; filename="render-<id>-<mode>.zip"`,
-   `cache-control: no-store`; chunked (no Content-Length).
+   `cache-control: no-store`, and an exact `Content-Length` (see 11 below).
 2. **Format `edisc-render-package/2`.** The manifest must exist (its hash is audited) before any byte
    is sent, and the objects must not be read twice; /1 inlined anchor and seal bodies in the JSONL
    files, so its manifest hashes needed every body. /2 lists them by key, VersionId, SHA-256 and size
@@ -655,8 +655,101 @@ Implements the part C spec agreed in the 2026-10-05 review (§18.5). Code: `edis
    streaming, the output registry check, determinism, the verifier's object, manifest and
    unlisted-file checks, duplicate zip names, the descriptor flag, the CRC, each ZIP64 rule, the
    size guard); each made a test fail.
-10. **Found, not changed:** `GET /v1/renders/{id}/files/{ord}/content` (step 4) anchors its audit
-    with `audit.anchor` (anchor if due), so an audit event in the middle of an anchoring interval is
-    not yet anchored when bytes are returned, although §14.7 says it is. `audit.anchor_now` fixes that
-    for packages; applying it to file reads is a one-line change awaiting a decision (each read would
-    write one WORM anchor object).
+10. **Found, then fixed in the review round (11 below):** `GET /v1/renders/{id}/files/{ord}/content`
+    anchored its audit only "if due", so §14.7's "anchored before any byte" did not strictly hold.
+
+Review round (2026-10-05, after part C):
+
+11. **Every content read is anchored before its first byte.** The routes that return evidence bytes
+    are exactly three: `/v1/evidence/{id}/content` (pages, files and export archive entries; no other
+    route serves export content), `/v1/renders/{id}/files/{ord}/content` and the package. All three
+    now call `audit.anchor_now` (forced, checked to cover the read) after committing the read, before
+    the response starts: one WORM anchor object per read. Each has a test that anchors the stream
+    first (so the read lands mid-interval, where an "if due" anchor writes nothing) and reads the
+    database when the first body byte is sent (`tests/integration/api/first_byte.py`).
+12. **`Content-Length`.** `ZipSizer` (in `edisc_custody.zipwriter`, built from the writer's own record
+    builders) gives the exact archive size from the planned entries: the manifest, the JSONL sizes it
+    records, the object sizes and the outputs' recorded sizes, in member order. Tested equal to the
+    streamed size in both modes and for ZIP64 archives (70,000 entries; 4 GiB + 1 MiB). An aborted
+    stream ends short of it, which clients detect.
+13. **`edisc-verify` is strict by default.** `--tolerate-os-metadata` accepts, in DIRECTORY packages
+    only, `.DS_Store`, AppleDouble `._*`, anything under `__MACOSX/`, `Thumbs.db` and `desktop.ini`,
+    and lists every tolerated file (text and `--json`). It never applies to a zip. Experts should
+    verify the downloaded zip itself, not an extracted folder (a file manager may have touched it).
+    The job custody package verifier (`verify_package`) does not check for unlisted files at all;
+    making it strict is a separate change (backlog).
+14. **What the S3 listing feeds (open, awaiting a decision).** In pass 1, `list_versions` over the
+    render's own anchor prefix (`custody-anchors/{tenant}/{render}/`, not the bucket) gives the
+    anchor lines of `anchors.jsonl`: one per object version or delete marker found, with SHA-256 and
+    size from the registry, or read once if the registry does not hold that version. So the listing
+    decides WHICH anchor versions the manifest lists (including shadows and delete markers, for the
+    verifier to flag); the database decides their hashes. The job seal comes from the database only.
+    Proposed change in the review report, not made.
+
+## 20. Plan for §11, oversized attachments as separate natives (2026-10-05, PLAN ONLY, for review)
+Refines §11 into a buildable plan. Nothing here is built.
+
+1. **Threshold and who sets it.** Two rules, both from data the render records, never from worker
+   settings (two workers with different settings must not give different bytes for one identity):
+   - *Structural* (fixed in the renderer, not configurable): a part's planned `rsmf.zip` must stay
+     under 4 GiB minus headroom (the manifest, EML and placeholders, computed exactly by the
+     renderer's `zip_size`) and under 65,535 entries; the renderer's writer has no ZIP64.
+   - *Policy* (new `RenderOptions.external_over_bytes`, default a renderer constant, proposed 1 GiB):
+     any single attachment above it is always external. Set per request by whoever may create the
+     render (`export.create`), bounded (1 MiB .. 4 GiB), validated like the time zone. It is part of
+     `as_payload()`, so of the options hash and the render's identity. It also lets the tests force
+     externals with tiny files.
+   Selection per part: policy externals first; then, while the structural limits are exceeded,
+   attachments leave largest first, ties by file id. Deterministic from the inputs and options.
+2. **How the RSMF references the native.** As §11: the event's attachment becomes the placeholder
+   `{file_id}_EXTERNAL.txt` (`display` = original name; text: name, size, SHA-256, reason
+   `exceeds_rsmf_zip_limit` or `over_external_threshold`, and the package path `natives/<sha256>`);
+   `custom` gains `edisc.file_external = <file id>: sha256:<hex>`. The native's bytes never pass
+   through the renderer: the opener is not called for an external file (tested).
+3. **Storage and dedup.** One object per (render, SHA-256): `t/{tenant}/productions/{render}/natives/
+   sha256/<hex>`, streamed from the pinned evidence version, hashed on read and on write, locked
+   under the matter, `evidence_objects` kind `production` with `render_id` (retention render -> job ->
+   matter, as for `.rsmf` files). The same file referenced by several events, parts or slices is
+   written once. A retry finds the registry row and the object (idempotent, like the evidence writer).
+   *Open question:* §11 copies the native. Referencing the collected file evidence (already WORM,
+   pinned, same matter) avoids a second copy of multi-GB files; the cost is that the production is
+   no longer self-contained under its own key. Recommendation: keep the copy (§11), decided once.
+4. **Custody.** New insert-only `render_natives` (render, ord, SHA-256, size, key, VersionId, the
+   file ords that reference it), tied to its batch event by a deferred FK like `render_files`. A
+   native is written to WORM before the batch that first references it; the batch transaction then
+   inserts its native records and the file records together, and `render_files_batch` gains the
+   root over that batch's native records (`natives_root`; leaf = canonical JSON of the record).
+   `render_completed` gains the native count and the root over all native records; the summary
+   gains `external_attachments`. The reconciler fails if an external reference has no native with
+   the recorded SHA-256 and size. (One event per native, as §11 said, is replaced by the batch root:
+   bounded events whatever the number of natives.)
+5. **Byte identity and dedupe keys.** Same inputs + same options (now including the threshold) +
+   same renderer, Unicode and tzdata versions -> same bytes, natives included (content-addressed).
+   The change alters output bytes where it applies and the options payload everywhere, so it ships
+   as `RENDERER_VERSION` 1.3.0 with new golden generations (renderer and corpus); the render identity
+   index already includes the options hash, so old renders are untouched and a new request renders
+   anew. `FILE_FIELDS` gain `external_count`; the verifier keeps accepting the old leaf for renders
+   made before 1.3.0 (decided by the renderer version in `render_started`).
+6. **Package layout** (`edisc-render-package/3`; the verifier accepts /1, /2, /3): `natives.jsonl`
+   (one record per native, hashed in the manifest), `natives/<sha256>` when `outputs=embed` (after
+   `outputs/`, by hash), or referenced by hash and supplied with `--file` like the outputs. The
+   verifier checks every native's SHA-256 and size, the `natives_root` of each batch and the total,
+   and opens each `.rsmf` with the hardened reader to check that every `edisc.file_external` it
+   carries has a native record (and that no native is unreferenced). `Content-Length` and ZIP64
+   cover natives (a package over 4 GiB is now normal).
+7. **API.** `GET /v1/renders/{id}/natives` (list, `custody.read`) and
+   `GET /v1/renders/{id}/natives/{sha256}/content` (`export.read`, audited and `anchor_now` before
+   the first byte, re-hashed while streaming, first-byte test).
+8. **Tests.** Pure renderer: selection (policy, structural by size and by entry count, exactly at the
+   limit stays, one byte over leaves, ties by file id, a single attachment over 4 GiB), placeholder
+   and `custom` bytes, the opener never called for externals, byte identity, goldens 1.3.0.
+   Reconciler: missing native, wrong hash, unreferenced native. Corpus: new cases (external by
+   policy with a tiny threshold, the same file in two slices written once, external next to an
+   unavailable file, an external in a thread root shown as context). Crash matrix: crash after the
+   native PUT before its row completes, after the native rows before the batch commits, and a real
+   SIGKILL while a native streams; each resumes with one object version per native key and the
+   oracle's bytes. Package: embedded and referenced natives, altered/missing/unreferenced native,
+   an `.rsmf` referencing an unlisted native, `Content-Length` with natives, ZipSizer past 4 GiB.
+   Retention: natives resolve to the matter and are extended by the extension job. API: permissions,
+   first-byte audit, mismatch abort. A real multi-GB native is a measurement for the cloud VM
+   (backlog), not a laptop test.

@@ -30,7 +30,7 @@ from edisc_custody.archive import (
     scan,
 )
 from edisc_custody.package_source import PACKAGE_LIMITS, ZipSource, read_all
-from edisc_custody.zipwriter import MAX32, ZipMember, ZipSizeError, zip_stream
+from edisc_custody.zipwriter import MAX32, ZipMember, ZipSizeError, ZipSizer, zip_stream
 
 
 def member(name: str, data: bytes, *, declared: int | None = None, pieces: int = 3) -> ZipMember:
@@ -49,6 +49,13 @@ async def members(items: list[ZipMember]) -> AsyncIterator[ZipMember]:
 
 async def build(items: list[ZipMember]) -> bytes:
     return b"".join([c async for c in zip_stream(members(items))])
+
+
+def sized(entries: list[tuple[str, int]]) -> int:
+    sizer = ZipSizer()
+    for name, size in entries:
+        sizer.add(name, size)
+    return sizer.total()
 
 
 SAMPLE = {
@@ -74,6 +81,7 @@ def tool(*names: str) -> str:
 # ------------------------------------------------------------------ format
 async def test_round_trip_and_fixed_metadata() -> None:
     data = await build([member(n, d) for n, d in SAMPLE.items()])
+    assert sized([(n, len(d)) for n, d in SAMPLE.items()]) == len(data)  # the Content-Length
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         assert zf.testzip() is None  # every CRC checked
         assert zf.namelist() == list(SAMPLE)  # the order given
@@ -197,6 +205,7 @@ def test_more_than_65535_entries(tmp_path: Path) -> None:
     n = 70_000
     names = [f"objects/{i:06d}" for i in range(n)]
     data = asyncio.run(build([member(name, name.encode()[-6:], pieces=1) for name in names]))
+    assert sized([(name, 6) for name in names]) == len(data)
     eocd = data.rfind(b"PK\x05\x06")
     assert struct.unpack_from("<HH", data, eocd + 8) == (0xFFFF, 0xFFFF)
     assert data.rfind(b"PK\x06\x06") > 0 and data.rfind(b"PK\x06\x07") > 0
@@ -313,6 +322,7 @@ async def test_more_than_4_gib_through_a_hashing_sink() -> None:
     ):
         archive.add(chunk)
     assert archive.size > BIG > MAX32
+    assert sized([("big.bin", BIG), ("tail.txt", len(tail))]) == archive.size  # ZIP64 sizes too
     want = entry_sha.hexdigest()
 
     # our hardened streaming reader

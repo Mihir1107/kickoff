@@ -138,6 +138,10 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   that checks every entry against the manifest and aborts with `audit.render_package_aborted` + an
   alert. Zips only through `edisc_custody.zipwriter` (STORED, fixed metadata, data descriptor with
   the streamed CRC on every entry, ZIP64 where needed); two downloads must be byte-identical.
+- Every route that returns evidence bytes (evidence content, render file, render package) commits its
+  audit AND calls `audit.anchor_now` before the response starts; tested at the first byte
+  (`tests/integration/api/first_byte.py`). A new content route must do the same and add that test.
+  `edisc-verify` is strict (unlisted files fail); `--tolerate-os-metadata` only for directories.
 - Every manifest is validated against the vendored `rsmf_schema_2_0_0.json` (SHA-256 pinned, format
   checks on). The Relativity validator is not used until the licence is confirmed.
 

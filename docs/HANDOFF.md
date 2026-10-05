@@ -158,11 +158,17 @@ order) and `docs/adr/0017-render-worker-versions.md`.
 - CI installs `p7zip-full` + `unzip` (the tool tests skip locally when missing, fail in CI).
   Locally: `brew install sevenzip` (`7zz`).
 - 20 mutation checks, all caught (§19.9).
-- **Found, not changed (needs a decision):** the single-file download
-  (`/v1/renders/{id}/files/{ord}/content`) anchors its audit only "if due", so §14.7's "anchored
-  before any byte" does not strictly hold there. Fix: call `audit.anchor_now` (one WORM anchor per
-  read). §19.10.
+- **Review round after part C (§19.11-14), done:** all three content routes (evidence content,
+  render file, package) force-anchor their audit before the first byte, each tested at the first
+  byte; `Content-Length` on the package (`ZipSizer`); `edisc-verify` strict, with
+  `--tolerate-os-metadata` for directories only; backlog: unify the renderer's zip writer at the next
+  renderer bump, strict job-package verification.
+- **Open decision (§19.14):** the package's `anchors.jsonl` is driven by the S3 listing of the render's
+  anchor prefix (which versions), with hashes from the registry. The proposal to make the database
+  the only source, with a bounded listing cross-check that fails loudly, is waiting for sign-off
+  because CLAUDE.md says anchors are listed from S3, never from the DB.
 - Next: the rest of M15, §11 (oversized attachments as external natives, required before production).
+  The build plan is in the 2026-10-05 review report and ADR 0015 §20 (plan only, not built).
 
 ### Open questions / waiting on the user
 1. Relativity licence (validator in CI) - see "Open decisions" above.

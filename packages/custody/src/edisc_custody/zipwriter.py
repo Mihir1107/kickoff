@@ -76,12 +76,8 @@ async def zip_stream(members: AsyncIterable[ZipMember]) -> AsyncIterator[bytes]:
         seen.add(m.name)
         name = m.name.encode("utf-8")
         big = needs_zip64(m.size)
-        local_extra = struct.pack("<HHQQ", _ZIP64_TAG, 16, 0, 0) if big else b""
-        header = _LOCAL.pack(
-            _LOCAL_SIG, _VERSION64 if big else _VERSION, _FLAGS, 0, _DOS_TIME, _DOS_DATE,
-            0, MAX32 if big else 0, MAX32 if big else 0, len(name), len(local_extra),
-        )  # fmt: skip
-        yield header + name + local_extra
+        header = _local_header(name, m.size)
+        yield header
         crc, size = 0, 0
         async for chunk in m.chunks():
             if not chunk:
@@ -100,11 +96,41 @@ async def zip_stream(members: AsyncIterable[ZipMember]) -> AsyncIterator[bytes]:
         )
         yield descriptor
         central.append(_central_record(name, crc, size, offset))
-        offset += len(header) + len(name) + len(local_extra) + size + len(descriptor)
+        offset += len(header) + size + len(descriptor)
         count += 1
     directory = b"".join(central)
     yield directory
     yield _end_records(count, len(directory), offset)
+
+
+def _local_header(name: bytes, size: int) -> bytes:
+    big = needs_zip64(size)
+    extra = struct.pack("<HHQQ", _ZIP64_TAG, 16, 0, 0) if big else b""
+    header = _LOCAL.pack(
+        _LOCAL_SIG, _VERSION64 if big else _VERSION, _FLAGS, 0, _DOS_TIME, _DOS_DATE,
+        0, MAX32 if big else 0, MAX32 if big else 0, len(name), len(extra),
+    )  # fmt: skip
+    return header + name + extra
+
+
+class ZipSizer:
+    """The exact size of the archive ``zip_stream`` writes for the same names and declared sizes in
+    the same order, before any content exists (the download's Content-Length). Built from the
+    writer's own record builders, so the two cannot drift apart."""
+
+    def __init__(self) -> None:
+        self.offset = self.cd_size = self.count = 0
+
+    def add(self, name: str, size: int) -> None:
+        raw = name.encode("utf-8")
+        self.cd_size += len(_central_record(raw, 0, size, self.offset))
+        descriptor = _DESCRIPTOR64.size if needs_zip64(size) else _DESCRIPTOR.size
+        self.offset += len(_local_header(raw, size)) + size + descriptor
+        self.count += 1
+
+    def total(self) -> int:
+        end = _end_records(self.count, self.cd_size, self.offset)
+        return self.offset + self.cd_size + len(end)
 
 
 def _central_record(name: bytes, crc: int, size: int, offset: int) -> bytes:

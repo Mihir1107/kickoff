@@ -12,6 +12,7 @@ from pathlib import Path
 
 from edisc_custody.archive import ArchiveError
 from edisc_custody.package import PackageFormatError, verify_package
+from edisc_custody.package_source import is_zip
 from edisc_custody.render_package import (
     RenderPackageReport,
     is_render_package,
@@ -51,9 +52,19 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="render packages: the rendered job's custody package, verified and matched to the render",
     )
+    parser.add_argument(
+        "--tolerate-os-metadata",
+        action="store_true",
+        help="render packages, DIRECTORIES only: accept .DS_Store, ._* (AppleDouble), __MACOSX/,"
+        " Thumbs.db and desktop.ini left by a file manager; each is listed. Never applies to a zip."
+        " Verify the downloaded zip itself, not an extracted folder, whenever you can",
+    )
     args = parser.parse_args(argv)
     if is_render_package(args.package):
-        return _render(args.package, args.file, args.job_package, as_json=args.json)
+        return _render(
+            args.package, args.file, args.job_package, as_json=args.json,
+            tolerate=args.tolerate_os_metadata,
+        )  # fmt: skip
     try:
         report = verify_package(args.package, args.archive)
     except (OSError, PackageFormatError, KeyError, ValueError) as exc:
@@ -84,9 +95,13 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if report.ok else 1
 
 
-def _render(package: Path, files: list[Path], job: Path | None, *, as_json: bool) -> int:
+def _render(
+    package: Path, files: list[Path], job: Path | None, *, as_json: bool, tolerate: bool
+) -> int:
     try:
-        report: RenderPackageReport = verify_render_package(package, files, job)
+        report: RenderPackageReport = verify_render_package(
+            package, files, job, tolerate_os_metadata=tolerate
+        )
     except (OSError, PackageFormatError, KeyError, ValueError, ArchiveError) as exc:
         sys.stderr.write(f"edisc-verify: cannot read package: {exc}\n")
         return 2
@@ -104,6 +119,10 @@ def _render(package: Path, files: list[Path], job: Path | None, *, as_json: bool
             f"  head {chain.head_hash}\n"
         )
     sys.stdout.write(f"  {report.outputs_checked} output files re-hashed\n")
+    if tolerate and is_zip(package):
+        sys.stdout.write("  --tolerate-os-metadata does not apply to a zip: verified strictly\n")
+    for name in report.tolerated:
+        sys.stdout.write(f"  TOLERATED {name} (OS metadata, not part of the package)\n")
     if report.job is not None:
         sys.stdout.write(
             f"  job package: {'VERIFIED' if report.job.ok else 'FAILED'}"

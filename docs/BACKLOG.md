@@ -66,7 +66,13 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
   the render package, referenced by hash (design: ADR 0015 §11; implement after M15 step 5).
 - RSMF renders over 4 GiB or 65,535 zip entries with ZIP64 in `edisc_renderers.rsmf.zipstream`.
   After §11, only a manifest or placeholder set that is itself too large would need it.
+- At the next `RENDERER_VERSION` bump: unify the renderer's zip writer (`edisc_renderers.rsmf.zipstream`)
+  with `edisc_custody.zipwriter` (one deterministic STORED writer with ZIP64; the renderer's in-memory
+  entries then also take a data descriptor, which changes `rsmf.zip` bytes, hence only with a bump and
+  new golden generations). ADR 0015 §19.6.
 - **[hard requirement of the Phase 3 live Slack connector]** Emit conversation metadata as versioned
   `conversation_snapshot` items through the directory unit: name, type, topic, purpose, members,
   archived state (channels are renamed; every state is kept). Normalizer, loader and renderer already
   handle them, and the dummy connector emits them (ADR 0004 amendment 2026-10-04; ADR 0015 §13).
+- `edisc-verify` on JOB custody packages (`verify_package`) does not flag files the manifest does not
+  account for; make it strict like render packages (with the same `--tolerate-os-metadata` rule).
