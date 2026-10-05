@@ -1,4 +1,4 @@
-# Handoff (2026-10-05)
+# Handoff (2026-10-05, end of session)
 
 Read with `CLAUDE.md` (rules), `docs/ARCHITECTURE.md`, `docs/adr/`, `docs/plans/phase-2.md` and `docs/BACKLOG.md`.
 
@@ -6,6 +6,9 @@ Read with `CLAUDE.md` (rules), `docs/ARCHITECTURE.md`, `docs/adr/`, `docs/plans/
 **Branch and CI:** `main` is green on GitHub CI (lint, typecheck, unit, integration including the 50k SIGKILL
 acceptance run). Repo: `github.com/Mihir1107/kickoff`. Every milestone is a separate commit; `git log` is the
 history.
+
+**Phase 2 in progress:** M14 (Slack exports) done; M15 (RSMF renders) in progress, next task = step 5
+part C (see "In progress: M15"). M16 (report) and M17 (sessions, ADR 0016) follow.
 
 **Phase 1 is complete (M0–M13):**
 - **Evidence:** WORM via S3 Object Lock COMPLIANCE on MinIO, with a rolling retention window plus an
@@ -88,60 +91,104 @@ in the backlog for a cloud VM: `scripts/resume_soak.py --messages 1000000 --kill
   occurrences) resumes to the clean result; one real SIGKILL of the export worker process in the middle
   of the day-file index, then a new worker. Seams: `ExportIngest(hooks=CrashHooks)`.
 
-## In progress: M15, RSMF renderer (ADR 0015, ACCEPTED 2026-10-03)
-**Steps 1–3 are approved (2026-10-04).** The §12 review decisions are implemented (ADR 0015 §13:
-renderer 1.1.0, normalizer 0.2.0, dummy connector 0.2.0 with versioned conversation metadata,
-migration 0025). **Step 4 is implemented, waiting for review** (ADR 0015 §14, migration 0026):
-`RenderWorkflow` (queue `renders`, `make worker` runs it), the render's own custody stream with
-bounded `render_files_batch` events, the API (`export.create`/`export.read`, dedup by identity,
-refusals, audited downloads, productions blocked from the generic content endpoint), render anchors
-carrying the render id with matter retention, and `edisc-verify` render packages. **Next: step 5**
-(fixture corpus, structural EML checks, the full render crash matrix), then §11 (external natives).
-Step 4 follow-ups (ADR 0015 §15): visible stuck sealing (migration 0027) and version-keyed render
-queues (`renders.r<renderer>.u<unicode>.tz<tzdata>`); render episodes for unroutable renders and stuck
-sealing (§16, migration 0028). ADR 0017 (old triples) is a DRAFT waiting for review.
-**Step 5:** parts A (corpus, dummy 0.3.0) and B (crash matrix) done (§17). Part C (render package
-download endpoint) waits for the stream-zip decision.
+## In progress: M15, RSMF renderer (ADR 0015, accepted; steps 1-4 approved; step 5 parts A and B done)
+Read `docs/adr/0015-rsmf-renderer.md` in full (§9-§18 are the decisions and implementation notes, in
+order) and `docs/adr/0017-render-worker-versions.md`.
 
-**Fixed 2026-10-04 (3e47bec):** an ABA race in the batch checkpoint guard (a unit starts and ends at
-cursor NULL): a stalled zombie attempt re-applied its first page after the retry finished the unit.
-The guard now fences on `(cursor, pages_done)` (ADR 0006 amendment).
+### Status
+- **Steps 1-3** (vendored schema, pure renderer, loader + storage): approved 2026-10-04.
+- **Step 4** (RenderWorkflow, the render's own custody stream with bounded `render_files_batch` events,
+  the renders API, render packages for `edisc-verify`): approved 2026-10-05 (§14).
+- **Step 4 follow-ups, approved:** visible stuck sealing, version-keyed render queues
+  `renders.r<renderer>.u<unicode>.tz<tzdata>` (§15); render episodes `unroutable` / `sealing_stuck`
+  with one alert per episode and history (§16, migration 0028).
+- **Step 5:** part A (synthetic corpus, dummy connector 0.3.0) and part B (full crash matrix) done
+  (§17, §18). **Part C (render package download endpoint) is NOT started**: it is the next task, spec
+  below.
+- Renderer **1.2.0**; goldens under `tests/golden/rsmf/1.2.0_unicode-15.0.0_tzdata-2026e_dummy-0.3.0/`
+  and `tests/golden/rsmf-corpus/<same key>/`. Migrations at head: **0028**.
 
-**Mentor demo:** `scripts/demo.sh` on branch `demo/progress` (docs/DEMO.md): about 30 s from clean,
-on its own disposable stack (`edisc-demo`); `scripts/demo.sh down` removes it. The decisions
-taken in code are in ADR 0015 §10. The one deviation is STORED zip entries instead of deflate
-(§10.1). Tests are in `tests/unit/renderers` (property tests over random dummy datasets including
-slices over 10,000 events, reconciliation tampering, golden bytes, purity) and `tests/golden/rsmf/1.0.0/`.
-Mutation-checked: dropped, duplicated and unmarked events, the cap, nondeterminism, schema format,
-zip order, missing edits, missing `parent_not_rendered`, Merkle leaves.
-Read `docs/adr/0015-rsmf-renderer.md` in full first; §9 has the review decisions:
-- each render has its own custody stream; its first event (`render_started`) references the SEALED
-  job: job id, final chain head (hash, seq) and seal anchor (key, version). Seals stay final; never
-  append to a sealed job chain. The tenant audit stream gets `audit.render_requested` and
-  `audit.render_completed`;
-- group DMs are RSMF `direct`, with the Slack type (`mpim`) in conversation `custom`;
-- out-of-scope messages appear only as marked thread context, and only with the render option
-  `include_context` (default true), which is recorded in the render's custody stream;
-- `X-RSMF-Generator: edisc-renderers/<semver>` plus `X-RSMF-RendererVersion: <semver>`; golden bytes are
-  keyed by renderer version (changing the bytes needs a version bump).
+### Commits (newest last; all on `main`, pushed)
+- `3e47bec` fix: ABA in the batch checkpoint guard, fenced on `(cursor, pages_done)` (ADR 0006).
+- `fab31ac` step 4: RenderWorkflow, render custody stream, renders API, render packages.
+- `96661bf` stuck sealing made visible; version-keyed render queues.
+- `2e9ab29` render episodes (unroutable detection, stuck-sealing history); ADR 0017 draft.
+- `73bf727` step 5 A and B: corpus, dummy 0.3.0, crash matrix.
+- the commit after `73bf727` (see `git log`): the 2026-10-05 review round (renderer 1.2.0: reactions
+  before deletion as history; legacy export layout case; real SIGKILLs in the seal via a test-only
+  barrier; routing check once per queue; ADR 0017 accepted; push-after-commit rule; this handoff).
 
-Implementation order (also in `docs/plans/phase-2.md`, M15):
-1. Vendor `rsmf_schema_2_0_0.json` (BSD-3, `relativitydev/rsmf-validator-samples` commit
-   `c717cd322264b46115d27d034a6107c8c91043d8`) with its `LICENSE` and a `SOURCE.md` (URL, commit,
-   SHA-256). Add `jsonschema` for tests and render-time validation.
-2. The pure renderer: 24 h slices (UTC or matter time zone, DST), the 10,000-event cap with parts,
-   mapping, attachments and `_UNAVAILABLE.txt` placeholders, the deterministic zip and EML; golden bytes.
-3. The loader from items and derivations; storage as `production` registry rows.
-4. `RenderWorkflow` (queue `renders`), the render custody stream, `POST /v1/jobs/{id}/renders`
-   (`export.create`, recent sign-in per ADR 0016), audited downloads (purpose `rsmf`).
-5. The fixture corpus (dummy, both dialects, including an export job with the archive caveat),
-   structural EML checks, the crash matrix for renders.
+### Decisions taken in the 2026-10-05 reviews (all recorded in ADRs)
+1. Package zip: extend our own deterministic STORED zip writer with ZIP64. Do NOT record CRC32 at
+   production write time; compute CRC32 while streaming and write it in a data descriptor for every
+   entry (one rule for all renders, old and new). (§18.5)
+2. Deleted messages keep the reactions recorded before deletion, rendered only as history
+   (`edisc.reactions_before_deletion`), never as RSMF `reactions`. (§18.1)
+3. `reply_broadcast` renders as a message (it always did); an older-export-layout corpus case covers it.
+4. Seal crash coverage uses real SIGKILLs at a test-only barrier, not simulated crashes. (§18.3)
+5. The routing check calls DescribeTaskQueue once per queue per run. (§18.4)
+6. ADR 0017 accepted: worker image per triple kept while any production made with it is retained plus
+   one year, never deleted while a matter under legal hold has productions from it; image digest in
+   `render_started`; admission requires the oracle corpus (and goldens) to pass inside the image;
+   reproductions store only hashes, the result and their custody stream; manual runbook for old
+   workers in v1 (automation in BACKLOG); the API accepts renders even with no current worker
+   (unroutable flags it); unknown or retired triples get 409 `renderer_unavailable`. Not implemented.
+7. Push after every commit that passes the tests (CLAUDE.md).
+8. Earlier (step 4 review): bounded `render_files_batch` events with Merkle roots; dedup on (job,
+   options hash, renderer, Unicode, tzdata versions), failed/refused do not count; `export.read` for
+   matter managers and tenant admins only; productions never served by `/v1/evidence/{id}/content`;
+   render events and anchor rows carry the render id, retention render -> job -> matter.
 
-The Relativity validator stays OUT until the licence question is answered (open decision 1).
+### Next: step 5 part C, the render package download endpoint (spec agreed, build in a new session)
+- `GET /v1/renders/{id}/package?outputs=reference|embed`, permission `export.read` (matter managers,
+  tenant admins). Reviewers and auditors get 403. A render that is not sealed gets 409. `reference` is
+  the default (outputs listed by hash; the expert passes them to `edisc-verify --file`).
+- **Manifest from what was recorded and verified at seal:** the render's events, anchors (listed from
+  S3 versions), `render_files` records (SHA-256, size, VersionId) and the job seal anchor. Do NOT read
+  every object twice to build it.
+- **Audit first:** `audit.render_package_read` (render, mode, manifest SHA-256, actor, request id) is
+  committed AND anchored before any byte is sent.
+- **One streaming pass:** stream the zip once; every object (output files when embedded, anchors, the
+  seal) is read by pinned VersionId and its hash verified against the manifest as it passes. On a
+  mismatch: abort the stream, record an abort audit event (`audit.render_package_aborted`) and raise
+  an alert.
+- **Deterministic zip:** our own writer (extend the renderer's STORED zip code, or a shared pure module
+  in `edisc_custody`), STORED entries only, fixed timestamps (1980-01-01), fixed entry order, fixed
+  permissions, no extra fields beyond ZIP64 where needed, ZIP64 when sizes or entry counts need it,
+  CRC32 computed while streaming and written in a data descriptor for EVERY entry. Two downloads of the
+  same render must be byte-identical (test it). `exported_at` must not make the manifest differ between
+  downloads (use the seal time, or omit it).
+- `edisc-verify` must accept the zip directly as well as a directory.
+- **Compatibility tests:** the zip opens and verifies with Python `zipfile`, Info-ZIP `unzip`, `7z`,
+  and macOS Archive Utility (`ditto -x -k` is a scriptable stand-in; check by hand once).
+  ZIP64: more than 65,535 entries generated locally; more than 4 GiB via a synthetic stream into a
+  hashing sink (no 4 GiB file on disk), then read back with our streaming reader
+  (`edisc_custody.archive`) and `zipfile` over a seekable synthetic source if feasible.
+- Share one generator between the directory exporter (`export_render_package`) and the zip stream.
+- Then the rest of M15: §11 (oversized attachments as external natives, required before production).
 
-After M15: real-export fixtures when the user sends them (confirm every *(confirm on real export)* item
-in ADR 0014, and measure range reads on them), M16 (report), then the M17 backend (ADR 0016, accepted).
-Cloud-VM backlog: the 1M soak and the 5 GB streaming archive run.
+### Open questions / waiting on the user
+1. Relativity licence (validator in CI) - see "Open decisions" above.
+2. Real Slack exports for the corpus: drop each as `tests/fixtures/slack_exports/<name>/export.zip`
+   with a hand-reviewed `expected.json`; `tests/integration/corpus/cases.py::real_exports` lists them.
+   Also confirm every *(confirm on real export)* item in ADR 0014.
+3. ADR 0017 implementation order (registry file, image digest in custody, reproductions, runbook) is
+   not scheduled.
+4. No detection yet for a render waiting on a queue that never had pollers *before* the unroutable
+   threshold (300 s); by design it is flagged after the threshold.
+
+### How to run what matters here
+- `make check` (lint, typecheck, unit). Integration only on the ephemeral stack:
+  `MIN_FREE_GB=12 make test-env-up`, then `make test-integration-only TESTS=...`, then
+  `make test-env-down` (this laptop often has 14-16 GB free; the stack uses under 1 GB).
+- Render suites: `tests/integration/renders` (workflow, operations, crash matrix with SIGKILLs),
+  `tests/integration/corpus` + `tests/integration/api/test_corpus_export.py` (corpus),
+  `tests/integration/acceptance/test_render_batch_boundary.py` (500/501, about 2 minutes),
+  `tests/integration/api/test_renders.py`, `tests/integration/custody/test_render_package.py`.
+- Goldens: `EDISC_RECORD_RSMF=1` (renderer) and `EDISC_RECORD_CORPUS=1` (corpus) only after a
+  deliberate renderer or dummy version bump; never in CI; never overwrite.
+- Mutation-check every new protection: `cp` the file aside, break it, run the test, `cp` it back
+  (never `git checkout`).
 
 ## Other sessions and branches
 - The frontend is on branch `feat/web-ui` (another session). Never commit, modify or run `apps/web` from

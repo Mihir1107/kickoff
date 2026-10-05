@@ -103,14 +103,21 @@ def check_against_oracle(
             assert e["type"] == want.type, (where, e["type"], want.type)
             assert bool(e.get("deleted")) == want.deleted, where
             assert len(e.get("edits", [])) == want.edits, (where, e.get("edits"), want.edits)
-            got_reactions = {r["value"] for r in e.get("reactions", [])}
+            if want.deleted:  # reactions recorded before the deletion: history only (custom)
+                assert "reactions" not in e, where
+                got_reactions = {
+                    v.split(" (", 1)[0] for v in c.get("edisc.reactions_before_deletion", [])
+                }
+            else:
+                assert "edisc.reactions_before_deletion" not in c, where
+                got_reactions = {r["value"] for r in e.get("reactions", [])}
             assert got_reactions == set(want.reactions), (where, got_reactions, set(want.reactions))
             ids = {a["id"] for a in e.get("attachments", [])}
             held = {i for i in ids if not i.endswith(".UNAVAILABLE.txt")}
             assert {i.split("_", 1)[0] for i in held} == set(want.files), where
             assert {i.split("_", 1)[0] for i in ids - held} == set(want.unavailable), where
-            if want.subtype == "thread_broadcast":
-                assert c.get("slack.subtype") == ["thread_broadcast"], where
+            if want.subtype in ("thread_broadcast", "reply_broadcast"):
+                assert c.get("slack.subtype") == [want.subtype], where
             if want.root is None or not case.check_threads:
                 continue
             if (case.options.include_context and want.root_linked) or want.root_primary_same_slice:

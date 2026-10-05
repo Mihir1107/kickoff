@@ -244,6 +244,12 @@ class Settings(BaseSettings):
         gt=0,
         description="a render worker counts as present if it polled its queue within this long",
     )
+    test_render_barrier: str | None = Field(
+        default=None,
+        description="TEST ONLY (EDISC_ENV test/ci): '<point>:<directory>'. A render worker that reaches"
+        " crash point <point> writes <directory>/<point>.reached and blocks there, so a test can"
+        " SIGKILL the process at exactly that point",
+    )
     render_start_to_close_seconds: float = Field(
         default=43_200, gt=0, description="the longest one render_files activity may run"
     )
@@ -311,6 +317,10 @@ class Settings(BaseSettings):
         if self.evidence_retention_override_days is not None and not self.env.is_disposable:
             raise ValueError(
                 "EDISC_EVIDENCE_RETENTION_OVERRIDE_DAYS is only permitted when EDISC_ENV is local, test or ci"
+            )
+        if self.test_render_barrier is not None and not self.env.is_ephemeral_test:
+            raise ValueError(
+                "EDISC_TEST_RENDER_BARRIER is only permitted when EDISC_ENV is test or ci"
             )
         if self.evidence_retention_override_seconds is not None and not self.env.is_ephemeral_test:
             raise ValueError(

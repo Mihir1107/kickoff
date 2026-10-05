@@ -39,7 +39,7 @@ from edisc_worker.activities import Activities
 from edisc_worker.contracts import EXPORTS_QUEUE, MAINTENANCE_QUEUE, task_queue
 from edisc_worker.exports import ExportActivities
 from edisc_worker.maintenance import MaintenanceActivities, ensure_schedules
-from edisc_worker.renders import RenderActivities
+from edisc_worker.renders import RenderActivities, barrier_hooks
 from edisc_worker.workflows import (
     CollectionJobWorkflow,
     CollectUnitWorkflow,
@@ -151,7 +151,9 @@ async def run(
         if (
             renders
         ):  # this worker's renderer/Unicode/tzdata versions decide its queue (ADR 0015 §15)
-            rendering = RenderActivities(acts.sessions, acts.s3, settings)
+            rendering = RenderActivities(
+                acts.sessions, acts.s3, settings, hooks=barrier_hooks(settings)
+            )
             workers.append(
                 Worker(
                     client,

@@ -538,8 +538,8 @@ minute). Supersedes `renders.sealing_stuck_at` of §15.
    `parent` and `custom` `slack.subtype = thread_broadcast`. The corpus proves each condition:
    counted exactly once in reconciliation, sliced by its own timestamp, rendered when its parent is
    outside the slice or out of range (context or `parent_not_rendered`), and its edit and deletion
-   rendered. The legacy subtype `reply_broadcast` (older exports) still renders as `unknown`; mapping
-   it too would change bytes (a renderer version bump), not done.
+   rendered. The legacy subtype `reply_broadcast` (older exports) also renders as a message (in the
+   renderer's message subtypes since step 2; corrected in §18, which adds an older-layout case).
 3. **Corpus** (`tests/integration/corpus`, `tests/integration/api/test_corpus_export.py`): 16 named
    cases collected through the real pipeline or the real export path and rendered. Every render is
    checked against an oracle computed from the dataset alone (every in-scope message exactly once;
@@ -567,3 +567,23 @@ minute). Supersedes `renders.sealing_stuck_at` of §15.
    requests racing on the deduplication key (one render, one set of events), and a real SIGKILL of the
    worker process during planning. A real SIGKILL during the seal is not reliably reachable (the window
    is milliseconds); the seal's sub-steps are covered by the simulated crashes.
+
+## 18. Review decisions (2026-10-05), renderer 1.2.0
+1. **Reactions recorded before a deletion are history.** A deleted event carries no RSMF `reactions`
+   (which would say they exist now); each reaction last observed before the deletion goes into
+   `custom` as `edisc.reactions_before_deletion` = `<name> (<count>): <users>`, like the earlier text
+   in `edits`. The people who reacted stay participants. `RENDERER_VERSION` 1.2.0; new golden
+   generations (renderer and corpus) under `1.2.0_unicode-15.0.0_tzdata-2026e_dummy-0.3.0`.
+2. **`reply_broadcast`:** already rendered as a message (it has been in the renderer's message subtypes
+   since step 2; §17.2 was wrong to say otherwise). The corpus now has an older export layout
+   (`ExportOptions(legacy_layout=True)`: no blocks, no profile embeds, `reply_broadcast`, parents
+   listing their replies) as the case `export_legacy_layout`.
+3. **Real SIGKILLs inside the seal:** a test-only barrier (`EDISC_TEST_RENDER_BARRIER=<point>:<dir>`,
+   refused by Settings outside test/ci) blocks a worker process at one seal sub-step (`seal_start`,
+   `after_seal_anchor`, `seal_tx`, `sealed`); the test SIGKILLs it there and a new process finishes.
+   These replace the simulated crashes of the seal on the clean path.
+4. **Routing check:** one DescribeTaskQueue call per queue per run (tested).
+5. **Package download zip (part C, not built):** our own deterministic STORED writer extended with
+   ZIP64. No CRC32 is recorded at production write time (sealed renders are immutable, so older renders
+   would need another path): CRC32 is computed while streaming and written in a data descriptor for
+   every entry, one rule for all renders.

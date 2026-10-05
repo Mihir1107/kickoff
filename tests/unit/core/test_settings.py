@@ -40,3 +40,14 @@ def test_seconds_retention_only_on_ephemeral_test_stacks(env: Environment) -> No
 def test_seconds_retention_allowed_on_test_stacks(env: Environment) -> None:
     s = make(env=env, evidence_retention_override_seconds=60)  # type: ignore[arg-type]
     assert s.evidence_retention_override_seconds == 60
+
+
+@pytest.mark.parametrize("env", [Environment.LOCAL, Environment.STAGING, Environment.PRODUCTION])
+def test_the_render_barrier_is_refused_outside_test_stacks(env: Environment) -> None:
+    with pytest.raises(ValidationError, match="EDISC_TEST_RENDER_BARRIER is only permitted"):
+        make(env=env, test_render_barrier="seal_tx:/tmp/x")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("env", [Environment.TEST, Environment.CI])
+def test_the_render_barrier_is_allowed_on_test_stacks(env: Environment) -> None:
+    assert make(env=env, test_render_barrier="seal_tx:/tmp/x").test_render_barrier  # type: ignore[arg-type]

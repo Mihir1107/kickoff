@@ -3,6 +3,8 @@
 Ideas and later-phase work. Nothing here is in scope until promoted into a phase plan.
 
 - S3 legal-hold flag in addition to per-matter retention (decided: backlog, 2026-09-30).
+- Automate starting render workers of old renderer/Unicode/tzdata triples on an unroutable episode
+  (a Job per triple, scale to zero when idle); v1 is a manual runbook (ADR 0017 §3).
 - **[required before production]** Job custody package download endpoint (`edisc-verify --job-package`
   input for the UI): audited, permissioned like evidence content, streaming raw pages and files from
   their pinned versions. Deferred from M15 step 5 (2026-10-05); render packages are downloadable.

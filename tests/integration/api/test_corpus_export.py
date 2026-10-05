@@ -28,7 +28,9 @@ async def test_export_case(api: Api, tenant: TenantCtx, tmp_path: Path, name: st
     case = EXPORT[name]
     ds = Dataset(case.spec)
     buf = io.BytesIO()
-    write_export(ds, buf, ExportOptions(tier=case.export_tier))
+    write_export(
+        ds, buf, ExportOptions(tier=case.export_tier, legacy_layout=case.export_legacy_layout)
+    )
     oracle = build(case)
     async with collection_workers(api, FileHost(ds)) as exp:
         w = await make_world(exp, tenant, case.spec)

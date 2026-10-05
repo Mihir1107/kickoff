@@ -42,6 +42,10 @@ class ExportOptions:
     directory_entries: bool = True  # "folder/" entries (confirm on real export)
     padding_days: int = 0  # extra empty day files in a "padding" channel (to pass 65,535 entries)
     method: int = DEFLATED
+    # an older export layout: no blocks, no user_profile embeds, no client_msg_id, broadcasts under
+    # the legacy subtype reply_broadcast, thread parents listing their replies (off by default: the
+    # default output is unchanged)
+    legacy_layout: bool = False
 
 
 @dataclass
@@ -139,7 +143,7 @@ def write_export(ds: Dataset, out: BinaryIO, opts: ExportOptions | None = None) 
                 continue
             add(
                 f"{folder}/{ds.day(d).isoformat()}.json",
-                _dump([message(ds, m, epoch) for m in msgs]),
+                _dump([_layout(message(ds, m, epoch), m, opts) for m in msgs]),
             )
             manifest.day_files += 1
             manifest.messages += len(msgs)
@@ -159,6 +163,19 @@ def write_export(ds: Dataset, out: BinaryIO, opts: ExportOptions | None = None) 
             manifest.day_files += 1
     zw.close()
     return manifest
+
+
+def _layout(raw: dict[str, Any], m: Any, opts: ExportOptions) -> dict[str, Any]:
+    if not opts.legacy_layout:
+        return raw
+    out = {
+        k: v for k, v in raw.items() if k not in ("blocks", "user_profile", "client_msg_id", "root")
+    }
+    if out.get("subtype") == "thread_broadcast":
+        out["subtype"] = "reply_broadcast"
+    if m.is_parent and m.reply_ts:
+        out["replies"] = [{"ts": ts} for ts in m.reply_ts]
+    return out
 
 
 def _user(u: Any) -> dict[str, Any]:

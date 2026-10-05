@@ -122,6 +122,9 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   episode, closed ones kept (ADR 0015 §16); `check-render-routing` (DescribeTaskQueue) opens
   `unroutable`. Renders run on the queue of their recorded versions (`render_task_queue`); workers poll
   their own runtime's queue; the version check in the activities is only the safety net (ADR 0015 §15).
+- A deleted message's reactions render only as `edisc.reactions_before_deletion` (history), never as
+  RSMF `reactions`. `EDISC_TEST_RENDER_BARRIER` (test/ci only) blocks a render worker at a crash point
+  so tests can SIGKILL it there.
 - One live render per (job, options hash, renderer, Unicode, tzdata versions); failed/refused do not
   count. API: `export.create` / `export.read` (matter managers, tenant admins), reads `custody.read`.
   `require_recent_sign_in` is the ADR 0016 §4 hook (no-op until M17). The generic evidence content
@@ -223,6 +226,7 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 
 ## Working agreement
 - One milestone at a time: implement → tests → run → commit (message ends with the attribution trailer).
+- Push after every commit that passes the tests (`git push origin main`); never push a failing commit.
 - Never chain `git commit` after checks with `;`: use `make check && git commit ...`. The pre-commit hook is a
   backstop, not a replacement; never bypass it with `--no-verify`.
 - No scope creep: later-phase ideas go in `docs/BACKLOG.md`.

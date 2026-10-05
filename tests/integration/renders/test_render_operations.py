@@ -385,3 +385,39 @@ async def test_losing_the_workers_again_opens_a_new_episode(
     ]
     assert out.state == "unroutable" and out.unroutable_since == out.episodes[1].started_at
     assert len(await _alerts(app_sessions, t, "render_unroutable")) == 2
+
+
+async def test_the_routing_check_asks_temporal_once_per_queue_per_run(
+    app_sessions: Sessions,
+    sweeper_sessions: Sessions,
+    s3: S3Client,
+    settings: Settings,
+    temporal: Client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three renders on one unserved triple and one on another: two DescribeTaskQueue calls."""
+    from edisc_worker import render_routing
+
+    rs = settings.model_copy(update={"render_unroutable_seconds": 0})
+    a, b = _unserved(), _unserved()
+    t = await new_tenant(app_sessions)
+    jobs = [await _job(app_sessions, s3, rs, t, epoch=0) for _ in range(3)]
+    async with tenant_tx(app_sessions, t.tenant_id) as s:
+        for job_id, versions in [(jobs[0], a), (jobs[1], a), (jobs[2], a), (jobs[0], b)]:
+            await create_render(
+                s, tenant_id=t.tenant_id, job_id=job_id, matter_id=t.matter_id,
+                options=renders.RenderOptions(), requested_by="tests", versions=versions,
+            )  # fmt: skip
+    asked: list[str] = []
+    real = render_routing.workers_polling
+
+    async def counting(client: Client, queue: str, max_age: timedelta) -> bool:
+        asked.append(queue)
+        return await real(client, queue, max_age)
+
+    monkeypatch.setattr(render_routing, "workers_polling", counting)
+    result = await render_routing.check_render_routing(
+        sweeper_sessions, app_sessions, temporal, rs, tenant_id=t.tenant_id
+    )
+    assert (result.checked, result.opened) == (4, 4)
+    assert sorted(asked) == sorted({renders.render_task_queue(**a), renders.render_task_queue(**b)})

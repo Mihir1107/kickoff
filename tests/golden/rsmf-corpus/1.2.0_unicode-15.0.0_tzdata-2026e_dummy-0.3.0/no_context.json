@@ -1,0 +1,14 @@
+{
+  "events": 128,
+  "files": [
+    "C00000DUMMY_2026-01-06_part001of001.rsmf",
+    "C00000DUMMY_2026-01-07_part001of001.rsmf",
+    "D00002DUMMY_2026-01-06_part001of001.rsmf",
+    "D00002DUMMY_2026-01-07_part001of001.rsmf",
+    "G00001DUMMY_2026-01-06_part001of001.rsmf",
+    "G00001DUMMY_2026-01-07_part001of001.rsmf",
+    "G00003DUMMY_2026-01-06_part001of001.rsmf",
+    "G00003DUMMY_2026-01-07_part001of001.rsmf"
+  ],
+  "projection_sha256": "1dce1ab04d08d8e342eb28d1d06f37309038bc524fc5457dd56fb05971c245d3"
+}

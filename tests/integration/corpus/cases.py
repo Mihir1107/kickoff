@@ -31,6 +31,7 @@ class Case:
     options: RenderOptions = field(default_factory=RenderOptions)
     source: Literal["live", "export"] = "live"
     export_tier: Literal["full", "public_only"] = "full"
+    export_legacy_layout: bool = False  # an older export layout (reply_broadcast, no blocks)
     custodians: int = (
         0  # >0: custodian scopes (the first N members of conversation 0) instead of a channel scope
     )
@@ -116,6 +117,9 @@ CASES: dict[str, Case] = {
     ),
     # the export dialect: completeness against the archive, the ADR 0014 caveat in every file
     "export_full": Case(_spec(seed=42, dialect="slack_history"), source="export"),
+    "export_legacy_layout": Case(
+        _spec(seed=45, dialect="slack_history"), source="export", export_legacy_layout=True
+    ),
     "export_public_only": Case(
         _spec(seed=43, dialect="slack_history"), source="export", export_tier="public_only"
     ),

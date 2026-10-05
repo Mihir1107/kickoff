@@ -1,7 +1,8 @@
 # ADR 0017: Render worker versions over time (old renderer/Unicode/tzdata triples)
 
-Status: **Draft for review** (2026-10-05). Nothing here is implemented beyond what ADR 0015 §15 and
-§16 already built (version-keyed queues, the safety-net version check, unroutable episodes).
+Status: **Accepted** (2026-10-05), with the review answers below folded in. Not implemented yet beyond
+what ADR 0015 §15 and §16 built (version-keyed queues, the safety-net version check, unroutable
+episodes); the rest is planned work (see "Implementation" at the end).
 
 ## Context
 - A render's bytes are promised for its inputs and its **triple**: renderer version, Unicode version
@@ -18,44 +19,51 @@ Status: **Draft for review** (2026-10-05). Nothing here is implemented beyond wh
   the production delivered in 2026 can be regenerated, byte for byte, from the collected evidence.
   That needs a worker running the old triple.
 
-## Decision (proposed)
+## Decision
 
 ### 1. One immutable render worker image per triple
 - Every release that changes the triple builds a render worker image. The build computes the triple
   from the image itself (`python -m edisc_worker.versions`, a small command to add) and tags the image
   `edisc-render:r<renderer>-u<unicode>-tz<tzdata>`. The digest, git commit and build date go in a
   committed registry file, `deploy/render-images.json` (triple -> digest, commit, built_at, status).
-- An image is admitted to the registry only if, inside that image, the RSMF golden tests of its
-  `golden_key()` pass byte for byte. The golden generation is the proof that the image renders what
-  that triple promises.
+- An image is admitted to the registry only if, inside that image, the **oracle corpus passes**
+  (`tests/integration/corpus`: every case checked against the oracle computed from the dataset, the
+  structural EML checks and `edisc-verify`) AND the golden generation of its key matches byte for
+  byte. The oracle is the correctness proof; the goldens show the bytes are the ones that triple
+  promised.
+- **The image digest is recorded in the render's custody record:** the worker reports its image
+  digest (`EDISC_WORKER_IMAGE_DIGEST`, set at build) and `render_started` carries it next to the
+  triple, so a production names the exact image that made it.
 - Image tags are immutable in the container registry (no overwrite, no lifecycle deletion).
 - **Security rebuilds:** an old image may be rebuilt on a patched base, but only if the rebuilt image
   reports the same triple and passes the same goldens. It gets a new digest; the registry keeps both,
   and the newer one is used.
 
 ### 2. How long images are kept
-- An image is kept while ANY production rendered with its triple is retained: until the latest
-  `retain_until` of those productions, plus one year. The retention extension job (ADR 0002)
+- An image is kept while ANY production rendered with its triple is retained, plus one year: until
+  the latest `retain_until` of those productions + 1 year. The retention extension job (ADR 0002)
   computes this and records it per triple; the registry entry shows `retain_until`.
-- An image is never removed while a matter holding such a production is open, held or reopenable.
+- An image is **never deleted while a matter under legal hold has productions from it**, whatever
+  the dates say.
 - Removal is a recorded event: `audit.render_image_retired` (triple, digest, the last production's
   retention), only after the date above. A retired triple becomes `unavailable` in the registry (§4).
 - Cost is small (an image per triple, typically a few per year); retention errs on keeping.
 
 ### 3. Which workers run
 - **Current triple:** an always-on worker pool, as today.
-- **Older admitted triples:** no standing workers. Workers start on demand from the archived image
-  (for example a Kubernetes Job or ECS task per triple). Each polls the queue of its triple and exits
-  after an idle period. The trigger is the unroutable episode of §16: the routing check opens an
-  episode for a render of an old triple, and an operator (later: automation) starts that triple's
-  workers from the registry. The episode ends when the render is picked up.
+- **Older admitted triples:** no standing workers. In v1 they are started by hand from a **runbook**
+  (`docs/runbooks/render-old-triple.md`, to write with the implementation), triggered by the
+  `render_unroutable` alert: look up the triple in `render-images.json`, start that image's workers on
+  the triple's queue, watch the episode close (`picked_up`), stop the workers when the queue is idle.
+  Automating this (a Job per triple, scale to zero) is in `docs/BACKLOG.md`.
 
 ### 4. Re-renders of an old render
 - **Reproduce (new endpoint, to build):** `POST /v1/renders/{id}/reproductions` (`export.create`).
   A reproduction:
   - runs on the queue of the ORIGINAL render's triple, with its options;
-  - renders in memory, stores nothing, and compares each file's SHA-256 and size with the original
-    render's recorded files;
+  - renders in memory and **stores no output**: only the per-file hashes and sizes it computed, the
+    result and its custody stream; it compares each file's SHA-256 and size with the original render's
+    recorded files;
   - has its own custody stream: `reproduction_started` (references the render and its seal),
     `reproduction_completed` with `reproduced` or `differs` (per-file results), then sealed.
   - `differs` is an integrity incident with an alert.
@@ -70,9 +78,11 @@ Status: **Draft for review** (2026-10-05). Nothing here is implemented beyond wh
     created, and the refusal is audited.
   - a render already in the queue for such a triple (one created before its image was retired) is
     failed by the routing check: `render_failed`, reason `renderer_unavailable`, with an alert.
-- **Admitted, but no worker running:** the render waits `requested` with an open `unroutable`
-  episode (state `unroutable`, one alert per episode) until workers of that triple are started. It
-  never times out into another triple.
+- **Admitted, but no worker running:** the API still accepts the render (or reproduction); it waits
+  `requested` with an open `unroutable` episode (state `unroutable`, one alert per episode) until
+  workers of that triple are started. It never times out into another triple. This includes the
+  CURRENT triple: the API does not refuse a render because no current worker polls; the episode flags
+  it.
 - **Under no condition** does a render or a reproduction fall back to newer (or any other)
   versions.
 
@@ -93,11 +103,22 @@ Status: **Draft for review** (2026-10-05). Nothing here is implemented beyond wh
   triple and pass the goldens; if no patched rebuild can pass, the old image is run isolated
   (no network but Temporal, Postgres and the evidence bucket).
 
-## Open questions for review
-1. The retention rule: latest production retention plus one year, or a fixed minimum (for example
-   seven years) on top?
-2. Reproductions: store nothing (proposed), or store the reproduced files as a second production
-   for comparison?
-3. Starting old workers: manual runbook first (proposed), or automation in the same milestone?
-4. Should the API refuse a new render when no worker of the current triple polls (rather than
-   creating an unroutable render)?
+## Review answers (2026-10-05)
+1. Retention: while any production made with the image is retained, plus one year; never deleted while
+   a matter under legal hold has productions from it.
+2. Image digest recorded in the render's custody record (`render_started`); admission requires the
+   oracle corpus to pass, not only the goldens.
+3. Reproductions store no output: only hashes, the result and their custody stream.
+4. Old workers: a manual runbook in v1, triggered by the unroutable alert; automation later (backlog).
+5. The API accepts renders even when no current worker polls (unroutable episodes flag it); unknown or
+   retired triples get 409 `renderer_unavailable`.
+
+## Implementation (planned, not started)
+- `edisc_worker.versions` command (prints the triple), the image build that tags by triple and runs the
+  oracle corpus and goldens inside the image, `deploy/render-images.json`.
+- `EDISC_WORKER_IMAGE_DIGEST` and its field in `render_started` (a custody payload addition).
+- The registry check in the API (409 `renderer_unavailable`) and in the routing check (fail renders of
+  retired triples).
+- Image retention computed by the retention extension job; `audit.render_image_retired`.
+- Reproductions (endpoint, workflow, custody stream).
+- The runbook `docs/runbooks/render-old-triple.md`.

@@ -54,9 +54,11 @@ BATCH = 2
 
 SINGLE = [
     "begin_checked", "begin_tx", "begin_committed", "after_begin", "planned", "files_tx",
-    "after_files", "complete_tx", "complete_committed", "after_completed", "after_seal_anchor",
-    "seal_tx", "sealed",
+    "after_files", "complete_tx", "complete_committed", "after_completed",
 ]  # fmt: skip
+# the seal's sub-steps on the clean path are covered by real SIGKILLs at a test-only barrier
+# (test_sigkill_at_every_seal_sub_step); the failure and refused paths crash them simulated
+SEAL_STEPS = ["seal_start", "after_seal_anchor", "seal_tx", "sealed"]
 REPEATED = ["planning", "mid_upload", "file_stored", "batch_tx", "batch_committed", "after_batch"]
 POINTS = [(p, 1) for p in SINGLE] + [(p, n) for p in REPEATED for n in (1, 2)]
 
@@ -396,3 +398,69 @@ async def test_sigkill_of_the_render_worker_during_planning(
         Counter({"render_started": 1, "render_files_batch": 1, "render_completed": 1}), tmp_path,
     )  # fmt: skip
     assert st["files"] == want and len(want) == 2
+
+
+# ------------------------------------------------------------------ real SIGKILLs inside the seal
+async def _spawn(tmp: Path, n: int, queue: str, env: dict[str, str]) -> asyncio.subprocess.Process:
+    log = (tmp / f"worker-{n}.log").open("wb")
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "edisc_worker", "--source", "dummy", "--renders",
+        "--queue", f"collect-unused-{uuid.uuid4().hex[:8]}", "--renders-queue", queue,
+        cwd=ROOT, env=env, stdout=log, stderr=asyncio.subprocess.STDOUT,
+    )  # fmt: skip
+    log.close()
+    return proc
+
+
+@pytest.mark.parametrize("step", SEAL_STEPS)
+async def test_sigkill_at_every_seal_sub_step(
+    app_sessions: Sessions, s3: S3Client, settings: Settings, temporal: Client, tmp_path: Path,
+    step: str,
+) -> None:  # fmt: skip
+    """The worker PROCESS blocks at a test-only barrier at one seal sub-step (before the forced
+    anchor, after it, inside the transaction that records the seal, after that commit), is SIGKILLed
+    while it waits, and a new worker process finishes: sealed once, audited once, the oracle's bytes."""
+    t = await new_tenant(app_sessions)
+    job_id = await _job(app_sessions, s3, settings, t, epoch=0)
+    render_id = await new_render(app_sessions, t.tenant_id, job_id)
+    queue = f"{render_task_queue(**runtime_versions())}.seal-{uuid.uuid4().hex[:6]}"
+    barrier = tmp_path / "barrier"
+    barrier.mkdir()
+    worker = await _spawn(
+        tmp_path, 1, queue, {**os.environ, "EDISC_TEST_RENDER_BARRIER": f"{step}:{barrier}"}
+    )
+    try:
+        handle = await temporal.start_workflow(
+            RenderWorkflow.run,
+            RenderRef(str(t.tenant_id), str(render_id), heartbeat_timeout_seconds=3,
+                      retry_initial_seconds=0.1, retry_max_seconds=0.5, max_attempts=4),
+            id=render_workflow_id(str(render_id)), task_queue=queue,
+        )  # fmt: skip
+        reached = barrier / f"{step}.reached"
+        async with asyncio.timeout(90):
+            while not reached.exists():  # noqa: ASYNC110 - a file written by another process
+                await asyncio.sleep(0.02)
+        worker.send_signal(signal.SIGKILL)
+        await worker.wait()
+        mid = (await render_state(app_sessions, t.tenant_id, render_id))["row"]
+        assert mid.status == "completed"
+        assert (mid.seal_storage_key is not None) is (step == "sealed"), (
+            step
+        )  # where the kill landed
+        worker = await _spawn(tmp_path, 2, queue, dict(os.environ))
+        async with asyncio.timeout(90):
+            result = await handle.result()
+    finally:
+        if worker.returncode is None:
+            worker.send_signal(signal.SIGKILL)
+            await worker.wait()
+    assert result["status"] == "completed"
+    want = await expected_files(app_sessions, s3, settings, t.tenant_id, job_id)
+    st = await assert_final(
+        app_sessions, s3, settings, t, render_id, "completed",
+        Counter({"render_started": 1,
+                 "render_files_batch": -(-len(want) // settings.render_files_batch_size),
+                 "render_completed": 1}),
+        tmp_path,
+    )  # fmt: skip
+    assert st["files"] == want

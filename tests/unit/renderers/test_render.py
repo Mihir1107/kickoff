@@ -482,3 +482,27 @@ def test_several_custodians_are_all_listed_and_names_stay_searchable() -> None:
 def test_custodians_must_be_sorted_and_unique() -> None:
     with pytest.raises(RenderInputError):
         conv(custodians=("U2", "U1"))
+
+
+def test_reactions_recorded_before_a_deletion_are_history_only() -> None:
+    """A deleted message keeps the reactions last observed, as history (like its earlier text in
+    `edits`): no RSMF `reactions` (which would say they exist now), custom entries instead, and the
+    people who reacted stay participants."""
+    reactions = (("eyes", ("U3",)), ("thumbsup", ("U2", "U3")))
+    live = msg("2026-01-05T09:00:00Z", reactions=reactions)
+    gone = msg(
+        "2026-01-05T10:00:00Z", author="U1", deleted=True, edits=(("before", None),),
+        reactions=(*reactions, ("tada", ("U9",))), deleted_ts=ts_at("2026-01-05T11:00:00Z"),
+    )  # fmt: skip
+    [(_, parsed)] = render(slice_input(DAY, [live, gone]))
+    events = _events(parsed)
+    alive, deleted = events[live.ts], events[gone.ts]
+    assert [r["value"] for r in alive["reactions"]] == ["eyes", "thumbsup"]
+    assert "reactions" not in deleted and deleted["deleted"] is True
+    assert custom(deleted)["edisc.reactions_before_deletion"] == [
+        "eyes (1): U3",
+        "tada (1): U9",
+        "thumbsup (2): U2,U3",
+    ]
+    assert "edisc.reactions_before_deletion" not in custom(alive)
+    assert "U9" in {p["id"] for p in parsed.manifest["participants"]}  # only reacted, then deleted

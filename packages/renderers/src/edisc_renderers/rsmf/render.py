@@ -216,14 +216,27 @@ def _event(
     if placed.parent is not None:
         event["parent"] = placed.parent
 
+    # reactions recorded before a deletion are history, like the earlier text in `edits`: a deleted
+    # event carries no RSMF `reactions` (which would say they are there now), only custom
+    # `edisc.reactions_before_deletion` entries, "<name> (<count>): <users>"
+    historical: list[tuple[str, str | None]] = []
     if m.reactions is not None and m.reactions.reactions:
-        reactions = []
-        for name, users in sorted(m.reactions.reactions):
-            r: dict[str, Any] = {"value": name, "count": len(users)}
-            if users:
-                r["participants"] = sorted(users)
-            reactions.append(r)
-        event["reactions"] = reactions
+        if cur.deleted:
+            historical = [
+                (
+                    "edisc.reactions_before_deletion",
+                    f"{name} ({len(users)}): {','.join(sorted(users))}",
+                )
+                for name, users in sorted(m.reactions.reactions)
+            ]
+        else:
+            reactions = []
+            for name, users in sorted(m.reactions.reactions):
+                r: dict[str, Any] = {"value": name, "count": len(users)}
+                if users:
+                    r["participants"] = sorted(users)
+                reactions.append(r)
+            event["reactions"] = reactions
 
     edits = []
     for prev, new in zip(m.states, m.states[1:], strict=False):
@@ -270,6 +283,7 @@ def _event(
         ("edisc.context", placed.context),
         ("slack.subtype", subtype),
         *unavailable,
+        *historical,
     ]
     if m.reactions is not None:
         pairs += [
@@ -357,6 +371,13 @@ def _build_file(
     for e in events:
         observed.add(e["participant"])
         observed.update(u for r in e.get("reactions", []) for u in r.get("participants", []))
+        observed.update(  # people who reacted before a deletion are still referenced
+            u
+            for pair in e.get("custom", [])
+            if pair["name"] == "edisc.reactions_before_deletion"
+            for u in pair["value"].split(": ", 1)[1].split(",")
+            if u
+        )
         observed.update(x["participant"] for x in e.get("edits", []))
     members = sorted(set(conv.members)) if conv.members else sorted(observed)
     everyone = observed | set(members) | set(conv.custodians)

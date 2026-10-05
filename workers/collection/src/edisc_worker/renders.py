@@ -29,12 +29,15 @@ Render events have ``render_id`` set and ``job_id`` NULL: a sealed job's chain i
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import os
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import wraps
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import text
@@ -741,6 +744,7 @@ class RenderRun:
 
     async def _seal_once(self, tenant_id: uuid.UUID, row: Any) -> None:
         render_id = row.id
+        await self.hooks.hit("seal_start")
         key = await anchor_if_due(
             self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=render_id,
             force=True,
@@ -806,6 +810,30 @@ class RenderRun:
         await anchor_if_due(
             self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=tenant_id
         )
+
+
+class BarrierHooks(CrashHooks):
+    """TEST ONLY (``EDISC_TEST_RENDER_BARRIER``, refused outside test/ci by Settings): at one crash
+    point, announce it (``<dir>/<point>.reached``) and block, so a test can SIGKILL the worker
+    process exactly there. Never released: the process is meant to die waiting."""
+
+    def __init__(self, spec: str) -> None:
+        point, _, directory = spec.partition(":")
+        if not point or not directory:
+            raise ValueError(f"EDISC_TEST_RENDER_BARRIER must be '<point>:<dir>', got {spec!r}")
+        self.point, self.directory = point, Path(directory)
+
+    async def hit(self, point: str) -> None:
+        if point != self.point:
+            return
+        (self.directory / f"{point}.reached").write_text(str(os.getpid()))
+        await asyncio.Event().wait()  # never set: blocks until the process is killed
+
+
+def barrier_hooks(settings: Settings) -> CrashHooks:
+    return (
+        BarrierHooks(settings.test_render_barrier) if settings.test_render_barrier else CrashHooks()
+    )
 
 
 # ------------------------------------------------------------------ activities

@@ -22,7 +22,9 @@ from edisc_renderers.rsmf import load_zone
 from .cases import Case
 
 JOIN_LEAVE = {"channel_join": "join", "channel_leave": "leave"}
-MESSAGE_SUBTYPES = {None, "bot_message", "me_message", "thread_broadcast", "message_deleted"}
+MESSAGE_SUBTYPES = {
+    None, "bot_message", "me_message", "thread_broadcast", "reply_broadcast", "message_deleted",
+}  # fmt: skip
 
 
 @dataclass
@@ -141,6 +143,8 @@ def build(case: Case) -> RenderOracle:
                 else:
                     unavailable.add(f.id)
             subtype = "message_deleted" if m.deleted_ts is not None else m.subtype
+            if case.export_legacy_layout and subtype == "thread_broadcast":
+                subtype = "reply_broadcast"
             etype = JOIN_LEAVE.get(
                 subtype or "", "message" if subtype in MESSAGE_SUBTYPES else "unknown"
             )
@@ -171,6 +175,8 @@ def features(case: Case, ds: Dataset, o: RenderOracle) -> set[str]:
     f = {f"dialect:{case.source}:{case.spec.dialect}"}
     if case.source == "export":
         f.add(f"export_tier:{case.export_tier}")
+        if case.export_legacy_layout:
+            f.add("export_layout:legacy")
     f.add(f"zone:{case.options.time_zone}")
     f.add(f"context:{'on' if case.options.include_context else 'off'}")
     f.add(f"policy:{case.policy.value}")
@@ -181,7 +187,7 @@ def features(case: Case, ds: Dataset, o: RenderOracle) -> set[str]:
     for e in o.primaries.values():
         f.add(f"type:{e.type}")
         if (
-            e.subtype in ("thread_broadcast", "me_message", "bot_message")
+            e.subtype in ("thread_broadcast", "reply_broadcast", "me_message", "bot_message")
             or e.subtype in UNINTERPRETABLE
         ):
             f.add(f"subtype:{e.subtype}")
@@ -193,6 +199,8 @@ def features(case: Case, ds: Dataset, o: RenderOracle) -> set[str]:
             f.add("hint_only_edit")
         if e.reactions:
             f.add("reactions")
+            if e.deleted:
+                f.add("reactions:before_deletion")
         if e.files:
             f.add("file:held")
         if e.unavailable:
@@ -254,9 +262,10 @@ COVERAGE = {
     "custodians:several",
     "conversation:channel", "conversation:private_channel", "conversation:dm", "conversation:group_dm",
     "type:message", "type:join", "type:leave", "type:unknown",
-    "subtype:thread_broadcast", "subtype:me_message", "subtype:bot_message",
+    "subtype:thread_broadcast", "subtype:reply_broadcast", "export_layout:legacy",
+    "subtype:me_message", "subtype:bot_message",
     "subtype:channel_topic", "subtype:pinned_item",
-    "deleted", "edits", "hint_only_edit", "reactions", "file:held", "file:unavailable",
+    "deleted", "edits", "hint_only_edit", "reactions", "reactions:before_deletion", "file:held", "file:unavailable",
     "thread:root_same_slice", "thread:root_elsewhere", "thread:root_not_collected",
     "text:emoji", "text:rtl", "text:zero_width", "text:combining", "text:long", "text:attachment_only",
     "broadcast", "broadcast:parent_outside_slice", "broadcast:edited", "broadcast:deleted",
