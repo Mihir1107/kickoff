@@ -1,4 +1,4 @@
-# Handoff (2026-10-05, end of session)
+# Handoff (2026-10-05, end of session: M15 step 5 part C)
 
 Read with `CLAUDE.md` (rules), `docs/ARCHITECTURE.md`, `docs/adr/`, `docs/plans/phase-2.md` and `docs/BACKLOG.md`.
 
@@ -7,8 +7,9 @@ Read with `CLAUDE.md` (rules), `docs/ARCHITECTURE.md`, `docs/adr/`, `docs/plans/
 acceptance run). Repo: `github.com/Mihir1107/kickoff`. Every milestone is a separate commit; `git log` is the
 history.
 
-**Phase 2 in progress:** M14 (Slack exports) done; M15 (RSMF renders) in progress, next task = step 5
-part C (see "In progress: M15"). M16 (report) and M17 (sessions, ADR 0016) follow.
+**Phase 2 in progress:** M14 (Slack exports) done; M15 (RSMF renders) in progress: steps 1-5 done, next
+task = §11 oversized attachments as external natives (see "In progress: M15"). M16 (report) and M17
+(sessions, ADR 0016) follow.
 
 **Phase 1 is complete (M0–M13):**
 - **Evidence:** WORM via S3 Object Lock COMPLIANCE on MinIO, with a rolling retention window plus an
@@ -91,7 +92,7 @@ in the backlog for a cloud VM: `scripts/resume_soak.py --messages 1000000 --kill
   occurrences) resumes to the clean result; one real SIGKILL of the export worker process in the middle
   of the day-file index, then a new worker. Seams: `ExportIngest(hooks=CrashHooks)`.
 
-## In progress: M15, RSMF renderer (ADR 0015, accepted; steps 1-4 approved; step 5 parts A and B done)
+## In progress: M15, RSMF renderer (ADR 0015, accepted; steps 1-4 approved; step 5 done, part C for review)
 Read `docs/adr/0015-rsmf-renderer.md` in full (§9-§18 are the decisions and implementation notes, in
 order) and `docs/adr/0017-render-worker-versions.md`.
 
@@ -103,7 +104,7 @@ order) and `docs/adr/0017-render-worker-versions.md`.
   `renders.r<renderer>.u<unicode>.tz<tzdata>` (§15); render episodes `unroutable` / `sealing_stuck`
   with one alert per episode and history (§16, migration 0028).
 - **Step 5:** part A (synthetic corpus, dummy connector 0.3.0) and part B (full crash matrix) done
-  (§17, §18). **Part C (render package download endpoint) is NOT started**: it is the next task, spec
+  (§17, §18). **Part C (render package download endpoint) done 2026-10-05, for review (§19)**, summary
   below.
 - Renderer **1.2.0**; goldens under `tests/golden/rsmf/1.2.0_unicode-15.0.0_tzdata-2026e_dummy-0.3.0/`
   and `tests/golden/rsmf-corpus/<same key>/`. Migrations at head: **0028**.
@@ -114,9 +115,10 @@ order) and `docs/adr/0017-render-worker-versions.md`.
 - `96661bf` stuck sealing made visible; version-keyed render queues.
 - `2e9ab29` render episodes (unroutable detection, stuck-sealing history); ADR 0017 draft.
 - `73bf727` step 5 A and B: corpus, dummy 0.3.0, crash matrix.
-- the commit after `73bf727` (see `git log`): the 2026-10-05 review round (renderer 1.2.0: reactions
-  before deletion as history; legacy export layout case; real SIGKILLs in the seal via a test-only
-  barrier; routing check once per queue; ADR 0017 accepted; push-after-commit rule; this handoff).
+- `9dec343` the 2026-10-05 review round (renderer 1.2.0: reactions before deletion as history; legacy
+  export layout case; real SIGKILLs in the seal via a test-only barrier; routing check once per
+  queue; ADR 0017 accepted; push-after-commit rule).
+- the commit after `9dec343` (see `git log`): step 5 part C, the render package download (§19).
 
 ### Decisions taken in the 2026-10-05 reviews (all recorded in ADRs)
 1. Package zip: extend our own deterministic STORED zip writer with ZIP64. Do NOT record CRC32 at
@@ -139,33 +141,28 @@ order) and `docs/adr/0017-render-worker-versions.md`.
    matter managers and tenant admins only; productions never served by `/v1/evidence/{id}/content`;
    render events and anchor rows carry the render id, retention render -> job -> matter.
 
-### Next: step 5 part C, the render package download endpoint (spec agreed, build in a new session)
-- `GET /v1/renders/{id}/package?outputs=reference|embed`, permission `export.read` (matter managers,
-  tenant admins). Reviewers and auditors get 403. A render that is not sealed gets 409. `reference` is
-  the default (outputs listed by hash; the expert passes them to `edisc-verify --file`).
-- **Manifest from what was recorded and verified at seal:** the render's events, anchors (listed from
-  S3 versions), `render_files` records (SHA-256, size, VersionId) and the job seal anchor. Do NOT read
-  every object twice to build it.
-- **Audit first:** `audit.render_package_read` (render, mode, manifest SHA-256, actor, request id) is
-  committed AND anchored before any byte is sent.
-- **One streaming pass:** stream the zip once; every object (output files when embedded, anchors, the
-  seal) is read by pinned VersionId and its hash verified against the manifest as it passes. On a
-  mismatch: abort the stream, record an abort audit event (`audit.render_package_aborted`) and raise
-  an alert.
-- **Deterministic zip:** our own writer (extend the renderer's STORED zip code, or a shared pure module
-  in `edisc_custody`), STORED entries only, fixed timestamps (1980-01-01), fixed entry order, fixed
-  permissions, no extra fields beyond ZIP64 where needed, ZIP64 when sizes or entry counts need it,
-  CRC32 computed while streaming and written in a data descriptor for EVERY entry. Two downloads of the
-  same render must be byte-identical (test it). `exported_at` must not make the manifest differ between
-  downloads (use the seal time, or omit it).
-- `edisc-verify` must accept the zip directly as well as a directory.
-- **Compatibility tests:** the zip opens and verifies with Python `zipfile`, Info-ZIP `unzip`, `7z`,
-  and macOS Archive Utility (`ditto -x -k` is a scriptable stand-in; check by hand once).
-  ZIP64: more than 65,535 entries generated locally; more than 4 GiB via a synthetic stream into a
-  hashing sink (no 4 GiB file on disk), then read back with our streaming reader
-  (`edisc_custody.archive`) and `zipfile` over a seekable synthetic source if feasible.
-- Share one generator between the directory exporter (`export_render_package`) and the zip stream.
-- Then the rest of M15: §11 (oversized attachments as external natives, required before production).
+### Done: step 5 part C, the render package download (ADR 0015 §19, for review)
+- `GET /v1/renders/{id}/package?outputs=reference|embed` (`export.read`; 409 `render_not_sealed`;
+  reviewers/auditors 403). Format `edisc-render-package/2`: anchor and seal bodies are
+  `objects/<sha256>` listed by hash and size, so the manifest is built from the records before any
+  object is read; `sealed_at`, no `exported_at`. The verifier still accepts /1.
+- `plan_render_package` (pass 1: records + S3 listing + registry hashes) then `package_members`
+  (pass 2: one stream, every entry checked against the plan as it passes), shared by the directory
+  export and the zip. `audit.render_package_read` committed and force-anchored (`audit.anchor_now`,
+  checked to cover the event) before the first byte; any stream error records
+  `audit.render_package_aborted`, integrity errors also a `render_package_mismatch` alert.
+- `edisc_custody.zipwriter`: deterministic STORED zip, data descriptor + streamed CRC on every entry,
+  ZIP64 only where needed. `edisc-verify` reads the zip in place (`package_source.ZipSource`, the
+  hardened `archive` reader). Verified with zipfile, unzip, 7-Zip, ditto; Archive Utility by hand once.
+  ZIP64 tested at 70,000 entries and 4 GiB + 1 MiB (hashing sink, synthetic seekable source).
+- CI installs `p7zip-full` + `unzip` (the tool tests skip locally when missing, fail in CI).
+  Locally: `brew install sevenzip` (`7zz`).
+- 20 mutation checks, all caught (§19.9).
+- **Found, not changed (needs a decision):** the single-file download
+  (`/v1/renders/{id}/files/{ord}/content`) anchors its audit only "if due", so §14.7's "anchored
+  before any byte" does not strictly hold there. Fix: call `audit.anchor_now` (one WORM anchor per
+  read). §19.10.
+- Next: the rest of M15, §11 (oversized attachments as external natives, required before production).
 
 ### Open questions / waiting on the user
 1. Relativity licence (validator in CI) - see "Open decisions" above.
@@ -184,7 +181,8 @@ order) and `docs/adr/0017-render-worker-versions.md`.
 - Render suites: `tests/integration/renders` (workflow, operations, crash matrix with SIGKILLs),
   `tests/integration/corpus` + `tests/integration/api/test_corpus_export.py` (corpus),
   `tests/integration/acceptance/test_render_batch_boundary.py` (500/501, about 2 minutes),
-  `tests/integration/api/test_renders.py`, `tests/integration/custody/test_render_package.py`.
+  `tests/integration/api/test_renders.py`, `tests/integration/custody/test_render_package.py`,
+  `tests/integration/api/test_render_packages.py` (download), `tests/unit/custody/test_zipwriter.py`.
 - Goldens: `EDISC_RECORD_RSMF=1` (renderer) and `EDISC_RECORD_CORPUS=1` (corpus) only after a
   deliberate renderer or dummy version bump; never in CI; never overwrite.
 - Mutation-check every new protection: `cp` the file aside, break it, run the test, `cp` it back

@@ -10,6 +10,11 @@
 - **Download** a file: ``export.read`` (matter managers, tenant admins). The read is audited and the
   audit anchored BEFORE any byte is returned; bytes come from the pinned version and are re-hashed as
   they stream (a mismatch aborts the response and raises an alert).
+- **Package** ``GET /v1/renders/{id}/package?outputs=reference|embed`` (``export.read``, sealed renders
+  only, ADR 0015 §19): the render package as one deterministic zip for ``edisc-verify``. Its manifest is
+  built from the records first; ``audit.render_package_read`` (with the manifest's SHA-256) is committed
+  and ANCHORED before any byte; then one streaming pass checks every entry against the manifest. A
+  mismatch aborts the stream, records ``audit.render_package_aborted`` and raises an alert.
 """
 
 from __future__ import annotations
@@ -18,16 +23,16 @@ import hashlib
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Path, Response
+from fastapi import APIRouter, Path, Query, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from edisc_api import audit
-from edisc_api.app import CallerDep, RequestIdDep, ResourcesDep
+from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller, require_recent_sign_in
 from edisc_api.authz import P, Permission, Scope, authorize, perm
 from edisc_api.errors import ApiError, conflict, not_found, unprocessable
@@ -35,6 +40,14 @@ from edisc_api.pagination import CursorQ, LimitQ, Page, decode, decode_text, enc
 from edisc_api.routes.jobs import IdempotencyKey, _claim_key, _request_hash
 from edisc_core.ids import new_id
 from edisc_custody.log import verify_chain
+from edisc_custody.render_export import (
+    PackageIntegrityError,
+    RenderPackagePlan,
+    package_members,
+    plan_render_package,
+)
+from edisc_custody.render_package import RENDER_PACKAGE_FORMAT
+from edisc_custody.zipwriter import ZipSizeError, zip_stream
 from edisc_db.session import tenant_tx
 from edisc_evidence.writer import EvidenceWriter
 from edisc_renderers.rsmf import RenderInputError, RenderOptions
@@ -474,3 +487,84 @@ async def render_file_content(
             "cache-control": "no-store",
         },
     )
+
+
+@router.get("/renders/{render_id}/package", openapi_extra=perm(P.EXPORT_READ))
+async def render_package(
+    render_id: uuid.UUID,
+    caller: CallerDep,
+    res: ResourcesDep,
+    rid: RequestIdDep,
+    outputs: Annotated[Literal["reference", "embed"], Query()] = "reference",
+) -> StreamingResponse:
+    """The render package as one zip (``edisc-render-package/2``). ``reference`` (default) lists the
+    output files by hash (the expert passes them to ``edisc-verify --file``); ``embed`` includes them.
+    The audit event, with the manifest's SHA-256, is committed and anchored BEFORE any byte."""
+    async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        row = await _authorize_render(s, caller, P.EXPORT_READ, render_id)
+        if row.seal_storage_key is None:
+            raise ApiError(
+                409, "render_not_sealed", f"the render is {row.status} and not sealed yet"
+            )
+    plan = await plan_render_package(
+        res.sessions, res.s3, res.settings, tenant_id=caller.tenant_id, render_id=render_id,
+        outputs=outputs,
+    )  # fmt: skip
+    base = {"render_id": str(render_id), "job_id": str(row.job_id),
+            "matter_id": str(row.matter_id), "mode": outputs, "format": RENDER_PACKAGE_FORMAT,
+            "manifest_sha256": plan.manifest_sha256, "file_count": plan.file_count}  # fmt: skip
+    async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        read = await audit.record(
+            s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="render_package_read",
+            payload=base, request_id=rid,
+        )  # fmt: skip
+    await audit.anchor_now(res.sessions, res.s3, res.settings, caller.tenant_id, read)
+
+    async def body() -> AsyncIterator[bytes]:
+        members = package_members(res.sessions, res.s3, res.settings, plan)
+        try:
+            async for chunk in zip_stream(members):
+                yield chunk
+        except Exception as exc:
+            # recorded, then re-raised: the response is aborted, never completed
+            await _package_aborted(res, caller, rid, row, plan, base, exc)
+            raise
+
+    return StreamingResponse(
+        body(),
+        media_type="application/zip",
+        headers={
+            "x-manifest-sha256": plan.manifest_sha256,
+            "content-disposition": f'attachment; filename="render-{render_id}-{outputs}.zip"',
+            "cache-control": "no-store",
+        },
+    )
+
+
+async def _package_aborted(
+    res: Resources,
+    caller: Caller,
+    rid: str,
+    row: Any,
+    plan: RenderPackagePlan,
+    base: dict[str, Any],
+    exc: Exception,
+) -> None:
+    integrity = isinstance(exc, (PackageIntegrityError, ZipSizeError))
+    async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        event = await audit.record(
+            s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="render_package_aborted",
+            payload={**base, "integrity": integrity, "error": type(exc).__name__,
+                     "entry": getattr(exc, "entry", None), "detail": str(exc)[:500]},
+            request_id=rid,
+        )  # fmt: skip
+        if integrity:
+            await s.execute(
+                text(
+                    "INSERT INTO alerts (id, tenant_id, kind, job_id, message)"
+                    " VALUES (:i, :t, 'render_package_mismatch', :j, :m)"
+                ),
+                {"i": new_id(), "t": caller.tenant_id, "j": row.job_id,
+                 "m": f"render {plan.render_id} package aborted: {str(exc)[:500]}"},
+            )  # fmt: skip
+    await audit.anchor_now(res.sessions, res.s3, res.settings, caller.tenant_id, event)

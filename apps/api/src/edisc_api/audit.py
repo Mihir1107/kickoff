@@ -12,11 +12,13 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
 
 from edisc_core.settings import Settings
-from edisc_custody.log import anchor_if_due, append
+from edisc_custody.log import AppendedEvent, anchor_if_due, append
+from edisc_db.session import tenant_tx
 
 
 async def record(
@@ -27,8 +29,8 @@ async def record(
     event_type: str,
     payload: dict[str, Any],
     request_id: str | None = None,
-) -> None:
-    await append(
+) -> AppendedEvent:
+    return await append(
         session,
         tenant_id=tenant_id,
         stream_id=tenant_id,
@@ -45,3 +47,26 @@ async def anchor(
     tenant_id: uuid.UUID,
 ) -> None:
     await anchor_if_due(sessions, s3, settings, tenant_id=tenant_id, stream_id=tenant_id)
+
+
+async def anchor_now(
+    sessions: async_sessionmaker[AsyncSession],
+    s3: S3Client,
+    settings: Settings,
+    tenant_id: uuid.UUID,
+    event: AppendedEvent,
+) -> None:
+    """Anchor the tenant's audit stream NOW (forced), and make sure the anchor covers ``event``:
+    for reads whose audit must be in WORM before any byte leaves (render packages)."""
+    await anchor_if_due(
+        sessions, s3, settings, tenant_id=tenant_id, stream_id=tenant_id, force=True
+    )
+    async with tenant_tx(sessions, tenant_id) as s:
+        anchored: int = (
+            await s.execute(
+                text("SELECT last_anchored_seq FROM custody_chain_heads WHERE stream_id = :s"),
+                {"s": tenant_id},
+            )
+        ).scalar_one()
+    if anchored < event.seq:
+        raise RuntimeError(f"audit event {event.seq} is not anchored (anchored up to {anchored})")

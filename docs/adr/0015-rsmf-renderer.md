@@ -587,3 +587,76 @@ minute). Supersedes `renders.sealing_stuck_at` of §15.
    ZIP64. No CRC32 is recorded at production write time (sealed renders are immutable, so older renders
    would need another path): CRC32 is computed while streaming and written in a data descriptor for
    every entry, one rule for all renders.
+
+## 19. Step 5 part C: render package download (2026-10-05, for review)
+Implements the part C spec agreed in the 2026-10-05 review (§18.5). Code: `edisc_custody.zipwriter`
+(new, pure), `edisc_custody.render_export` (rewritten: plan + members), `edisc_custody.package_source`
+(new, pure), `edisc_custody.render_package` (verifier), `edisc_api.routes.renders` (route),
+`edisc_api.audit.anchor_now`. Tests: `tests/unit/custody/test_zipwriter.py`,
+`tests/integration/custody/test_render_package.py`, `tests/integration/api/test_render_packages.py`.
+
+1. **Endpoint.** `GET /v1/renders/{id}/package?outputs=reference|embed` (`export.read`: matter managers
+   and tenant admins; reviewers, collectors, auditors and client admins get 403, other matters 404).
+   `reference` is the default. A render without a seal gets 409 `render_not_sealed`; a sealed refused
+   or failed render is packaged (its custody is what the expert checks). Response `application/zip`,
+   `x-manifest-sha256`, `content-disposition: attachment; filename="render-<id>-<mode>.zip"`,
+   `cache-control: no-store`; chunked (no Content-Length).
+2. **Format `edisc-render-package/2`.** The manifest must exist (its hash is audited) before any byte
+   is sent, and the objects must not be read twice; /1 inlined anchor and seal bodies in the JSONL
+   files, so its manifest hashes needed every body. /2 lists them by key, VersionId, SHA-256 and size
+   (`anchors.jsonl`, `job_seal.json`) and carries the bodies as `objects/<sha256>`. The manifest has
+   `sealed_at` and no `exported_at`, and records `bytes` per file. The verifier accepts /1 and /2.
+   Entry order is fixed: `manifest.json`, `events.jsonl`, `files.jsonl`, `anchors.jsonl`,
+   `job_seal.json`, `objects/*` by hash, `outputs/*` in render order.
+3. **Two passes, one shared generator.** `plan_render_package` builds the manifest from the records:
+   the render's events and `render_files` (database, in short per-page transactions), its anchors
+   LISTED from S3 versions with the SHA-256 and size the registry recorded when each was written, and
+   the job seal `render_started` references (registry). No object body is read, except once for an
+   anchor version the registry does not hold (a shadow: an incident the verifier must see).
+   `package_members` regenerates every entry from the same records, bounded by the planned head and
+   file count, and checks each as it passes: the JSONL files against the manifest hashes (a
+   difference raises before the next entry), every object (anchors, the seal, embedded outputs) read
+   by its pinned VersionId against its recorded SHA-256 and size (more bytes than recorded raise
+   before they are passed on). An embedded output whose registry row disagrees with its render record
+   (state, SHA-256, VersionId) is refused. `export_render_package` writes the same members to a
+   directory, so a directory export and a download are the same files with the same bytes (tested).
+4. **Audit first.** `audit.render_package_read` (render, job, matter, mode, format, manifest SHA-256,
+   file count, actor, request id) is committed, then the tenant's audit stream is anchored with a
+   FORCED anchor and the anchor is checked to cover the event (`audit.anchor_now`), before the
+   response starts. Tested at the ASGI level: the state is read when the first body byte is sent.
+5. **Abort.** Any exception in the stream records `audit.render_package_aborted` (the read's fields
+   plus `integrity`, the error class, the entry and detail) and re-raises, so the response never
+   completes (no central directory: the partial zip is unusable). An integrity failure
+   (`PackageIntegrityError`, `ZipSizeError`) also raises a `render_package_mismatch` alert. Client
+   disconnects are not exceptions here and are not recorded.
+6. **Zip writer** (`edisc_custody.zipwriter`, decision §18.5): STORED, 1980-01-01 timestamps, mode
+   0644, UTF-8 names, no comments, the given order; a data descriptor with the CRC-32 computed while
+   streaming for EVERY entry (sizes and CRC zero in the local header); ZIP64 decided from the declared
+   size and position only: an entry of 0xFFFFFFFF bytes or more gets a local ZIP64 extra (zeros) and
+   a 64-bit descriptor; central records get ZIP64 extras only for the fields that do not fit; a ZIP64
+   end record and locator when the entry count reaches 0xFFFF or the directory size or offset does not
+   fit. A member must produce exactly its declared size. The renderer keeps its own `rsmf.zip` writer:
+   its bytes are fixed by `RENDERER_VERSION` (in-memory entries carry their CRC in the local header),
+   so sharing the module would change goldens for nothing.
+7. **`edisc-verify` reads the zip in place** (`package_source.ZipSource`): our hardened reader
+   (`edisc_custody.archive`) checks every local header against the central directory, overlaps, safe
+   and unique names (folded), and each entry's CRC-32 and size; nothing is extracted. A damaged entry
+   is a failed check (exit 1), not an unreadable package. The verifier also refuses any file the
+   manifest does not account for (outside `objects/` too) and checks every object's SHA-256 and size.
+8. **Compatibility** (tests): Python `zipfile`, Info-ZIP `unzip`, 7-Zip (`7zz`/`7z`) and `ditto -x -k`
+   extract a real package to the same files, which verify. macOS Archive Utility was checked by hand
+   once (2026-10-05, `open -a "Archive Utility"`: byte-identical extraction, UTF-8 names included).
+   ZIP64: 70,000 entries (zipfile, our reader, unzip, 7-Zip) and a 4 GiB + 1 MiB entry followed by an
+   entry whose offset is past 4 GiB, streamed into a hashing sink and read back through a seekable
+   synthetic source by our reader and by `zipfile` (no 4 GiB file is written; about 7 s). The tool
+   tests skip locally when a tool is missing and fail in CI, which installs `p7zip-full` and `unzip`.
+9. **Mutation checks:** 20 protections broken one at a time (audit before bytes, the forced anchor,
+   the seal check, the permission, the abort audit and alert, object and JSONL checks while
+   streaming, the output registry check, determinism, the verifier's object, manifest and
+   unlisted-file checks, duplicate zip names, the descriptor flag, the CRC, each ZIP64 rule, the
+   size guard); each made a test fail.
+10. **Found, not changed:** `GET /v1/renders/{id}/files/{ord}/content` (step 4) anchors its audit
+    with `audit.anchor` (anchor if due), so an audit event in the middle of an anchoring interval is
+    not yet anchored when bytes are returned, although §14.7 says it is. `audit.anchor_now` fixes that
+    for packages; applying it to file reads is a one-line change awaiting a decision (each read would
+    write one WORM anchor object).

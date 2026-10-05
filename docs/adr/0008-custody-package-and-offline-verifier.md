@@ -66,6 +66,15 @@ them with `--file`). `edisc-verify` recognises the format and checks the chain w
 output's SHA-256 and size; `--job-package` verifies the job's own package and matches its head and
 seal. Details: ADR 0015 §14. The verifier stays free of database and cloud imports.
 
+## Amendment (2026-10-05, M15 step 5 part C): `edisc-render-package/2` and zip packages
+Render packages are now format /2: anchor and seal bodies are `objects/<sha256>` entries listed by
+key, VersionId, SHA-256 and size, so the manifest can be built (and its hash audited) from the
+recorded hashes before any object is read; the manifest records each file's size and the seal time,
+never an export time. The download endpoint streams the package as a deterministic zip
+(`edisc_custody.zipwriter`), and `edisc-verify` verifies the zip in place with the hardened reader
+(`edisc_custody.package_source`), or the same files as a directory. /1 directories still verify.
+Details: ADR 0015 §19.
+
 ## Consequences
 - + Verification is reproducible by third parties with one command, air-gapped.
 - + Streaming reads: package size is not bounded by verifier memory (items are grouped by batch).

@@ -10,6 +10,7 @@ import json
 import sys
 from pathlib import Path
 
+from edisc_custody.archive import ArchiveError
 from edisc_custody.package import PackageFormatError, verify_package
 from edisc_custody.render_package import (
     RenderPackageReport,
@@ -23,7 +24,11 @@ def main(argv: list[str] | None = None) -> int:
         prog="edisc-verify",
         description="Verify an eDiscovery custody package without database access.",
     )
-    parser.add_argument("package", type=Path, help="directory produced by the custody export")
+    parser.add_argument(
+        "package",
+        type=Path,
+        help="directory produced by the custody export, or a render package (directory or zip)",
+    )
     parser.add_argument("--json", action="store_true", help="print the full report as JSON")
     parser.add_argument(
         "--archive",
@@ -82,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
 def _render(package: Path, files: list[Path], job: Path | None, *, as_json: bool) -> int:
     try:
         report: RenderPackageReport = verify_render_package(package, files, job)
-    except (OSError, PackageFormatError, KeyError, ValueError) as exc:
+    except (OSError, PackageFormatError, KeyError, ValueError, ArchiveError) as exc:
         sys.stderr.write(f"edisc-verify: cannot read package: {exc}\n")
         return 2
     if as_json:

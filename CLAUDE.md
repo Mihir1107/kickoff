@@ -79,7 +79,7 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Layout/tier rules: `edisc_connector_slack_export.layout`. Format details marked *(confirm on real
   export)* in ADR 0014 stay provisional until the real exports are fixtures.
 
-## RSMF renders (M15, ADR 0015; steps 1-4 done; step 5: corpus + crash matrix done, package download next)
+## RSMF renders (M15, ADR 0015; steps 1-5 done; next: §11 oversized attachments as natives)
 - Renders read normalized items and derivations, never raw pages (raw evidence only to embed file
   bytes, by pinned version). The renderer `edisc_renderers.rsmf` is pure (no DB/S3/clock imports; a
   test enforces it). A worker loader builds `SliceInput`s and streams evidence through a `FileOpener`.
@@ -130,7 +130,14 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   `require_recent_sign_in` is the ADR 0016 §4 hook (no-op until M17). The generic evidence content
   endpoint never serves `production` rows. Render anchors and productions carry `render_id`;
   retention resolves render -> job -> matter. `edisc-verify` verifies render packages
-  (`edisc-render-package/1`, `--file`, `--job-package`).
+  (`edisc-render-package/2`, /1 still accepted; a directory or the zip in place; `--file`,
+  `--job-package`).
+- Package download (`GET /v1/renders/{id}/package`, ADR 0015 §19): manifest from the records first
+  (`plan_render_package`, no object read), audit committed AND force-anchored (`audit.anchor_now`)
+  before any byte, then ONE streaming pass (`package_members`, shared with the directory export)
+  that checks every entry against the manifest and aborts with `audit.render_package_aborted` + an
+  alert. Zips only through `edisc_custody.zipwriter` (STORED, fixed metadata, data descriptor with
+  the streamed CRC on every entry, ZIP64 where needed); two downloads must be byte-identical.
 - Every manifest is validated against the vendored `rsmf_schema_2_0_0.json` (SHA-256 pinned, format
   checks on). The Relativity validator is not used until the licence is confirmed.
 

@@ -48,6 +48,8 @@ jobs:
         with:
           node-version: "24"
       - run: uv sync --all-packages --locked
+      # other unzippers the package zip must open (ADR 0015 §19); the tests fail in CI without them
+      - run: command -v 7z && command -v unzip || (sudo apt-get update && sudo apt-get install -y p7zip-full unzip)
       - run: uv run pytest tests/unit
 
   integration:
@@ -61,6 +63,7 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
       - run: uv sync --all-packages --locked
+      - run: command -v 7z && command -v unzip || (sudo apt-get update && sudo apt-get install -y p7zip-full unzip)
       # fresh ephemeral stack (project edisc-test, EDISC_ENV=test), destroyed after the run;
       # hosted runners have ~14 GB free, enough for the CI service subset
       - run: make test-integration MIN_FREE_GB=8
