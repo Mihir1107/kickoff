@@ -30,7 +30,7 @@ from edisc_custody.archive import (
     scan,
 )
 from edisc_custody.package_source import PACKAGE_LIMITS, ZipSource, read_all
-from edisc_custody.zipwriter import MAX32, ZipMember, ZipSizeError, ZipSizer, zip_stream
+from edisc_custody.zipwriter import MAX16, MAX32, ZipMember, ZipSizeError, ZipSizer, zip_stream
 
 
 def member(name: str, data: bytes, *, declared: int | None = None, pieces: int = 3) -> ZipMember:
@@ -352,3 +352,38 @@ async def test_more_than_4_gib_through_a_hashing_sink() -> None:
         assert h.hexdigest() == want
         assert zf.read("tail.txt") == tail
         assert zf.getinfo("tail.txt").header_offset > MAX32
+
+
+# ------------------------------------------------------------------ needs_zip64 (ADR 0015 §20.11)
+def _sizer(entries: list[tuple[str, int]]) -> ZipSizer:
+    s = ZipSizer()
+    for name, size in entries:
+        s.add(name, size)
+    return s
+
+
+def test_needs_zip64_by_entry_count() -> None:
+    assert not _sizer([(f"{i:05d}", 0) for i in range(MAX16 - 1)]).needs_zip64()
+    assert _sizer([(f"{i:05d}", 0) for i in range(MAX16)]).needs_zip64()
+
+
+def test_needs_zip64_by_size_is_exact_at_the_directory_end() -> None:
+    """The directory must END below 0xFFFFFFFF: the largest entry that allows it fits, one more
+    byte does not (and an entry of 0xFFFFFFFF bytes needs ZIP64 by itself)."""
+    base = _sizer([("a.bin", 0)])
+    fits = MAX32 - 1 - (base.offset + base.cd_size)
+    exact = _sizer([("a.bin", fits)])
+    assert exact.offset + exact.cd_size == MAX32 - 1 and not exact.needs_zip64()
+    assert _sizer([("a.bin", fits + 1)]).needs_zip64()
+    assert _sizer([("a.bin", MAX32)]).needs_zip64()
+    # a later entry whose OFFSET would not fit
+    assert _sizer([("a.bin", MAX32 - 100), ("b.bin", 0)]).needs_zip64()
+
+
+async def test_needs_zip64_agrees_with_what_the_writer_writes() -> None:
+    """Without ZIP64 needed, the writer emits no ZIP64 record; at 65,535 entries it must."""
+    for count in (MAX16 - 1, MAX16):
+        names = [f"{i:05d}" for i in range(count)]
+        data = await build([member(n, b"") for n in names])
+        has_zip64 = struct.pack("<I", 0x06064B50) in data[-200:]
+        assert has_zip64 == _sizer([(n, 0) for n in names]).needs_zip64(), count

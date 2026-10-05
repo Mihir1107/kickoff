@@ -79,7 +79,7 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Layout/tier rules: `edisc_connector_slack_export.layout`. Format details marked *(confirm on real
   export)* in ADR 0014 stay provisional until the real exports are fixtures.
 
-## RSMF renders (M15, ADR 0015; steps 1-5 done; next: §11 oversized attachments as natives)
+## RSMF renders (M15, ADR 0015; steps 1-5 and §11 natives done, renderer 1.3.0)
 - Renders read normalized items and derivations, never raw pages (raw evidence only to embed file
   bytes, by pinned version). The renderer `edisc_renderers.rsmf` is pure (no DB/S3/clock imports; a
   test enforces it). A worker loader builds `SliceInput`s and streams evidence through a `FileOpener`.
@@ -93,8 +93,15 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   regression guards; correctness comes from oracles. The render corpus (`tests/integration/corpus`,
   oracle + coverage matrix + masked goldens via `EDISC_RECORD_CORPUS=1`) and the render crash matrix
   must stay green; a dummy connector change bumps its version and records new generations.
-- Oversized attachments leave the zip as natives referenced by hash (ADR 0015 §11, not yet built);
-  until then `ZipLimitError` refuses the render up front.
+- Natives (ADR 0015 §11, §20, §21): an attachment over `RenderOptions.external_over_bytes` (part of the
+  render identity, 1 MiB..4 GiB, never from settings), then the largest while `ZipSizer.needs_zip64()`,
+  leaves the zip as `{file_id}_EXTERNAL.txt` (pinned bytes) + `edisc.file_external`; the renderer
+  never reads it. The entry count never externalizes: it splits parts (`MAX_PART_ENTRIES`). The
+  renderer writes zips only through `edisc_custody.zipwriter`. Natives are copied SERVER-SIDE from the
+  pinned evidence version (`EvidenceWriter.write_native`, content lock, one verification read), one
+  per (render, SHA-256), before the batch that first references them; `render_natives` + each
+  batch's `natives_root`. The file leaf and natives checks follow the renderer version in
+  `render_started` (`edisc_custody.render_files.has_natives`).
 - Reconciliation: every in-scope message appears as exactly ONE event across the render's files, plus
   marked context events. `Reconciler` fails loudly; the loader must pass `finish()` the count and
   `subject_digest` derived from the job's in-scope links, never from rendered output. Each referenced
@@ -130,15 +137,16 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   `require_recent_sign_in` is the ADR 0016 §4 hook (no-op until M17). The generic evidence content
   endpoint never serves `production` rows. Render anchors and productions carry `render_id`;
   retention resolves render -> job -> matter. `edisc-verify` verifies render packages
-  (`edisc-render-package/2`, /1 still accepted; a directory or the zip in place; `--file`,
-  `--job-package`).
+  (`edisc-render-package/3` with `natives.jsonl` and `natives/`, /1 and /2 still accepted; a directory
+  or the zip in place; `--file` for outputs and natives, `--job-package`); it reads each `.rsmf`'s
+  native references through `edisc_custody.rsmf_check`, never loading the file.
 - Package download (`GET /v1/renders/{id}/package`, ADR 0015 §19): manifest from the records first
   (`plan_render_package`, no object read), audit committed AND force-anchored (`audit.anchor_now`)
   before any byte, then ONE streaming pass (`package_members`, shared with the directory export)
   that checks every entry against the manifest and aborts with `audit.render_package_aborted` + an
   alert. Zips only through `edisc_custody.zipwriter` (STORED, fixed metadata, data descriptor with
   the streamed CRC on every entry, ZIP64 where needed); two downloads must be byte-identical.
-- Every route that returns evidence bytes (evidence content, render file, render package) commits its
+- Every route that returns evidence bytes (evidence content, render file, native, package) commits its
   audit AND calls `audit.anchor_now` before the response starts; tested at the first byte
   (`tests/integration/api/first_byte.py`). A new content route must do the same and add that test.
   `edisc-verify` is strict (unlisted files fail); `--tolerate-os-metadata` only for directories.

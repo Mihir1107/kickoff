@@ -62,6 +62,10 @@ class DatasetSpec(BaseModel):
     p_reply_same_day: float = 0.20
     p_reply_prev_day: float = 0.06
     p_file: float = 0.10
+    # file sizes: min + a deterministic share of span. The defaults keep every earlier spec's bytes;
+    # larger sizes put files over a render's native threshold (ADR 0015 §20)
+    file_size_min: int = Field(default=200, ge=0)
+    file_size_span: int = Field(default=3800, ge=1)
     # message kinds (0.3.0); conversation 0 also forces one of each (dataset docstring)
     p_broadcast: float = 0.10  # a reply also sent to the channel (subtype thread_broadcast)
     p_me_message: float = 0.03

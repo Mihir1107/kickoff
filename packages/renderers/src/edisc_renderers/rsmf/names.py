@@ -45,6 +45,12 @@ def attachment_name(file_id: str, original: str) -> str:
 PLACEHOLDER_SUFFIX = ".UNAVAILABLE.txt"
 
 
+def external_name(file_id: str) -> str:
+    """The text file that stands in for an attachment kept outside the zip (ADR 0015 §11, §20.12):
+    `F1_EXTERNAL.txt`. File ids are `[A-Za-z0-9_-]`, so the name is always safe."""
+    return f"{file_id}_EXTERNAL.txt"
+
+
 def placeholder_name(file_id: str, original: str) -> str:
     """The attachment's own safe name plus `.UNAVAILABLE.txt`, still within 200 bytes:
     `F1_report.pdf.UNAVAILABLE.txt`."""

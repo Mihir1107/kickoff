@@ -19,11 +19,14 @@ from edisc_custody.archive import (
     ArchiveErrorCode,
     ArchiveLimits,
     Entry,
+    data_offset,
     fold_name,
     iter_central_directory,
     locate_directory,
     open_entry,
 )
+
+STORED = 0
 
 CHUNK = 1 << 20
 
@@ -97,8 +100,23 @@ class _FileRange:
         self._fh.seek(offset)
         return self._fh.read(length)
 
+    def read_now(self, offset: int, length: int) -> bytes:
+        self._fh.seek(offset)
+        return self._fh.read(length)
+
     def close(self) -> None:
         self._fh.close()
+
+
+class StoredRange:
+    """Synchronous random access to the bytes of one STORED zip entry (``size`` from its record)."""
+
+    def __init__(self, src: _FileRange, start: int, size: int) -> None:
+        self._src, self._start, self.size = src, start, size
+
+    def read(self, offset: int, length: int) -> bytes:
+        length = max(0, min(length, self.size - offset))
+        return self._src.read_now(self._start + offset, length) if length else b""
 
 
 def _run[T](awaitable: Awaitable[T]) -> T:
@@ -164,6 +182,17 @@ class ZipSource:
                     return
         finally:
             _run(gen.aclose())
+
+    def stored_range(self, name: str) -> StoredRange:
+        """Random access to an entry's bytes, which must be STORED (as our writer writes them) and
+        lie before the next entry. Its CRC-32 and hash are checked when it is streamed (``chunks``)."""
+        entry = self._entries[name]
+        if entry.method != STORED or entry.compressed_size != entry.uncompressed_size:
+            raise ArchiveError(ArchiveErrorCode.METHOD, f"{name}: not stored")
+        start = _run(data_offset(self._src, entry, PACKAGE_LIMITS))
+        if start + entry.compressed_size > self._ends[name]:
+            raise ArchiveError(ArchiveErrorCode.OVERLAP, f"{name} overlaps the next entry")
+        return StoredRange(self._src, start, entry.compressed_size)
 
     def close(self) -> None:
         self._src.close()

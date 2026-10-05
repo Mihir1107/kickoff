@@ -17,6 +17,11 @@ from edisc_renderers.rsmf.runtime import UnknownZoneError, load_zone
 RENDER_CAP = 10_000
 """At most this many events per file, context events included (ADR 0015 §2)."""
 
+EXTERNAL_OVER_BYTES = 1 << 30
+"""Default policy threshold (ADR 0015 §20.1): an attachment of MORE bytes leaves the zip as a native."""
+EXTERNAL_OVER_MIN = 1 << 20
+EXTERNAL_OVER_MAX = 4 << 30
+
 SlackConversationType = Literal["im", "mpim", "public_channel", "private_channel"]
 CompletenessBasis = Literal["source", "archive"]
 
@@ -45,7 +50,8 @@ class EvidenceMismatchError(RenderError):
 
 
 class ZipLimitError(RenderError):
-    """The zip would need ZIP64 (over 4 GiB or 65,535 entries). Not supported in M15."""
+    """The zip would need ZIP64 even with every attachment moved out (ADR 0015 §20.11): only the
+    manifest itself could do that, so it never happens for real inputs."""
 
 
 @dataclass(frozen=True)
@@ -201,15 +207,26 @@ class JobInfo:
 
 @dataclass(frozen=True)
 class RenderOptions:
-    """Recorded in the render's custody stream (ADR 0015 §7)."""
+    """Recorded in the render's custody stream (ADR 0015 §7). Part of the render's identity (the
+    options hash), so nothing here may come from worker settings."""
 
     include_context: bool = True
     time_zone: str = "UTC"
     cap: int = RENDER_CAP
+    # an attachment of more bytes is always a native outside the zip (ADR 0015 §20.1)
+    external_over_bytes: int = EXTERNAL_OVER_BYTES
 
     def __post_init__(self) -> None:
         if not 2 <= self.cap <= RENDER_CAP:  # a reply plus its context root must fit in a file
             raise RenderInputError(f"cap must be within 2..{RENDER_CAP}")
+        if (
+            isinstance(self.external_over_bytes, bool)
+            or not isinstance(self.external_over_bytes, int)
+            or not EXTERNAL_OVER_MIN <= self.external_over_bytes <= EXTERNAL_OVER_MAX
+        ):
+            raise RenderInputError(
+                f"external_over_bytes must be an integer within {EXTERNAL_OVER_MIN}..{EXTERNAL_OVER_MAX}"
+            )
         self.zone()
 
     def zone(self) -> tzinfo:
@@ -224,6 +241,7 @@ class RenderOptions:
             "include_context": self.include_context,
             "time_zone": self.time_zone,
             "cap": self.cap,
+            "external_over_bytes": self.external_over_bytes,
         }
 
 

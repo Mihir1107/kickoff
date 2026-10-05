@@ -4,6 +4,7 @@ through the render steps, check against the oracle, the structural EML checks, a
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,6 +12,7 @@ from pathlib import Path
 import pytest
 from types_aiobotocore_s3 import S3Client
 
+import edisc_renderers.rsmf.render as render_module
 from edisc_connector_dummy.connector import DummyConnector, scope_for_days
 from edisc_connector_dummy.dataset import Dataset
 from edisc_connectors_base.types import CollectionScope, Connection
@@ -24,7 +26,7 @@ from ...unit.dummy.conftest import RecordingLimiter
 from ..normalizer.harness import Sessions, Tenant, new_tenant
 from ..renders.conftest import drive, new_render, render_state
 from .cases import CASES, LIVE, Case, real_exports
-from .check import check_against_oracle, check_golden, check_package, stored
+from .check import check_against_oracle, check_golden, check_package, stored, stored_natives
 from .oracle import COVERAGE, build
 
 
@@ -67,9 +69,12 @@ async def collect(
 
 @pytest.mark.parametrize("name", sorted(LIVE))
 async def test_live_case(
-    app_sessions: Sessions, s3: S3Client, settings: Settings, tmp_path: Path, name: str
-) -> None:
+    app_sessions: Sessions, s3: S3Client, settings: Settings, tmp_path: Path, name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # fmt: skip
     case = LIVE[name]
+    if case.entry_limit is not None:  # read by the renderer at call time; renders run in-process
+        monkeypatch.setattr(render_module, "MAX_PART_ENTRIES", case.entry_limit)
     rs = settings.model_copy(update={"render_files_batch_size": case.batch_size})
     oracle = build(case)
     t = await new_tenant(app_sessions)
@@ -83,6 +88,21 @@ async def test_live_case(
     if case.expect_files is not None:  # the batch boundary: ceil(files / B) batch events
         batches = st["types"].count("render_files_batch")
         assert batches == -(-case.expect_files // case.batch_size)
+    if case.entry_limit is not None:
+        assert all(r["attachment_count"] <= case.entry_limit - 1 for r, _ in files)
+        assert any(r["parts"] > 1 for r, _ in files), "the entry limit split a slice"
+    # natives: one per SHA-256, its bytes the collected file's, every reference accounted for
+    natives = await stored_natives(app_sessions, s3, rs, t.tenant_id, render_id)
+    referenced = {
+        v.split("sha256:", 1)[1]
+        for m in manifests.values()
+        for e in m["events"]
+        for p in e.get("custom", [])
+        if p["name"] == "edisc.file_external"
+        for v in [p["value"]]
+    }
+    assert set(natives) == referenced
+    assert all(hashlib.sha256(data).hexdigest() == sha for sha, data in natives.items())
     check_golden(name, manifests)
     await check_package(app_sessions, s3, rs, t.tenant_id, render_id, tmp_path / "pkg")
 

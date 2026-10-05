@@ -548,8 +548,26 @@ async def verify_chain(
                             f"render file {f.ord}: columns {columns} disagree with its record {recorded}"
                         )
                     files[f.custody_event_id].append(rec)
+            natives: dict[uuid.UUID, list[dict[str, Any]]] = {i: [] for i in file_batches}
+            if file_batches:
+                native_rows = await session.execute(
+                    text(
+                        "SELECT custody_event_id, ord, sha256, size_bytes, storage_key, version_id,"
+                        " file_ords FROM render_natives WHERE custody_event_id = ANY(:ids) ORDER BY ord"
+                    ),
+                    {"ids": file_batches},
+                )
+                for n in native_rows:
+                    natives[n.custody_event_id].append(
+                        {"ord": n.ord, "sha256": n.sha256, "size": n.size_bytes,
+                         "storage_key": n.storage_key, "version_id": n.version_id,
+                         "file_ords": list(n.file_ords)}
+                    )  # fmt: skip
             for row in rows:
-                verifier.add_event(event_record_from_row(row), items.get(row.id), files.get(row.id))
+                verifier.add_event(
+                    event_record_from_row(row), items.get(row.id), files.get(row.id),
+                    natives.get(row.id),
+                )  # fmt: skip
             after = rows[-1].seq
     expected_head = (head.last_seq, head.last_hash) if head is not None else None
     seal = bool(finished) if require_seal is None else require_seal

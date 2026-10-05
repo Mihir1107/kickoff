@@ -27,6 +27,7 @@ COPY_OVERRIDES = {
     "export_day_files": "'export_id', gen_random_uuid()",
     "export_threads": "'export_id', gen_random_uuid()",
     "render_files": "'render_id', gen_random_uuid()",
+    "render_natives": "'ord', 99",
 }
 UPDATABLE = {
     "matters": "name",

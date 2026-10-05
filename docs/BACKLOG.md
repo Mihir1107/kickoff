@@ -62,14 +62,11 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - Slack exports: a 5 GB streaming archive ingestion run with memory measured (ADR 0014 section 3), on the
   same cloud VM as the 1M soak (laptop disk too small to keep it next to the test stack). The reader's
   bounded memory is already tested on a 3M-entry synthetic directory and by fuzzing.
-- **[required before production, ahead of ZIP64]** RSMF oversized attachments as separate natives in
-  the render package, referenced by hash (design: ADR 0015 §11; implement after M15 step 5).
-- RSMF renders over 4 GiB or 65,535 zip entries with ZIP64 in `edisc_renderers.rsmf.zipstream`.
-  After §11, only a manifest or placeholder set that is itself too large would need it.
-- At the next `RENDERER_VERSION` bump: unify the renderer's zip writer (`edisc_renderers.rsmf.zipstream`)
-  with `edisc_custody.zipwriter` (one deterministic STORED writer with ZIP64; the renderer's in-memory
-  entries then also take a data descriptor, which changes `rsmf.zip` bytes, hence only with a bump and
-  new golden generations). ADR 0015 §19.6. Scheduled: done by the §11 build (renderer 1.3.0, ADR 0015 §20.11).
+- RSMF renders that would need ZIP64 in a part's `rsmf.zip`: since §11 (renderer 1.3.0) attachments
+  leave the zip as natives and the entry count splits parts, so only a manifest that is itself near
+  4 GiB could still need it (it raises `ZipLimitError`). Not expected for Slack; revisit only if seen.
+- A real multi-GB native (server-side copy of a 4 GiB+ file, the verification read, a package over
+  4 GiB with natives embedded) measured on the cloud VM with the 1M soak (ADR 0015 §20.8).
 - Cross-render native dedupe for oversized attachments (one native per matter and SHA-256, shared by
   renders instead of one copy per render): measure the storage and server-side copy cost on the cloud
   VM first (ADR 0015 §20.13).

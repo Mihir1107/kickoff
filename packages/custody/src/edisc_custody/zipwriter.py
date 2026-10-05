@@ -120,17 +120,33 @@ class ZipSizer:
 
     def __init__(self) -> None:
         self.offset = self.cd_size = self.count = 0
+        self.largest = self.last_offset = 0
 
     def add(self, name: str, size: int) -> None:
         raw = name.encode("utf-8")
         self.cd_size += len(_central_record(raw, 0, size, self.offset))
         descriptor = _DESCRIPTOR64.size if needs_zip64(size) else _DESCRIPTOR.size
+        self.last_offset = self.offset
+        self.largest = max(self.largest, size)
         self.offset += len(_local_header(raw, size)) + size + descriptor
         self.count += 1
 
     def total(self) -> int:
         end = _end_records(self.count, self.cd_size, self.offset)
         return self.offset + self.cd_size + len(end)
+
+    def needs_zip64(self) -> bool:
+        """Whether any part of the archive needs ZIP64 (ADR 0015 §20.11): an entry of 0xFFFFFFFF
+        bytes or more, an entry offset, the directory's size, offset or end at 0xFFFFFFFF or more,
+        or 65,535 entries or more (0xFFFF in the end record means "see ZIP64")."""
+        return (
+            self.largest >= MAX32
+            or self.last_offset >= MAX32
+            or self.cd_size >= MAX32
+            or self.offset >= MAX32  # the directory's offset
+            or self.offset + self.cd_size >= MAX32  # the directory's end
+            or self.count >= MAX16
+        )
 
 
 def _central_record(name: bytes, crc: int, size: int, offset: int) -> bytes:

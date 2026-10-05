@@ -63,6 +63,30 @@ async def stored(
     return out
 
 
+async def stored_natives(
+    sessions: Sessions, s3: S3Client, settings: Settings, tenant_id: uuid.UUID, render_id: uuid.UUID
+) -> dict[str, bytes]:
+    async with tenant_tx(sessions, tenant_id) as s:
+        rows = (
+            await s.execute(
+                text(
+                    "SELECT sha256, storage_key, version_id FROM render_natives WHERE render_id = :r"
+                    " ORDER BY ord"
+                ),
+                {"r": render_id},
+            )
+        ).all()
+    out = {}
+    for r in rows:
+        assert r.sha256 not in out, "one native per SHA-256"
+        resp = await s3.get_object(
+            Bucket=settings.s3_evidence_bucket, Key=r.storage_key, VersionId=r.version_id
+        )
+        async with resp["Body"] as body:
+            out[r.sha256] = await body.read()
+    return out
+
+
 def check_against_oracle(
     case: Case,
     oracle: RenderOracle,
@@ -116,6 +140,9 @@ def check_against_oracle(
             held = {i for i in ids if not i.endswith(".UNAVAILABLE.txt")}
             assert {i.split("_", 1)[0] for i in held} == set(want.files), where
             assert {i.split("_", 1)[0] for i in ids - held} == set(want.unavailable), where
+            outside = {i.removesuffix("_EXTERNAL.txt") for i in ids if i.endswith("_EXTERNAL.txt")}
+            assert outside == set(want.external), where
+            assert {v.split(": ", 1)[0] for v in c.get("edisc.file_external", [])} == outside, where
             if want.subtype in ("thread_broadcast", "reply_broadcast"):
                 assert c.get("slack.subtype") == [want.subtype], where
             if want.root is None or not case.check_threads:

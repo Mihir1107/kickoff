@@ -15,6 +15,10 @@
   built from the records first; ``audit.render_package_read`` (with the manifest's SHA-256) is committed
   and ANCHORED before any byte; then one streaming pass checks every entry against the manifest. A
   mismatch aborts the stream, records ``audit.render_package_aborted`` and raises an alert.
+- **Natives** (ADR 0015 §11, §20): attachments kept outside the ``.rsmf`` zips. ``GET
+  /v1/renders/{id}/natives`` lists them (``custody.read``); ``GET .../natives/{sha256}/content``
+  (``export.read``) is audited and the audit anchored BEFORE any byte, read by pinned version and
+  re-hashed as it streams, like a file download.
 """
 
 from __future__ import annotations
@@ -51,6 +55,7 @@ from edisc_custody.zipwriter import ZipSizeError, zip_stream
 from edisc_db.session import tenant_tx
 from edisc_evidence.writer import EvidenceWriter
 from edisc_renderers.rsmf import RenderInputError, RenderOptions
+from edisc_renderers.rsmf.model import EXTERNAL_OVER_BYTES, EXTERNAL_OVER_MAX, EXTERNAL_OVER_MIN
 from edisc_worker.renders import create_render, options_hash, start_render_workflow
 
 router = APIRouter(prefix="/v1")
@@ -63,6 +68,10 @@ class Strict(BaseModel):
 class RenderIn(Strict):
     time_zone: str = Field(default="UTC", min_length=1, max_length=64)
     include_context: bool = True
+    # an attachment of more bytes is delivered as a native next to the `.rsmf` (ADR 0015 §20.1)
+    external_over_bytes: int = Field(
+        default=EXTERNAL_OVER_BYTES, ge=EXTERNAL_OVER_MIN, le=EXTERNAL_OVER_MAX, strict=True
+    )
 
 
 class EpisodeOut(Strict):
@@ -129,6 +138,15 @@ class RenderFileOut(Strict):
     context_event_count: int
     attachment_count: int
     unavailable_count: int
+    external_count: int | None  # attachments kept outside the zip (None before renderer 1.3.0)
+
+
+class RenderNativeOut(Strict):
+    ord: int
+    sha256: str
+    size: int
+    version_id: str
+    file_ords: list[int]  # the output files that reference it
 
 
 class RenderVerifyOut(Strict):
@@ -256,7 +274,11 @@ async def create_render_route(
     idempotency_key: IdempotencyKey = None,
 ) -> RenderOut:
     try:
-        options = RenderOptions(include_context=body.include_context, time_zone=body.time_zone)
+        options = RenderOptions(
+            include_context=body.include_context,
+            time_zone=body.time_zone,
+            external_over_bytes=body.external_over_bytes,
+        )
     except RenderInputError as exc:
         raise unprocessable(str(exc)) from exc
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
@@ -385,6 +407,7 @@ async def list_render_files(
             context_event_count=r.record["context_event_count"],
             attachment_count=r.record["attachment_count"],
             unavailable_count=r.record["unavailable_count"],
+            external_count=r.record.get("external_count"),
         )
         for r in rows
     ]
@@ -485,6 +508,121 @@ async def render_file_content(
         headers={
             "x-evidence-sha256": f.sha256,
             "content-disposition": f'attachment; filename="{f.name}"',
+            "cache-control": "no-store",
+        },
+    )
+
+
+@router.get(
+    "/renders/{render_id}/natives",
+    response_model=Page[RenderNativeOut],
+    openapi_extra=perm(P.CUSTODY_READ),
+)
+async def list_render_natives(
+    render_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, cursor: CursorQ = None,
+    limit: LimitQ = 50,
+) -> Page[RenderNativeOut]:  # fmt: skip
+    raw = decode_text(cursor)
+    try:
+        after = int(raw) if raw is not None else -1
+    except ValueError as exc:
+        raise unprocessable("invalid cursor") from exc
+    async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        await _authorize_render(s, caller, P.CUSTODY_READ, render_id)
+        rows = (
+            await s.execute(
+                text(
+                    "SELECT ord, sha256, size_bytes, version_id, file_ords FROM render_natives"
+                    " WHERE render_id = :r AND ord > :a ORDER BY ord LIMIT :n"
+                ),
+                {"r": render_id, "a": after, "n": limit + 1},
+            )
+        ).all()
+    natives = [
+        RenderNativeOut(
+            ord=r.ord,
+            sha256=r.sha256,
+            size=r.size_bytes,
+            version_id=r.version_id,
+            file_ords=list(r.file_ords),
+        )
+        for r in rows
+    ]
+    more = len(natives) > limit
+    natives = natives[:limit]
+    return Page[RenderNativeOut](
+        items=natives, next_cursor=encode_text(str(natives[-1].ord)) if more else None
+    )
+
+
+@router.get("/renders/{render_id}/natives/{sha256}/content", openapi_extra=perm(P.EXPORT_READ))
+async def render_native_content(
+    render_id: uuid.UUID,
+    sha256: Annotated[str, Path(pattern="^[0-9a-f]{64}$")],
+    caller: CallerDep,
+    res: ResourcesDep,
+    rid: RequestIdDep,
+) -> StreamingResponse:
+    """One native of a completed render. The audit event is committed (and anchored) BEFORE any byte;
+    the bytes come from the pinned version and are re-hashed as they stream."""
+    async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        row = await _authorize_render(s, caller, P.EXPORT_READ, render_id)
+        if row.status != "completed":
+            raise conflict(f"the render is {row.status}: only completed renders are downloaded")
+        n = (
+            await s.execute(
+                text(
+                    "SELECT n.ord, n.evidence_object_id, n.sha256, n.size_bytes, n.version_id,"
+                    " e.sha256 AS registry_sha, e.version_id AS registry_version FROM render_natives n"
+                    " JOIN evidence_objects e ON e.id = n.evidence_object_id"
+                    " WHERE n.render_id = :r AND n.sha256 = :h AND e.state = 'complete'"
+                ),
+                {"r": render_id, "h": sha256},
+            )
+        ).one_or_none()
+        if n is None:
+            raise not_found()
+        if (n.registry_sha, n.registry_version) != (n.sha256, n.version_id):
+            raise ApiError(409, "integrity", "the registry disagrees with the render's record")
+        read = await audit.record(
+            s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="render_native_read",
+            payload={"render_id": str(render_id), "job_id": str(row.job_id),
+                     "matter_id": str(row.matter_id), "ord": n.ord,
+                     "evidence_id": str(n.evidence_object_id), "sha256": n.sha256,
+                     "size": n.size_bytes, "purpose": "native"},
+            request_id=rid,
+        )  # fmt: skip
+    # committed AND anchored (forced, checked to cover the read) before any byte
+    await audit.anchor_now(res.sessions, res.s3, res.settings, caller.tenant_id, read)
+    writer = EvidenceWriter(res.sessions, res.s3, res.settings)
+
+    async def body() -> AsyncIterator[bytes]:
+        digest, size = hashlib.sha256(), 0
+        async for chunk in writer.open(
+            tenant_id=caller.tenant_id, evidence_id=n.evidence_object_id
+        ):
+            digest.update(chunk)
+            size += len(chunk)
+            yield chunk
+        if (digest.hexdigest(), size) != (n.sha256, n.size_bytes):
+            async with tenant_tx(res.sessions, caller.tenant_id) as s:
+                await s.execute(
+                    text(
+                        "INSERT INTO alerts (id, tenant_id, kind, job_id, message)"
+                        " VALUES (:i, :t, 'production_mismatch', :j, :m)"
+                    ),
+                    {"i": new_id(), "t": caller.tenant_id, "j": row.job_id,
+                     "m": f"render {render_id} native {sha256}: stored bytes differ from the record"},
+                )  # fmt: skip
+            raise RuntimeError(f"render {render_id} native {sha256}: bytes differ from the record")
+
+    return StreamingResponse(
+        body(),
+        media_type="application/octet-stream",
+        headers={
+            "x-evidence-sha256": n.sha256,
+            "content-length": str(n.size_bytes),
+            "content-disposition": f'attachment; filename="{n.sha256}"',
             "cache-control": "no-store",
         },
     )

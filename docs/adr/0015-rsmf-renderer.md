@@ -293,7 +293,7 @@ items below (3, 4 and 7 were the gaps filled in code).
    (`EvidenceMismatchError`).
 10. **Runtime dependence:** pinned and recorded (§6).
 
-## 11. Oversized attachments (decided 2026-10-04; implement after step 5, required before production)
+## 11. Oversized attachments (decided 2026-10-04; built 2026-10-05 as renderer 1.3.0, see §20 and §21)
 An attachment must never fail a render because the zip would get too large. Oversized attachments
 leave the zip and travel next to it. This comes ahead of ZIP64, which stays in the backlog.
 
@@ -696,9 +696,9 @@ Review round (2026-10-05, after part C):
     seal is taken from the records (`render_started` + registry) and checked when streamed; a
     mismatch there aborts the download (§19.5).
 
-## 20. Plan for §11, oversized attachments as separate natives (2026-10-05, APPROVED with changes, not built)
+## 20. Plan for §11, oversized attachments as separate natives (2026-10-05, APPROVED with changes, built: §21)
 Refines §11 into a buildable plan. Approved 2026-10-05 with the changes in 9-13 below, which
-override 1-8 where they differ. Nothing here is built.
+override 1-8 where they differ. Built 2026-10-05; the implementation notes are §21.
 
 1. **Threshold and who sets it.** Two rules, both from data the render records, never from worker
    settings (two workers with different settings must not give different bytes for one identity):
@@ -802,4 +802,75 @@ Review decisions (2026-10-05), overriding the plan above where they differ:
     renderer goldens (whole `rsmf.zip` bytes) and by a unit test on the exact bytes.
 13. **Backlog:** cross-render native dedupe (one native object per matter and SHA-256 shared by
     renders), after measuring the storage and copy cost on the cloud VM.
+
+## 21. Implementation notes, §11 natives (2026-10-05, renderer 1.3.0, for review)
+Built as §20 says (9-13 over 1-8). Where §20 left a choice open or did not match the code, this is
+what was done and why.
+
+1. **Entry budget.** §20.10 counts `F = 2` fixed entries ("the manifest and the EML"), but the EML is
+   the envelope, not a zip entry: the zip's only fixed entry is the manifest. Separately, 65,535
+   entries already needs ZIP64 (0xFFFF in the end record means "see ZIP64"), so the largest zip
+   without ZIP64 has 65,534 entries. Implemented as `MAX_PART_ENTRIES = 65,534` minus
+   `FIXED_ENTRIES = 1`: at most 65,533 attachments and placeholders per part, which is exactly the
+   `65,535 - F` of §20.10. The constant is read at call time so tests lower it.
+2. **`needs_zip64()`** on `ZipSizer`: an entry of 0xFFFFFFFF bytes or more, the last entry's offset,
+   the directory's size, offset or END at 0xFFFFFFFF or more, or 65,535 entries or more. Exact at
+   the directory end (tested both sides, and against what the writer emits at 65,534 / 65,535).
+3. **Selection.** "Over the threshold" is strictly greater (exactly at it stays). The policy pass
+   runs first; then, while the planned zip needs ZIP64, the largest attachment still inside leaves
+   (ties by file id ascending), re-planning the manifest each time (its size depends on the
+   placeholders). Placeholder reasons: `over_external_threshold` / `exceeds_rsmf_zip_limit`.
+   `ZipLimitError` remains only for a zip whose manifest alone would need ZIP64.
+4. **Placeholder bytes** as §20.12, plus one rule §20.12 did not state: control characters, line
+   and paragraph separators and lone surrogates in the name are written as `\uXXXX`, so a name cannot
+   break the one-field-per-line layout (the manifest's `display` keeps the exact name). The `.rsmf`
+   summary gains one line when a file has natives. `X-RSMF-SourceHash` still covers the file item.
+5. **Threshold bounds** (1 MiB .. 4 GiB) are enforced by `RenderOptions` itself, not only the API, so
+   tests cannot use tiny files. The dummy connector gained `file_size_min` / `file_size_span` (defaults
+   reproduce every existing spec byte for byte: the dummy golden is unchanged, so no connector version
+   bump, per `tests/golden/README.md`); natives tests use files of 768 KiB .. 1.25 MiB against 1 MiB.
+6. **Native copy** (`EvidenceWriter.write_native`): always CreateMultipartUpload + UploadPartCopy in
+   `evidence_copy_part_size_bytes` ranges from the pinned source VersionId + Complete (abort on any
+   failure), under the content lock and the copy timeout. Registry row first, with the expected
+   hash as `source_sha256` origin `render` (the DB allows only `render` on productions). Resume: one
+   stored version is verified and completed; none is copied after aborting EVERY open multipart
+   upload at the key (listed from S3: `upload_id` is write-once, so a retry's upload is not
+   recorded, and a kill before recording leaves one too); more than one version is an incident.
+   Only `file` evidence (whole objects) can be a native; anything else fails as an input integrity
+   error. Crash seams: `native_parts_copied`, `native_copied`, `native_verifying`, `native_written`,
+   `natives_inserted`.
+7. **Custody.** `render_natives` (migration 0029: insert-only, FORCE RLS, deferred FK to the batch
+   event, storage key checked against tenant/render/SHA-256); `renders.native_count`/`natives_root`
+   (immutable once final). Native `ord` = order of first reference (file ord, then SHA-256);
+   `file_ords` = every file that references it, known from pass 1. Each `render_files_batch` of a
+   1.3.0 render carries `native_count`, `first_native_ord` and `natives_root` (the first two were not
+   in §20.4; they give natives the same position checks as files). `render_completed` carries
+   `native_count` and `natives_root` (over every native record). The verifier picks the file leaf
+   (with or without `external_count`) and the natives checks by the `renderer_version` in
+   `render_started`; natives in an older render are an error. The reconciler checks references
+   against the plan per file, and `check_natives` runs twice: in memory after pass 2 and against the
+   committed `render_natives` rows before the render becomes `rendered`.
+8. **Package `/3`.** `natives.jsonl` is always present (empty for a render without natives); entries
+   in order manifest, JSONL files, objects, `outputs/`, `natives/` (embedded only). The verifier
+   opens each `.rsmf` without loading it: `edisc_custody.rsmf_check` maps the hardened zip reader's
+   ranges onto the base64 lines (76 characters + CRLF, strict decoding), reads the manifest and each
+   `_EXTERNAL.txt` placeholder, and checks the referenced natives equal those whose records list the
+   file. In a zip package that needs the `.rsmf` entries STORED (ours always are); a re-compressed
+   package fails that check. The native content route sets `Content-Length`.
+9. **Tests.** Pure renderer (`tests/unit/renderers/test_externals.py`, 17), `needs_zip64`, native
+   records and the verifier's render checks, the `.rsmf` reader; renderer goldens 1.3.0 (with a case
+   whose files are all natives); corpus cases `externals`, `externals_context`, `entries_split`
+   (new coverage items: native, native next to an unavailable file in one `.rsmf`, native in a
+   context root, one native across slices, parts split by entries) and the 1.3.0 corpus goldens:
+   every pre-existing case's masked manifest projection is identical to 1.2.0 (only zip framing
+   changed). Worker: end to end, the crash matrix at every native seam, real SIGKILLs of the worker
+   process with the copy open and during the verification read, a shadow version at the source key
+   (the pinned version is copied), a second version at a native key, a copy that does not hash to
+   the source, natives missing from the batches, retention. Package attacks: altered, missing,
+   dropped from the records, unreferenced, re-attributed, stray. API: threshold validation and
+   identity, list and download, permissions, first byte, mismatch abort (download and package).
+   Mutation checks: 45 protections broken one at a time, all caught (one by hand: natives reach the
+   matter's retention by `job_id` AND `render_id`, so only cutting both is a real break).
+10. **Not done here:** a real multi-GB native (cloud VM, BACKLOG); cross-render native dedupe
+    (BACKLOG, measure first).
 

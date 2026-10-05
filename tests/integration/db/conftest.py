@@ -285,6 +285,17 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
             ids["event"],
         )
         await conn.execute(
+            "INSERT INTO render_natives (tenant_id, render_id, ord, sha256, size_bytes, storage_key,"
+            " version_id, file_ords, evidence_object_id, custody_event_id) VALUES ($1, $2, 0, $4, 1, $6,"
+            " 'v', '{0}', $3, $5)",
+            t,
+            render,
+            ids["ev"],
+            HEX,
+            ids["event"],
+            f"t/{t}/productions/{render}/natives/sha256/{HEX}",
+        )
+        await conn.execute(
             "INSERT INTO render_episodes (id, tenant_id, render_id, kind) VALUES ($1, $2, $3, 'unroutable')",
             new_id(),
             t,
@@ -356,6 +367,7 @@ TENANT_TABLES = [
     "export_threads",
     "renders",
     "render_files",
+    "render_natives",
     "render_episodes",
 ]
 ALL_TABLES = ["tenants", *TENANT_TABLES]

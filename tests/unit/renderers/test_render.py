@@ -22,6 +22,7 @@ from edisc_renderers.rsmf import (
 )
 from edisc_renderers.rsmf.slicing import slice_bounds, slice_day
 from edisc_renderers.rsmf.version import RENDERER_VERSION
+from edisc_renderers.rsmf.zipstream import ZipEntry, check_limits
 from tests.unit.renderers.builders import (
     JOB,
     attachment,
@@ -349,13 +350,17 @@ def test_evidence_bytes_are_verified_while_streaming() -> None:
             b"".join(f.stream(opener_for({"F1": wrong})))
 
 
-def test_zip64_sizes_fail_before_any_byte() -> None:
+def test_zip64_sizes_never_fail_the_render_and_the_writer_refuses_them() -> None:
+    """An attachment over 4 GiB leaves the zip (ADR 0015 §11); the writer's own check stays as the
+    safety net and refuses a zip that would need ZIP64 before any byte."""
     big = FileAttachment("F1", "huge.bin", 5 * 2**30, "0" * 64, ref("T0TEST/file/F1"), "F1")
+    [f] = render_slice(
+        slice_input(DAY, [msg("2026-01-05T09:00:00Z", files=("F1",))], files={"F1": big}),
+        RenderOptions(),
+    )
+    assert [a.file_id for a in f.externals] == ["F1"]
     with pytest.raises(ZipLimitError):
-        render_slice(
-            slice_input(DAY, [msg("2026-01-05T09:00:00Z", files=("F1",))], files={"F1": big}),
-            RenderOptions(),
-        )
+        check_limits([ZipEntry("F1_huge.bin", file=big)])
 
 
 def test_options_are_validated() -> None:

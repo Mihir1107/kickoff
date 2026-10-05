@@ -146,7 +146,7 @@ async def test_downloaded_packages_verify_and_are_byte_identical(
         (tmp_path / f"{mode}.zip").write_bytes(resp.content)
     code, out = _cli(tmp_path / "embed.zip")
     assert code == 0, out
-    assert f"{render['file_count']} output files re-hashed" in out
+    assert f"{render['file_count']} output files and 0 natives re-hashed" in out
     # reference mode: the expert supplies the outputs (here, fetched one by one through the API)
     supplied: list[str | Path] = []
     async with api.client(tenant.subdomain, tenant.token(api.settings)) as c:

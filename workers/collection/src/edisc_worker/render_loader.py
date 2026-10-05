@@ -659,6 +659,29 @@ class RenderLoader:
             )
         return data
 
+    # ------------------------------------------------------------------ natives (ADR 0015 §20.9)
+    async def native_source(self, f: FileAttachment) -> tuple[str, str]:
+        """(storage key, pinned VersionId) of a file kept outside the zip, for the server-side copy.
+        Only collected files (kind ``file``: whole objects) can be copied; the registry must still
+        hold the size and SHA-256 the renderer planned with."""
+        async with tenant_tx(self._sessions, self._tenant) as s:
+            ev = (
+                await s.execute(
+                    text(
+                        "SELECT kind, state, storage_key, version_id, sha256, size_bytes"
+                        " FROM evidence_objects WHERE id = :e"
+                    ),
+                    {"e": uuid.UUID(f.handle)},
+                )
+            ).one()
+        if ev.kind != "file" or ev.state != "complete" or not ev.version_id:
+            raise RenderInputIntegrityError(
+                f"file {f.file_id}: evidence {f.handle} is {ev.kind}/{ev.state}, not a pinned file"
+            )
+        if (ev.sha256, ev.size_bytes) != (f.sha256, f.size):
+            raise RenderInputIntegrityError(f"file {f.file_id}: registry and render plan disagree")
+        return str(ev.storage_key), str(ev.version_id)
+
     # ------------------------------------------------------------------ file bytes
     def opener(self) -> AsyncFileOpener:
         """Streams a file's evidence by pinned version; the renderer checks size and SHA-256."""

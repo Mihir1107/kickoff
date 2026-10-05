@@ -7,7 +7,11 @@ the planner's bookkeeping. It holds O(slices) state, not O(items):
 - exactly once across slices: each (conversation, day) is accepted once, and the renderer refuses
   messages outside their slice's bounds;
 - nothing lost between the job and the slices: `finish` compares the count and an order-independent
-  digest of the subjects with what the caller derived from the job's links.
+  digest of the subjects with what the caller derived from the job's links;
+- attachments kept outside the zip (ADR 0015 §11, §20): every `edisc.file_external` reference read
+  back from the manifests must be one of the file's planned externals, and `check_natives` compares
+  them with the natives actually written: none missing, none with another SHA-256 or size, none
+  unreferenced. It holds one entry per distinct native (bounded by the render's attachments).
 """
 
 from __future__ import annotations
@@ -50,6 +54,9 @@ class Reconciliation:
     edits: int  # earlier versions rendered as edits
     attachments: int  # attachment references to collected files
     unavailable_attachments: int  # attachment references to placeholders
+    external_attachments: (
+        int  # of `attachments`, references to files kept outside the zip (natives)
+    )
     parents_not_rendered: int  # replies whose parent is recorded in custom instead
     files: int
     slices: int
@@ -91,6 +98,8 @@ class Reconciler:
         self._not_rendered = 0
         self._files = 0
         self._digest = 0
+        self._external = 0
+        self._natives: dict[str, int] = {}  # SHA-256 -> size of every native the render references
 
     def add_slice(self, inp: SliceInput, files: Sequence[RenderedFile]) -> None:
         key = (inp.conversation.id, inp.day)
@@ -118,9 +127,17 @@ class Reconciler:
             primary_ids: set[str] = set()
             parents: set[str] = set()
             context_ids: list[str] = []
+            planned = {(a.file_id, a.sha256): a.size for a in f.externals}
+            referenced: set[tuple[str, str]] = set()
             for e in events:
                 c = _custom(e)
                 ewhere = f"{fwhere} event {e.get('id')}"
+                for value in c.get("edisc.file_external", []):
+                    fid, _, digest = value.partition(": sha256:")
+                    if (fid, digest) not in planned:
+                        raise ReconciliationError(f"{ewhere}: external {value} was not planned")
+                    referenced.add((fid, digest))
+                self._external += len(c.get("edisc.file_external", []))
                 marker = c.get("edisc.context")
                 in_scope = _one(c, "edisc.in_scope", ewhere)
                 subject = _one(c, "edisc.source_item_id", ewhere)
@@ -153,6 +170,11 @@ class Reconciler:
                     raise ReconciliationError(f"{fwhere}: context event {cid} is not a needed root")
             if len(context_ids) != f.context_event_count:
                 raise ReconciliationError(f"{fwhere}: context count differs from the header")
+            if referenced != set(planned) or len(planned) != f.external_count:
+                raise ReconciliationError(f"{fwhere}: external references differ from the plan")
+            for (_, digest), size in planned.items():
+                if self._natives.setdefault(digest, size) != size:
+                    raise ReconciliationError(f"{fwhere}: native {digest} with two sizes")
             self._context += len(context_ids)
             self._files += 1
 
@@ -168,6 +190,29 @@ class Reconciler:
             self._digest = (
                 self._digest + int.from_bytes(hashlib.sha256(subject.encode()).digest(), "big")
             ) % _MOD
+
+    @property
+    def natives(self) -> dict[str, int]:
+        """SHA-256 -> size of every native the rendered files reference (each written once)."""
+        return dict(self._natives)
+
+    def check_natives(self, written: Iterable[tuple[str, int]]) -> None:
+        """The natives recorded for the render (SHA-256, size) against the references: one per
+        referenced SHA-256 with its size; a missing, mismatched or unreferenced native raises."""
+        seen: dict[str, int] = {}
+        for digest, size in written:
+            if digest in seen:
+                raise ReconciliationError(f"native {digest} recorded twice")
+            seen[digest] = size
+        missing = sorted(set(self._natives) - set(seen))
+        if missing:
+            raise ReconciliationError(f"natives referenced but not written: {missing[:5]}")
+        extra = sorted(set(seen) - set(self._natives))
+        if extra:
+            raise ReconciliationError(f"natives written but not referenced: {extra[:5]}")
+        wrong = sorted(d for d, size in seen.items() if self._natives[d] != size)
+        if wrong:
+            raise ReconciliationError(f"natives with another size than referenced: {wrong[:5]}")
 
     def finish(self, expected_items: int, expected_digest: str) -> Reconciliation:
         """Compare with what the caller derived independently from the job (its in-scope links)."""
@@ -187,6 +232,7 @@ class Reconciler:
             edits=self._edits,
             attachments=self._attachments,
             unavailable_attachments=self._unavailable,
+            external_attachments=self._external,
             parents_not_rendered=self._not_rendered,
             files=self._files,
             slices=len(self._slices),

@@ -64,6 +64,21 @@ CASES = {
         {"epoch": 1, "day_from": 1, "unavailable_every": 3},
         RenderOptions(include_context=False, time_zone="America/New_York", cap=5),
     ),
+    # every held file over the native threshold (ADR 0015 §11, §20): `_EXTERNAL.txt` placeholders,
+    # next to unavailable files' placeholders; the natives themselves are not part of the `.rsmf`
+    "externals": Case(
+        DatasetSpec(
+            seed=20261005,
+            conversations=2,
+            days=1,
+            messages_per_unit=12,
+            p_file=0.5,
+            file_size_min=2 << 20,
+            file_size_span=4096,
+        ),
+        {"unavailable_every": 3},
+        RenderOptions(external_over_bytes=1 << 20),
+    ),
     # an export job: completeness basis "archive" and the ADR 0014 caveat in the text part
     "archive": Case(
         DatasetSpec(seed=7, conversations=1, days=1, messages_per_unit=12, dialect="slack_history"),

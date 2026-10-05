@@ -64,3 +64,45 @@ def split_parts(
     if current:
         parts.append(current)
     return parts
+
+
+def split_by_entries(
+    part: Sequence[Message],
+    context_root: Callable[[Message], str | None],
+    entries_of: Callable[[str], int],
+    budget: int,
+) -> list[list[Message]]:
+    """Split one part (its primaries, in event order) so that the zip entries its events need stay
+    within ``budget`` (ADR 0015 §20.10): the entry count never moves a file out of the zip.
+
+    ``entries_of(ts)`` is the number of attachments or placeholders of the event with that ts, as
+    listed (a file two events reference counts twice, so the count is conservative). A part closes
+    before the first event whose entries, plus those of its context root when the root is not yet in
+    the part, would take the total over ``budget``. Context roots are counted exactly as in
+    ``split_parts``. One event that cannot fit even in a part of its own raises ``ValueError``.
+    """
+    parts: list[list[Message]] = []
+    current: list[Message] = []
+    present: set[str] = set()
+    total = 0
+    for message in part:
+        root = context_root(message)
+        need = entries_of(message.ts)
+        if root is not None and root not in present:
+            need += entries_of(root)
+        if current and total + need > budget:
+            parts.append(current)
+            current, present, total = [], set(), 0
+            need = entries_of(message.ts) + (entries_of(root) if root is not None else 0)
+        if need > budget:
+            raise ValueError(
+                f"event {message.ts} needs {need} zip entries, more than a part holds ({budget})"
+            )
+        current.append(message)
+        present.add(message.ts)
+        if root is not None:
+            present.add(root)
+        total += need
+    if current:
+        parts.append(current)
+    return parts

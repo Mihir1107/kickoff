@@ -63,11 +63,12 @@ async def _job(
     epoch: int,
     first_day: int = 0,
     policy: ThreadParentPolicy = ThreadParentPolicy.INCLUDE_PARENT_AND_THREAD,
+    spec: DatasetSpec = SPEC,
 ) -> uuid.UUID:
-    ds = Dataset(SPEC)
+    ds = Dataset(spec)
     conn = Connection(
-        t.tenant_id, t.connection_id, "dummy", SPEC.workspace_id,
-        {"spec": SPEC.model_dump(mode="json"), "epoch": epoch},
+        t.tenant_id, t.connection_id, "dummy", spec.workspace_id,
+        {"spec": spec.model_dump(mode="json"), "epoch": epoch},
     )  # fmt: skip
     start = datetime.combine(ds.day(first_day), datetime.min.time(), tzinfo=UTC)
     scope = scope_for_days("*", start, ds.n_days(epoch) - first_day, thread_parent_policy=policy)

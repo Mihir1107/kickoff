@@ -2,8 +2,9 @@
 byte (ADR 0013 decision d, ADR 0015 §14.7 and §19). Read at the moment the first body byte is sent.
 
 The endpoints: ``/v1/evidence/{id}/content`` (job evidence: pages, files and export archive entries),
-``/v1/renders/{id}/files/{ord}/content`` and ``/v1/renders/{id}/package`` (in
-``test_render_packages.py``). No other route returns evidence bytes."""
+``/v1/renders/{id}/files/{ord}/content``, ``/v1/renders/{id}/package`` (in
+``test_render_packages.py``) and ``/v1/renders/{id}/natives/{sha256}/content`` (in
+``test_render_natives.py``). No other route returns evidence bytes."""
 
 from __future__ import annotations
 

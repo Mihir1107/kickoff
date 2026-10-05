@@ -15,12 +15,13 @@ status moved and writes nothing (the status, never a value that can repeat, is t
   options (``include_context``, time zone, cap).
 - ``render_files``: renders and stores (``render_and_store``: reconcile first, then write). Files are
   committed in batches of ``render_files_batch_size``: the rows plus one ``render_files_batch`` event
-  whose Merkle root covers them (``edisc_custody.render_files``). A batch is committed only when
+  whose Merkle root covers them (``edisc_custody.render_files``), with the natives (attachments kept
+  outside the zip, ADR 0015 §20) first referenced by those files and their ``natives_root``. A batch is committed only when
   ``batches_done`` is exactly its index; a batch an earlier attempt committed must be re-rendered to
   exactly the recorded files, else it is an integrity incident. The render id fixes the storage keys
   (never the bytes), so a retry dedups against what is stored.
 - ``complete``: ``render_completed`` (file count, batch count, the root over the batch roots, the
-  reconciliation summary), then the seal: a forced anchor of the final head, recorded once on the
+  native count and root over every native record, the reconciliation summary), then the seal: a forced anchor of the final head, recorded once on the
   render together with ``audit.render_completed`` (or ``.render_refused`` / ``.render_failed``).
 - ``fail``: ``render_failed`` with the error, an alert, then the same seal.
 
@@ -62,6 +63,7 @@ from edisc_custody.render_files import (
     RenderFileError,
     batches_root,
     files_root,
+    natives_root,
 )
 from edisc_db.session import tenant_tx
 from edisc_evidence.worm import get_bytes, list_versions
@@ -85,6 +87,18 @@ LIVE = ("requested", "rendering", "rendered")
 FINAL = ("completed", "refused", "failed")
 
 
+def native_record(row: Any) -> dict[str, Any]:
+    """A ``render_natives`` row as its record (``NATIVE_FIELDS``)."""
+    return {
+        "ord": row.ord,
+        "sha256": row.sha256,
+        "size": row.size_bytes,
+        "storage_key": row.storage_key,
+        "version_id": row.version_id,
+        "file_ords": list(row.file_ords),
+    }
+
+
 class RenderIntegrityError(RuntimeError):
     """What a render stored or recorded disagrees with what it renders now. Always an incident."""
 
@@ -100,7 +114,10 @@ def options_hash(options: RenderOptions) -> str:
 def options_of(row: Any) -> RenderOptions:
     o = row.options
     return RenderOptions(
-        include_context=bool(o["include_context"]), time_zone=str(o["time_zone"]), cap=int(o["cap"])
+        include_context=bool(o["include_context"]),
+        time_zone=str(o["time_zone"]),
+        cap=int(o["cap"]),
+        external_over_bytes=int(o["external_over_bytes"]),
     )
 
 
@@ -441,6 +458,13 @@ class RenderRun:
             if cur.status != "rendering":
                 return str(cur.status)
             roots = await self._batch_roots(s, render_id)
+            natives = await self._native_records(s, render_id)
+            # what the batches committed, against what the files reference (ADR 0015 §20.4)
+            out.reconciler.check_natives((n["sha256"], n["size"]) for n in natives)
+            if len(natives) != out.native_count:
+                raise RenderIntegrityError(
+                    f"render {render_id}: {out.native_count} natives written, {len(natives)} recorded"
+                )
             if (cur.files_done, cur.batches_done, len(roots)) != (
                 out.file_count,
                 -(-out.file_count // size),
@@ -453,10 +477,11 @@ class RenderRun:
             await s.execute(
                 text(
                     "UPDATE renders SET status = 'rendered', file_count = :n, batches_root = :root,"
+                    " native_count = :nn, natives_root = :nroot,"
                     " summary = CAST(:sum AS jsonb), updated_at = now() WHERE id = :i"
                 ),
                 {"n": out.file_count, "root": batches_root(roots), "sum": json.dumps(summary),
-                 "i": render_id},
+                 "nn": len(natives), "nroot": natives_root(natives), "i": render_id},
             )  # fmt: skip
             await self.hooks.hit("files_tx")
         await self.hooks.hit("after_files")
@@ -480,6 +505,25 @@ class RenderRun:
         return [str(r) for r in rows]
 
     @staticmethod
+    async def _native_records(
+        s: AsyncSession,
+        render_id: uuid.UUID,
+        event_id: uuid.UUID | None = None,
+    ) -> list[dict[str, Any]]:
+        """The render's native records in ord order (or one batch's), as their leaves see them."""
+        rows = (
+            await s.execute(
+                text(
+                    "SELECT ord, sha256, size_bytes, storage_key, version_id, file_ords"
+                    " FROM render_natives WHERE render_id = :r"
+                    " AND (CAST(:e AS uuid) IS NULL OR custody_event_id = :e) ORDER BY ord"
+                ),
+                {"r": render_id, "e": event_id},
+            )
+        ).all()
+        return [native_record(r) for r in rows]
+
+    @staticmethod
     def _leaf(f: StoredFile) -> dict[str, Any]:
         return {
             **f.record,
@@ -495,6 +539,7 @@ class RenderRun:
         first = files[0].ord
         index = first // size
         records = [self._leaf(f) for f in files]
+        natives = [n.record() for f in files for n in f.natives]
         async with tenant_tx(self.sessions, tenant_id) as s:
             cur = await self._locked(s, render_id)
             if cur.status != "rendering":
@@ -514,7 +559,20 @@ class RenderRun:
                     .scalars()
                     .all()
                 )
-                if [dict(r) for r in recorded] != records:
+                recorded_natives = (
+                    await s.execute(
+                        text(
+                            "SELECT n.ord, n.sha256, n.size_bytes, n.storage_key, n.version_id,"
+                            " n.file_ords FROM render_natives n JOIN render_files f"
+                            " ON f.render_id = n.render_id AND f.custody_event_id = n.custody_event_id"
+                            " WHERE n.render_id = :r AND f.ord = :a ORDER BY n.ord"
+                        ),
+                        {"r": render_id, "a": first},
+                    )
+                ).all()
+                if [dict(r) for r in recorded] != records or [
+                    native_record(n) for n in recorded_natives
+                ] != natives:
                     raise RenderIntegrityError(
                         f"render {render_id}: batch {index} re-renders to other files than recorded"
                     )
@@ -553,6 +611,51 @@ class RenderRun:
                     ),
                 },
             )
+            first_native = int(
+                (
+                    await s.execute(
+                        text("SELECT count(*) FROM render_natives WHERE render_id = :r"),
+                        {"r": render_id},
+                    )
+                ).scalar_one()
+            )
+            if natives:
+                if natives[0]["ord"] != first_native:
+                    raise RenderIntegrityError(
+                        f"render {render_id}: batch {index} natives start at {natives[0]['ord']},"
+                        f" {first_native} are recorded"
+                    )
+                await s.execute(
+                    text(
+                        "INSERT INTO render_natives (tenant_id, render_id, ord, sha256, size_bytes,"
+                        " storage_key, version_id, file_ords, evidence_object_id, custody_event_id)"
+                        " SELECT :t, :r, x.ord, x.sha, x.size, x.key, x.v,"
+                        " ARRAY(SELECT jsonb_array_elements_text(x.ords)::integer), x.ev, :e"
+                        " FROM jsonb_to_recordset(CAST(:rows AS jsonb))"
+                        " AS x(ord integer, sha text, size bigint, key text, v text, ords jsonb, ev uuid)"
+                    ),
+                    {
+                        "t": tenant_id,
+                        "r": render_id,
+                        "e": event_id,
+                        "rows": json.dumps(
+                            [
+                                {
+                                    "ord": n.ord,
+                                    "sha": n.sha256,
+                                    "size": n.size,
+                                    "key": n.storage_key,
+                                    "v": n.version_id,
+                                    "ords": list(n.file_ords),
+                                    "ev": str(n.evidence_id),
+                                }
+                                for f in files
+                                for n in f.natives
+                            ]
+                        ),
+                    },
+                )
+                await self.hooks.hit("natives_inserted")
             await self._append(
                 s,
                 cur,
@@ -563,6 +666,9 @@ class RenderRun:
                     "first_ord": first,
                     "file_count": len(files),
                     "merkle_root": files_root(records),
+                    "native_count": len(natives),
+                    "first_native_ord": first_native,
+                    "natives_root": natives_root(natives, first_native),
                 },
                 event_id=event_id,
             )
@@ -596,6 +702,8 @@ class RenderRun:
                             "file_count": cur.file_count,
                             "batch_count": cur.batches_done,
                             "batches_root": cur.batches_root,
+                            "native_count": cur.native_count,
+                            "natives_root": cur.natives_root,
                             "verified_objects": summary.pop("verified_objects"),
                             "reconciliation": summary,
                         },

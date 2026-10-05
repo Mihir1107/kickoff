@@ -1,5 +1,8 @@
-"""Render packages (``edisc-render-package/2``, ADR 0015 §14 and §19): one generator for the directory
-export and the download stream, verified offline by ``edisc-verify`` (``edisc_custody.render_package``).
+"""Render packages (``edisc-render-package/3``, ADR 0015 §14, §19 and §20): one generator for the
+directory export and the download stream, verified offline by ``edisc-verify``
+(``edisc_custody.render_package``). Format 3 adds the render's natives (attachments kept outside the
+``.rsmf`` zips): ``natives.jsonl`` (their records, with their batch events) and, when outputs are
+embedded, ``natives/<sha256>`` after ``outputs/``; otherwise the expert supplies them with ``--file``.
 
 Two passes, and no object is read twice:
 
@@ -10,10 +13,11 @@ Two passes, and no object is read twice:
    once here gives the manifest its file hashes; no object body is read (except, once, an anchor
    version the registry does not hold: a storage incident the verifier must see).
 2. ``package_members`` produces the entries in a fixed order (manifest, JSONL files, objects by hash,
-   outputs in render order), regenerating each from the same records, bounded by the planned head and
-   file count, and checking every entry against the plan AS IT PASSES: the JSONL files against the
-   manifest hashes, every object (anchors, the seal, embedded outputs) read by its pinned VersionId
-   against its recorded SHA-256 and size. Any difference raises ``PackageIntegrityError``.
+   outputs in render order, natives in native order), regenerating each from the same records,
+   bounded by the planned head, file and native counts, and checking every entry against the plan AS
+   IT PASSES: the JSONL files against the manifest hashes, every object (anchors, the seal, embedded
+   outputs and natives) read by its pinned VersionId against its recorded SHA-256 and size. Any
+   difference raises ``PackageIntegrityError``.
 
 ``export_render_package`` writes the members to a directory; the API streams them through
 ``edisc_custody.zipwriter`` as one deterministic zip. The manifest has no export time (the seal time
@@ -48,7 +52,7 @@ from edisc_evidence.worm import get_bytes, list_versions
 Outputs = Literal["embed", "reference"]
 CHUNK = 1 << 20
 _LINES_CHUNK = 64 << 10
-_JSONL_ORDER = ("events.jsonl", "files.jsonl", "anchors.jsonl", "job_seal.json")
+_JSONL_ORDER = ("events.jsonl", "files.jsonl", "natives.jsonl", "anchors.jsonl", "job_seal.json")
 
 
 class PackageIntegrityError(Exception):
@@ -77,6 +81,7 @@ class RenderPackagePlan:
     manifest: bytes
     head_seq: int  # the events and files the package holds: never more than when it was planned
     file_count: int
+    native_count: int
     files: dict[str, dict[str, Any]]  # JSONL file -> sha256, lines, bytes (as in the manifest)
     anchors: tuple[dict[str, Any], ...]
     seal: dict[str, Any]
@@ -155,6 +160,49 @@ def _file_line(row: Any) -> dict[str, Any]:
     return {"custody_event_id": str(row.custody_event_id), "record": dict(row.record)}
 
 
+async def _native_rows(
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    render_id: uuid.UUID,
+    native_count: int,
+    page_size: int,
+) -> AsyncIterator[Any]:
+    last = -1
+    while last + 1 < native_count:
+        async with tenant_tx(sessions, tenant_id) as s:
+            rows = (
+                await s.execute(
+                    text(
+                        "SELECT n.ord, n.sha256, n.size_bytes, n.storage_key, n.version_id, n.file_ords,"
+                        " n.custody_event_id, e.version_id AS registry_version, e.sha256 AS registry_sha,"
+                        " e.size_bytes AS registry_size, e.state, e.storage_key AS registry_key"
+                        " FROM render_natives n JOIN evidence_objects e ON e.id = n.evidence_object_id"
+                        " WHERE n.render_id = :r AND n.ord > :a AND n.ord < :c ORDER BY n.ord LIMIT :n"
+                    ),
+                    {"r": render_id, "a": last, "c": native_count, "n": page_size},
+                )
+            ).all()
+        if not rows:
+            return
+        for row in rows:
+            yield row
+        last = rows[-1].ord
+
+
+def _native_line(row: Any) -> dict[str, Any]:
+    return {
+        "custody_event_id": str(row.custody_event_id),
+        "record": {
+            "ord": row.ord,
+            "sha256": row.sha256,
+            "size": row.size_bytes,
+            "storage_key": row.storage_key,
+            "version_id": row.version_id,
+            "file_ords": list(row.file_ords),
+        },
+    }
+
+
 async def _jsonl_spec(lines: AsyncIterator[dict[str, Any]]) -> dict[str, Any]:
     digest, count, size = hashlib.sha256(), 0, 0
     async for obj in lines:
@@ -229,7 +277,8 @@ async def plan_render_package(
             await s.execute(
                 text(
                     "SELECT r.job_id, r.finished_at, r.sealed_at, h.last_seq, h.last_hash,"
-                    " (SELECT count(*) FROM render_files f WHERE f.render_id = r.id) AS files"
+                    " (SELECT count(*) FROM render_files f WHERE f.render_id = r.id) AS files,"
+                    " (SELECT count(*) FROM render_natives n WHERE n.render_id = r.id) AS natives"
                     " FROM renders r LEFT JOIN custody_chain_heads h ON h.stream_id = r.id"
                     " WHERE r.id = :r"
                 ),
@@ -238,6 +287,7 @@ async def plan_render_package(
         ).one()
     head_seq = int(render.last_seq or 0)
     file_count = int(render.files)
+    native_count = int(render.natives)
 
     versions = [
         v
@@ -301,11 +351,19 @@ async def plan_render_package(
             output_sizes.append((f"outputs/{row.record['name']}", int(row.size_bytes)))
             yield _file_line(row)
 
+    native_sizes: list[tuple[str, int]] = []
+
+    async def natives_lines() -> AsyncIterator[dict[str, Any]]:
+        async for row in _native_rows(sessions, tenant_id, render_id, native_count, page_size):
+            native_sizes.append((f"natives/{row.sha256}", int(row.size_bytes)))
+            yield _native_line(row)
+
     files = {
         "events.jsonl": await _jsonl_spec(
             _event_lines(sessions, tenant_id, render_id, head_seq, page_size)
         ),
         "files.jsonl": await _jsonl_spec(files_lines()),
+        "natives.jsonl": await _jsonl_spec(natives_lines()),
         "anchors.jsonl": await _jsonl_spec(_aiter(anchors)),
         "job_seal.json": await _jsonl_spec(_aiter([seal])),
     }
@@ -326,6 +384,7 @@ async def plan_render_package(
     ordered += [(f"objects/{sha}", objects[sha].size) for sha in sorted(objects)]
     if outputs == "embed":
         ordered += output_sizes
+        ordered += native_sizes
     sizer = ZipSizer()
     for name, size in ordered:
         sizer.add(name, size)
@@ -337,6 +396,7 @@ async def plan_render_package(
         manifest=manifest_bytes,
         head_seq=head_seq,
         file_count=file_count,
+        native_count=native_count,
         files=files,
         anchors=tuple(anchors),
         seal=seal,
@@ -415,12 +475,17 @@ async def package_members(
         async for row in _file_rows(sessions, t, r, plan.file_count, n):
             yield _file_line(row)
 
+    async def natives_lines() -> AsyncIterator[dict[str, Any]]:
+        async for row in _native_rows(sessions, t, r, plan.native_count, n):
+            yield _native_line(row)
+
     yield ZipMember("manifest.json", len(plan.manifest), manifest)
     yield _jsonl_member(
         "events.jsonl", plan.files["events.jsonl"],
         lambda: _event_lines(sessions, t, r, plan.head_seq, n),
     )  # fmt: skip
     yield _jsonl_member("files.jsonl", plan.files["files.jsonl"], files_lines)
+    yield _jsonl_member("natives.jsonl", plan.files["natives.jsonl"], natives_lines)
     yield _jsonl_member(
         "anchors.jsonl", plan.files["anchors.jsonl"], lambda: _aiter(list(plan.anchors))
     )
@@ -437,6 +502,17 @@ async def package_members(
             row.state != "complete"
             or row.registry_sha != row.sha256
             or row.registry_version != row.version_id
+        ):
+            raise PackageIntegrityError(name, "the registry disagrees with the render's record")
+        yield _object_member(
+            s3, bucket, name, row.storage_key, row.version_id, row.sha256, row.size_bytes
+        )
+    async for row in _native_rows(sessions, t, r, plan.native_count, n):
+        name = f"natives/{row.sha256}"
+        if (
+            row.state != "complete"
+            or (row.registry_sha, row.registry_size) != (row.sha256, row.size_bytes)
+            or (row.registry_version, row.registry_key) != (row.version_id, row.storage_key)
         ):
             raise PackageIntegrityError(name, "the registry disagrees with the render's record")
         yield _object_member(

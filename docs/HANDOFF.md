@@ -1,4 +1,4 @@
-# Handoff (2026-10-05, end of session: M15 step 5 part C)
+# Handoff (2026-10-05, end of session: M15 §11, natives built)
 
 Read with `CLAUDE.md` (rules), `docs/ARCHITECTURE.md`, `docs/adr/`, `docs/plans/phase-2.md` and `docs/BACKLOG.md`.
 
@@ -7,9 +7,9 @@ Read with `CLAUDE.md` (rules), `docs/ARCHITECTURE.md`, `docs/adr/`, `docs/plans/
 acceptance run). Repo: `github.com/Mihir1107/kickoff`. Every milestone is a separate commit; `git log` is the
 history.
 
-**Phase 2 in progress:** M14 (Slack exports) done; M15 (RSMF renders) in progress: steps 1-5 done, next
-task = §11 oversized attachments as external natives (see "In progress: M15"). M16 (report) and M17
-(sessions, ADR 0016) follow.
+**Phase 2 in progress:** M14 (Slack exports) done; M15 (RSMF renders): steps 1-5 and §11 (oversized
+attachments as natives, renderer 1.3.0) done, §11 is for review (ADR 0015 §21). Next: the §21 review,
+then M16 (report) and M17 (sessions, ADR 0016).
 
 **Phase 1 is complete (M0–M13):**
 - **Evidence:** WORM via S3 Object Lock COMPLIANCE on MinIO, with a rolling retention window plus an
@@ -32,7 +32,7 @@ task = §11 oversized attachments as external natives (see "In progress: M15"). 
 - the audit-burst measurement;
 - the anchor-storm fix (migration 0017).
 
-**Migrations at head:** 0028.
+**Migrations at head:** 0029.
 
 **Not done in Phase 1:** the 1M-message soak. Laptop disk is too small (~15 GB free; it needs ~21 GB). It is
 in the backlog for a cloud VM: `scripts/resume_soak.py --messages 1000000 --kills 10`.
@@ -92,7 +92,7 @@ in the backlog for a cloud VM: `scripts/resume_soak.py --messages 1000000 --kill
   occurrences) resumes to the clean result; one real SIGKILL of the export worker process in the middle
   of the day-file index, then a new worker. Seams: `ExportIngest(hooks=CrashHooks)`.
 
-## In progress: M15, RSMF renderer (ADR 0015, accepted; steps 1-4 approved; step 5 done, part C for review)
+## In progress: M15, RSMF renderer (ADR 0015, accepted; steps 1-5 approved; §11 natives built, for review)
 Read `docs/adr/0015-rsmf-renderer.md` in full (§9-§18 are the decisions and implementation notes, in
 order) and `docs/adr/0017-render-worker-versions.md`.
 
@@ -106,8 +106,9 @@ order) and `docs/adr/0017-render-worker-versions.md`.
 - **Step 5:** part A (synthetic corpus, dummy connector 0.3.0) and part B (full crash matrix) done
   (§17, §18). **Part C (render package download endpoint) done 2026-10-05, for review (§19)**, summary
   below.
-- Renderer **1.2.0**; goldens under `tests/golden/rsmf/1.2.0_unicode-15.0.0_tzdata-2026e_dummy-0.3.0/`
-  and `tests/golden/rsmf-corpus/<same key>/`. Migrations at head: **0028**.
+- **§11 natives (ADR 0015 §20 plan, §21 implementation notes): built 2026-10-05, for review.**
+- Renderer **1.3.0**; goldens under `tests/golden/rsmf/1.3.0_unicode-15.0.0_tzdata-2026e_dummy-0.3.0/`
+  and `tests/golden/rsmf-corpus/<same key>/` (1.2.0 kept as history). Migrations at head: **0029**.
 
 ### Commits (newest last; all on `main`, pushed)
 - `3e47bec` fix: ABA in the batch checkpoint guard, fenced on `(cursor, pages_done)` (ADR 0006).
@@ -121,8 +122,9 @@ order) and `docs/adr/0017-render-worker-versions.md`.
 - `efd385f` step 5 part C, the render package download (§19).
 - `3a8a572` part C review round: every content read anchored before its first byte, strict
   `edisc-verify` with `--tolerate-os-metadata`, `Content-Length` (§19.11-13), §11 plan (§20).
-- the commit after `3a8a572` (see `git log`): anchor divergence recorded and alerted (§19.14), §11
-  plan approved with changes (§20.9-13), this handoff.
+- `088e1da` anchor divergence recorded and alerted (§19.14), §11 plan approved with changes (§20.9-13).
+- the commit after `088e1da` (see `git log`): §11, oversized attachments as natives (renderer 1.3.0,
+  migration 0029, package format /3, natives API), this handoff.
 
 ### Decisions taken in the 2026-10-05 reviews (all recorded in ADRs)
 1. Package zip: extend our own deterministic STORED zip writer with ZIP64. Do NOT record CRC32 at
@@ -172,64 +174,25 @@ order) and `docs/adr/0017-render-worker-versions.md`.
   `missing_row`, `hash_mismatch`, `missing_object`) is served anyway, recorded as
   `audit.render_package_anchor_divergence` and alerted (`render_anchor_divergence`); each kind tested.
 
-### Next: §11, oversized attachments as separate natives (APPROVED 2026-10-05, build in a new session)
-Read ADR 0015 §11, then §20 in full: §20.1-8 is the plan, §20.9-13 the approved changes, which win
-where they differ. The essentials, so this list alone is enough to start:
-
-1. **Renderer 1.3.0** (new golden generations, renderer and corpus; `EDISC_RECORD_RSMF=1` /
-   `EDISC_RECORD_CORPUS=1` under the new key). The renderer moves to `edisc_custody.zipwriter` in
-   this bump (data descriptor on every entry; closes the BACKLOG unify item). Its structural rule is
-   "the part's zip needs no ZIP64", computed with `ZipSizer` (add `needs_zip64()`: any entry
-   >= 0xFFFFFFFF bytes, any offset / directory size / directory end >= 0xFFFFFFFF, or >= 65,535
-   entries). No guessed headroom. The same `ZipSizer` gives the package's Content-Length.
-2. **Threshold:** new `RenderOptions.external_over_bytes` (renderer constant default, proposed 1 GiB;
-   bounded 1 MiB..4 GiB; set by whoever has `export.create`; in `as_payload()`, so in the options hash
-   and the render identity; never from worker settings). Selection per part, after splitting:
-   attachments over the threshold first, then largest first (ties by file id) until `needs_zip64()`
-   is false. A file is never read for an external attachment (the opener is not called; test it).
-3. **Entry count never externalizes:** after the existing event-cap split, a part whose zip would
-   exceed 65,535 entries is split: walk the events in render order, close the part before the first
-   event whose entries (one per attachment or placeholder, primaries and context) would take it over
-   65,535 - F (F = fixed entries per part: manifest + EML = 2 today); recompute each new part's
-   context roots exactly as `split_parts` does; renumber `part`/`parts`. One event that cannot fit
-   raises `RenderInputError`.
-4. **In the RSMF:** placeholder `{file_id}_EXTERNAL.txt`, `display` = original name, `custom`
-   `edisc.file_external = <file id>: sha256:<hex>`. Placeholder bytes pinned: UTF-8 no BOM, LF, lines
-   `name: ..`, `size: ..`, `sha256: ..`, `reason: ..` (`over_external_threshold` |
-   `exceeds_rsmf_zip_limit`), `native: natives/<sha256>`, NFC name, final LF, no timestamps; unit test
-   on the exact bytes plus the goldens.
-5. **Native copy (server-side only):** key `t/{tenant}/productions/{render}/natives/sha256/<hex>`,
-   `evidence_objects` kind `production`, `render_id` set (retention render -> job -> matter). Under
-   the advisory content lock (MinIO ignores If-None-Match on copy): CreateMultipartUpload with
-   COMPLIANCE lock + retain-until, UploadPartCopy with `CopySourceVersionId` = pinned evidence
-   version, CompleteMultipartUpload, abort on any failure; then ONE streaming SHA-256 read of the
-   destination's pinned VersionId, equal to the source's recorded SHA-256 and size, before the row is
-   complete. Never stream native bytes through the worker twice. Registry complete = reuse (retry).
-6. **Custody:** insert-only `render_natives` (render, ord, SHA-256, size, key, VersionId, referencing
-   file ords), deferred FK to its batch event (migration 0029 + RLS + grants + drift-model update). A
-   native is written before the batch that first references it; `render_files_batch` gains
-   `natives_root` (RFC 6962 over that batch's native records), `render_completed` the native count
-   and total root, the summary `external_attachments`. `FILE_FIELDS` gain `external_count` (the
-   verifier keeps the old leaf for renders before 1.3.0, by the renderer version in
-   `render_started`). The reconciler fails on a missing native, a wrong hash or an unreferenced one.
-7. **Package `edisc-render-package/3`** (verifier accepts /1, /2, /3): `natives.jsonl` in the manifest;
-   `natives/<sha256>` after `outputs/` when embedded, else referenced by hash and supplied with
-   `--file`. The verifier checks each native's hash and size, the natives roots, and opens each
-   `.rsmf` (hardened reader) to match its `edisc.file_external` references to native records.
-8. **API:** `GET /v1/renders/{id}/natives` (`custody.read`) and
-   `GET /v1/renders/{id}/natives/{sha256}/content` (`export.read`, audit + `audit.anchor_now` before
-   the first byte, re-hashed while streaming; first-byte test with `tests/integration/api/first_byte.py`).
-9. **Tests** (§20.8): selection and split boundaries (exactly at a limit stays, one over moves), ties,
-   placeholder bytes, opener never called, reconciler failures; corpus cases (tiny threshold, the same
-   file in two slices copied once, external next to unavailable, external in a context root, a part
-   split by entry count using a tiny per-test entry limit); crash matrix (crash after the copy before
-   the row completes, after native rows before the batch commits, a real SIGKILL during the copy or
-   the verification read; one object version per native key on resume); package attacks (altered,
-   missing, unreferenced native; an `.rsmf` naming an unlisted native); Content-Length with natives;
-   retention extension covers natives; API permissions, first byte, mismatch abort. A real multi-GB
-   native is a cloud-VM measurement (BACKLOG), not a laptop test.
-10. Mutation-check every protection; `make check`, the full integration suite on a fresh stack, push,
-    watch CI. BACKLOG keeps: cross-render native dedupe (measure first).
+### Done: §11, oversized attachments as natives (ADR 0015 §20 + §21, for review)
+Read §21 first: it lists every point where the build resolved something §20 left open.
+- **Renderer 1.3.0** writes zips through `edisc_custody.zipwriter` (data descriptor on every entry).
+  `RenderOptions.external_over_bytes` (default 1 GiB, 1 MiB..4 GiB, in the identity and the API
+  request): attachments over it, then the largest while `ZipSizer.needs_zip64()`, become
+  `{file_id}_EXTERNAL.txt` placeholders (pinned bytes) with `edisc.file_external`. The entry count
+  splits parts instead (`render.MAX_PART_ENTRIES` = 65,534 incl. the manifest = §20.10's 65,535 - 2).
+- **Natives**: `EvidenceWriter.write_native` (server-side multipart copy from the pinned version,
+  content lock, one verification read, every open upload at the key aborted on resume);
+  `render_natives` (migration 0029) committed with the batch of the first referencing file;
+  `natives_root` per batch and in `render_completed`; the verifier picks leaves by renderer version.
+- **Package `edisc-render-package/3`**: `natives.jsonl`, `natives/<sha>` when embedded, `--file` for
+  natives; each `.rsmf` read without loading it (`edisc_custody.rsmf_check`).
+- **API**: `GET /v1/renders/{id}/natives` (`custody.read`), `.../natives/{sha256}/content`
+  (`export.read`, anchored before the first byte, re-hashed).
+- **Dummy**: `file_size_min` / `file_size_span` spec knobs; defaults keep every existing spec's bytes
+  (dummy golden unchanged), so no connector version bump.
+- **Tests**: see §21.9; 45 mutation checks, all caught (script kept out of the repo; §21.9 lists them).
+- **Not done** (BACKLOG): a real multi-GB native on the cloud VM; cross-render native dedupe.
 
 ### Open questions / waiting on the user
 1. Relativity licence (validator in CI) - see "Open decisions" above.
@@ -245,6 +208,9 @@ where they differ. The essentials, so this list alone is enough to start:
 - `make check` (lint, typecheck, unit). Integration only on the ephemeral stack:
   `MIN_FREE_GB=12 make test-env-up`, then `make test-integration-only TESTS=...`, then
   `make test-env-down` (this laptop often has 14-16 GB free; the stack uses under 1 GB).
+- Natives: `tests/unit/renderers/test_externals.py`, `tests/unit/custody/test_rsmf_check.py`,
+  `tests/integration/renders/test_render_natives.py` (incl. SIGKILLs during the copy),
+  `tests/integration/custody/test_render_package_natives.py`, `tests/integration/api/test_render_natives.py`.
 - Render suites: `tests/integration/renders` (workflow, operations, crash matrix with SIGKILLs),
   `tests/integration/corpus` + `tests/integration/api/test_corpus_export.py` (corpus),
   `tests/integration/acceptance/test_render_batch_boundary.py` (500/501, about 2 minutes),
@@ -300,6 +266,10 @@ where they differ. The essentials, so this list alone is enough to start:
 
 **Evidence and custody:**
 - MinIO ignores If-None-Match on CopyObject; PutObject honours it. Hence the advisory lock.
+- `evidence_objects.upload_id` is write-once: a retried upload for the same row is not recorded, so
+  resume logic must LIST open multipart uploads at the key (see `write_native`), not trust the column.
+- Tampering with insert-only tables in a test (e.g. `render_natives`): as superuser,
+  `SET session_replication_role = replica` first; CHECK constraints still apply.
 - `timedelta(0)` is falsy: use `is not None` checks for optional durations (a real bug, fixed).
 - **Anchoring:** never write an anchor without winning the claim. One anchor per due point.
 

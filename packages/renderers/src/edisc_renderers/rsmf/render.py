@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 import uuid
 from collections import defaultdict
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping, Sequence
@@ -20,6 +21,7 @@ from edisc_core.canonical import canonical_json
 from edisc_core.schemas import ARCHIVE_CAVEAT
 from edisc_core.time import format_utc, from_epoch
 from edisc_custody.merkle import batch_root
+from edisc_custody.zipwriter import MAX16
 from edisc_renderers.rsmf import eml
 from edisc_renderers.rsmf.model import (
     AsyncFileOpener,
@@ -35,12 +37,30 @@ from edisc_renderers.rsmf.model import (
     RenderOptions,
     SliceInput,
 )
-from edisc_renderers.rsmf.names import MANIFEST_NAME, attachment_name, placeholder_name
+from edisc_renderers.rsmf.names import (
+    MANIFEST_NAME,
+    attachment_name,
+    external_name,
+    placeholder_name,
+)
 from edisc_renderers.rsmf.reconcile import Reconciler, Reconciliation, subject_digest
-from edisc_renderers.rsmf.slicing import event_order, slice_bounds, slice_day, split_parts
+from edisc_renderers.rsmf.slicing import (
+    event_order,
+    slice_bounds,
+    slice_day,
+    split_by_entries,
+    split_parts,
+)
 from edisc_renderers.rsmf.validate import check_structure, validate_manifest
 from edisc_renderers.rsmf.version import RENDERER_VERSION, RSMF_VERSION
-from edisc_renderers.rsmf.zipstream import ZipEntry, as_async, azip_stream, check_limits, drive
+from edisc_renderers.rsmf.zipstream import (
+    ZipEntry,
+    as_async,
+    azip_stream,
+    check_limits,
+    drive,
+    sizer,
+)
 
 _EVENT_COLLECTION_NS = uuid.uuid5(uuid.NAMESPACE_URL, "urn:edisc:rsmf:eventcollectionid")
 _CONVERSATION_ID = re.compile(r"^[A-Za-z0-9]{1,64}$")
@@ -57,6 +77,15 @@ _NOT_RENDERED_EXCLUDED = "context_excluded"
 _NOT_RENDERED_NOT_COLLECTED = "not_collected"
 _KIND = {"im": "dm", "mpim": "mpim", "public_channel": "public", "private_channel": "private"}
 _RSMF_TYPE = {"im": "direct", "mpim": "direct", "public_channel": "channel", "private_channel": "channel"}  # fmt: skip
+# why an attachment is a native outside the zip (ADR 0015 §11, §20.12)
+OVER_EXTERNAL_THRESHOLD = "over_external_threshold"
+EXCEEDS_RSMF_ZIP_LIMIT = "exceeds_rsmf_zip_limit"
+FIXED_ENTRIES = 1
+"""Zip entries every part has besides attachments and placeholders: the manifest."""
+MAX_PART_ENTRIES = MAX16 - 1
+"""The most entries a zip holds without ZIP64 (65,535 already needs it: 0xFFFF in the end record means
+"see ZIP64"). A part's attachments and placeholders stay within MAX_PART_ENTRIES - FIXED_ENTRIES =
+65,533, which is the 65,535 - F (F = 2) of ADR 0015 §20.10. Read at call time (tests lower it)."""
 
 
 def _flag(value: bool) -> str:
@@ -96,7 +125,9 @@ class RenderedFile:
     event_count: int
     context_event_count: int
     attachment_count: int  # zip entries other than the manifest (files and placeholders)
-    unavailable_count: int  # placeholder entries
+    unavailable_count: int  # placeholder entries for files the source refused
+    external_count: int  # placeholder entries for files kept outside the zip, as natives
+    externals: tuple[FileAttachment, ...]  # those files, by file id: never read by the renderer
     source_hash: str
     event_collection_id: str
     manifest: bytes  # canonical JSON, exactly as in the zip
@@ -135,6 +166,7 @@ class RenderedFile:
             "context_event_count": self.context_event_count,
             "attachment_count": self.attachment_count,
             "unavailable_count": self.unavailable_count,
+            "external_count": self.external_count,
         }
 
 
@@ -197,8 +229,10 @@ def _event(
     conversation_id: str,
     files: Mapping[str, FileOutcome],
     zip_files: dict[str, FileOutcome],
+    externals: Mapping[str, str],
 ) -> dict[str, Any]:
-    """The manifest event; also registers its zip entries in `zip_files`."""
+    """The manifest event; also registers its zip entries in `zip_files`. `externals`: the file ids
+    kept outside the zip, with the reason."""
     m, cur = placed.message, placed.message.current
     subtype = cur.subtype
     etype = _JOIN_LEAVE.get(subtype or "", "message" if subtype in _MESSAGE_SUBTYPES else "unknown")
@@ -253,13 +287,19 @@ def _event(
 
     attachments = []
     unavailable: list[tuple[str, str | None]] = []
+    external: list[tuple[str, str | None]] = []
     for fid in [] if cur.deleted else cur.file_ids:
         outcome = files.get(fid)
         if outcome is None:
             raise RenderInputError(f"{m.subject}: no outcome for file {fid}")
         if outcome.file_id != fid:
             raise RenderInputError(f"file map key {fid} holds file {outcome.file_id}")
-        if isinstance(outcome, FileAttachment):
+        if isinstance(outcome, FileAttachment) and fid in externals:
+            zname = external_name(fid)
+            text = _external_text(outcome, externals[fid])
+            attachments.append({"id": zname, "display": outcome.name or fid, "size": len(text)})
+            external.append(("edisc.file_external", f"{fid}: sha256:{outcome.sha256}"))
+        elif isinstance(outcome, FileAttachment):
             zname = attachment_name(fid, outcome.name)
             attachments.append({"id": zname, "display": outcome.name or fid, "size": outcome.size})
         else:
@@ -283,6 +323,7 @@ def _event(
         ("edisc.context", placed.context),
         ("slack.subtype", subtype),
         *unavailable,
+        *external,
         *historical,
     ]
     if m.reactions is not None:
@@ -310,6 +351,31 @@ def _placeholder_text(f: FileUnavailable) -> bytes:
         "",
     ]
     return "\r\n".join(lines).encode("utf-8")
+
+
+_ESCAPED_CATEGORIES = frozenset({"Cc", "Cs", "Zl", "Zp"})
+
+
+def _one_line(text: str) -> str:
+    """A value that cannot break the one-field-per-line layout: control characters, line and paragraph
+    separators and lone surrogates become `\\uXXXX` (the manifest's `display` keeps the exact name)."""
+    return "".join(
+        f"\\u{ord(c):04x}" if unicodedata.category(c) in _ESCAPED_CATEGORIES else c for c in text
+    )
+
+
+def _external_text(f: FileAttachment, reason: str) -> bytes:
+    """The placeholder of an attachment kept outside the zip (ADR 0015 §20.12). Pinned bytes: UTF-8
+    without BOM, one `field: value` line per field in this order, LF endings and a final LF, the name
+    NFC-normalized, the size a plain decimal integer, no timestamps."""
+    lines = [
+        f"name: {_one_line(unicodedata.normalize('NFC', f.name))}",
+        f"size: {f.size}",
+        f"sha256: {f.sha256}",
+        f"reason: {reason}",
+        f"native: natives/{f.sha256}",
+    ]
+    return ("\n".join(lines) + "\n").encode("utf-8")
 
 
 def _leaves(message: Message) -> Iterator[tuple[str, str]]:
@@ -350,8 +416,21 @@ def _build_file(
     if len(everything) > options.cap:
         raise AssertionError("part over the cap after planning")
 
+    # the part's collected files; policy externals first (ADR 0015 §20.1): over the threshold
+    held: dict[str, FileAttachment] = {}
+    for p in everything:
+        cur = p.message.current
+        for fid in () if cur.deleted else cur.file_ids:
+            outcome = inp.files.get(fid)
+            if isinstance(outcome, FileAttachment):
+                held[fid] = outcome
+    externals: dict[str, str] = {
+        fid: OVER_EXTERNAL_THRESHOLD
+        for fid, a in sorted(held.items())
+        if a.size > options.external_over_bytes
+    }
     zip_files: dict[str, FileOutcome] = {}
-    events = [_event(p, conv.id, inp.files, zip_files) for p in everything]
+    events = [_event(p, conv.id, inp.files, zip_files, externals) for p in everything]
 
     leaves: dict[str, str] = {}
 
@@ -421,28 +500,60 @@ def _build_file(
 
     slice_id = f"{inp.job.job_id}/{conv.id}/{inp.day.isoformat()}/{part_no}"
     collection_id = str(uuid.uuid5(_EVENT_COLLECTION_NS, slice_id))
-    manifest: dict[str, Any] = {
-        "version": RSMF_VERSION,
-        "eventcollectionid": collection_id,
-        "participants": participants,
-        "conversations": [conversation],
-        "events": events,
-    }
-    manifest_bytes = canonical_json(manifest)
 
-    entries = [ZipEntry(MANIFEST_NAME, data=manifest_bytes)]
-    for zname, outcome in zip_files.items():
-        if isinstance(outcome, FileAttachment):
-            entries.append(ZipEntry(zname, file=outcome))
-        else:
-            entries.append(ZipEntry(zname, data=_placeholder_text(outcome)))
-    entries.sort(key=lambda e: e.name.encode("utf-8"))
+    def assemble(
+        events: list[dict[str, Any]], zip_files: Mapping[str, FileOutcome]
+    ) -> tuple[bytes, list[ZipEntry]]:
+        manifest: dict[str, Any] = {
+            "version": RSMF_VERSION,
+            "eventcollectionid": collection_id,
+            "participants": participants,
+            "conversations": [conversation],
+            "events": events,
+        }
+        manifest_bytes = canonical_json(manifest)
+        entries = [ZipEntry(MANIFEST_NAME, data=manifest_bytes)]
+        for zname, outcome in zip_files.items():
+            if isinstance(outcome, FileAttachment) and outcome.file_id in externals:
+                text = _external_text(outcome, externals[outcome.file_id])
+                entries.append(ZipEntry(zname, data=text))
+            elif isinstance(outcome, FileAttachment):
+                entries.append(ZipEntry(zname, file=outcome))
+            else:
+                entries.append(ZipEntry(zname, data=_placeholder_text(outcome)))
+        entries.sort(key=lambda e: e.name.encode("utf-8"))
+        return manifest_bytes, entries
+
+    manifest_bytes, entries = assemble(events, zip_files)
+    # the structural rule (ADR 0015 §20.11): while the part's zip would need ZIP64, the largest
+    # attachment still inside leaves it (ties by file id). Sizes come from the inputs, never the bytes.
+    while sizer(entries).needs_zip64():
+        inside = sorted(
+            (a for fid, a in held.items() if fid not in externals),
+            key=lambda a: (-a.size, a.file_id),
+        )
+        if not inside:
+            break  # only the manifest is left to blame: check_limits raises ZipLimitError
+        externals[inside[0].file_id] = EXCEEDS_RSMF_ZIP_LIMIT
+        zip_files = {}
+        events = [_event(p, conv.id, inp.files, zip_files, externals) for p in everything]
+        manifest_bytes, entries = assemble(events, zip_files)
     check_limits(entries)
     validate_manifest(json.loads(manifest_bytes))
     check_structure(json.loads(manifest_bytes), [e.name for e in entries])
 
     begin, end = everything[0].message.sent_at, everything[-1].message.sent_at
     unavailable = sum(isinstance(o, FileUnavailable) for o in zip_files.values())
+    outside = tuple(
+        sorted(
+            (
+                o
+                for o in zip_files.values()
+                if isinstance(o, FileAttachment) and o.file_id in externals
+            ),
+            key=lambda a: a.file_id,
+        )
+    )
     custodian = ", ".join(displays[c] for c in conv.custodians) or None
     title = conv.name or conv.id
     headers: list[tuple[str, str]] = [
@@ -476,6 +587,14 @@ def _build_file(
         f"part {part_no} of {part_count}.",
         f"Events: {len(events)} ({len(context)} thread context). Attachments: {len(entries) - 1} "
         f"({unavailable} unavailable, shown as placeholders).",
+        *(
+            [
+                f"{len(outside)} attachment(s) are delivered next to this file as natives (named by "
+                "SHA-256); each is shown here as a placeholder text file."
+            ]
+            if outside
+            else []
+        ),
         f"Collection job {inp.job.job_id}; completeness basis: {inp.job.completeness_basis}.",
         f"Rendered by edisc-renderers/{RENDERER_VERSION}; include_context={_flag(options.include_context)}.",
     ]
@@ -492,6 +611,8 @@ def _build_file(
         context_event_count=len(context),
         attachment_count=len(entries) - 1,
         unavailable_count=unavailable,
+        external_count=len(outside),
+        externals=outside,
         source_hash=source_hash,
         event_collection_id=collection_id,
         manifest=manifest_bytes,
@@ -543,8 +664,18 @@ def render_slice(inp: SliceInput, options: RenderOptions) -> list[RenderedFile]:
             return None
         return root
 
+    def entries_of(ts: str) -> int:  # one zip entry per attachment or placeholder, as listed
+        cur = lookup[ts].current
+        return 0 if cur.deleted else len(cur.file_ids)
+
     primaries = sorted(by_ts.values(), key=event_order)
-    parts = split_parts(primaries, context_root, options.cap)
+    budget = MAX_PART_ENTRIES - FIXED_ENTRIES
+    parts: list[list[Message]] = []
+    try:  # after the event cap, by zip entries (ADR 0015 §20.10); parts are numbered over the slice
+        for capped in split_parts(primaries, context_root, options.cap):
+            parts += split_by_entries(capped, context_root, entries_of, budget)
+    except ValueError as exc:
+        raise RenderInputError(f"{conv.id}/{inp.day}: {exc}") from exc
     return [
         _build_file(inp, options, bounds, i + 1, len(parts), part, lookup)
         for i, part in enumerate(parts)

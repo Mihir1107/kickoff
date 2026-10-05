@@ -126,7 +126,10 @@ async def test_a_clean_render_package_verifies_offline(rendered: Rendered) -> No
     code, out = _cli(rendered.root / "embedded")
     assert code == 0, out
     assert "VERIFIED  render package" in out
-    assert f"{files} files in Merkle roots" in out and f"{files} output files re-hashed" in out
+    assert (
+        f"{files} files in Merkle roots" in out
+        and f"{files} output files and 0 natives re-hashed" in out
+    )
     code, out = _cli(rendered.root / "embedded", "--job-package", rendered.root / "job")
     assert code == 0, out
     assert "job package: VERIFIED" in out
@@ -279,8 +282,24 @@ async def test_a_missing_object_or_a_planted_file_fails(pkg: Path) -> None:
     assert "notes.txt: not part of this package" in out
 
 
+def _without_natives(pkg: Path, fmt: str) -> None:
+    """The package as a format before §20 wrote it: no natives.jsonl."""
+    (pkg / "natives.jsonl").unlink()
+    manifest = json.loads((pkg / "manifest.json").read_bytes())
+    del manifest["files"]["natives.jsonl"]
+    manifest["format"] = fmt
+    (pkg / "manifest.json").write_bytes(canonical_json(manifest))
+
+
+async def test_format_2_packages_still_verify(pkg: Path) -> None:
+    _without_natives(pkg, "edisc-render-package/2")
+    code, out = _cli(pkg)
+    assert code == 0, out
+
+
 async def test_format_1_packages_still_verify(pkg: Path) -> None:
     """Directories exported before §19 carry the anchor and seal bodies inline."""
+    _without_natives(pkg, "edisc-render-package/1")
 
     def inline(rec: dict[str, object]) -> dict[str, object]:
         if rec.get("delete_marker"):
@@ -330,8 +349,8 @@ async def test_the_zip_verifies_in_place_and_equals_the_directory(rendered: Rend
     code, out = _cli(*args)
     assert code == 0, out
     names = list(_unzipped((rendered.root / "embed.zip").read_bytes()))
-    assert names[:5] == ["manifest.json", "events.jsonl", "files.jsonl", "anchors.jsonl",
-                         "job_seal.json"]  # fmt: skip
+    assert names[:6] == ["manifest.json", "events.jsonl", "files.jsonl", "natives.jsonl",
+                         "anchors.jsonl", "job_seal.json"]  # fmt: skip
 
 
 async def test_two_downloads_are_byte_identical(

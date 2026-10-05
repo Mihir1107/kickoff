@@ -111,6 +111,16 @@ def production_key(tenant_id: uuid.UUID, render_id: uuid.UUID, name: str) -> str
     return f"t/{tenant_id}/productions/{render_id}/{name}"
 
 
+def native_key(tenant_id: uuid.UUID, render_id: uuid.UUID, sha256: str) -> str:
+    """A render's native (ADR 0015 §11, §20.3): one object per (render, SHA-256). Production names
+    never contain '/', so this never collides with an output file."""
+    return f"t/{tenant_id}/productions/{render_id}/natives/sha256/{sha256}"
+
+
+async def _no_hook(point: str) -> None:
+    return None
+
+
 async def _hash_stream(stream: AsyncIterable[bytes]) -> tuple[str, int]:
     digest, size = hashlib.sha256(), 0
     async for chunk in stream:
@@ -287,13 +297,211 @@ class EvidenceWriter:
             evidence_id, key, result.sha256, result.size, result.version_id, deduplicated=False
         )
 
+    # ------------------------------------------------------------------ natives (ADR 0015 §20.9)
+    async def write_native(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        job_id: uuid.UUID,
+        render_id: uuid.UUID,
+        sha256: str,
+        size: int,
+        source_key: str,
+        source_version_id: str,
+        matter_retention_until: datetime,
+        on: Callable[[str], Awaitable[None]] | None = None,
+    ) -> WrittenEvidence:
+        """Copy a collected file into the render's production as a native: SERVER-SIDE, from the pinned
+        source version, never through the worker. Then ONE streaming SHA-256 read of the destination's
+        pinned VersionId must give the source's recorded SHA-256 and size before the row completes.
+
+        Serialized by the advisory content lock (MinIO ignores If-None-Match on copies). The row is
+        registered first with the expected hash (origin ``render``: the bytes the render delivers). A
+        complete row is reused (a retry); a pending one resumes: one stored version is verified and
+        completed, none is copied (an upload an earlier attempt left open is aborted first), more
+        than one is an integrity incident. ``on(point)``: crash-matrix seam (``native_parts_copied``
+        before the copy completes, ``native_copied`` after it, ``native_verifying`` after the first
+        chunk of the verification read)."""
+        if size <= 0:
+            raise ValueError(f"native {sha256}: size {size}")
+        hit = on or _no_hook
+        key = native_key(tenant_id, render_id, sha256)
+        retain = effective_retain_until(self._settings, matter_retention_until)
+        async with self._content_lock(key):
+            try:
+                async with asyncio.timeout(self._settings.evidence_copy_timeout_seconds):
+                    return await self._native_locked(
+                        tenant_id, job_id, render_id, key, sha256, size, retain,
+                        source_key, source_version_id, hit,
+                    )  # fmt: skip
+            except TimeoutError as exc:
+                raise EvidenceCopyTimeoutError(
+                    f"{key}: native copy exceeded {self._settings.evidence_copy_timeout_seconds}s;"
+                    " lock released"
+                ) from exc
+
+    async def _native_locked(
+        self,
+        tenant_id: uuid.UUID,
+        job_id: uuid.UUID,
+        render_id: uuid.UUID,
+        key: str,
+        sha256: str,
+        size: int,
+        retain: datetime,
+        source_key: str,
+        source_version_id: str,
+        hit: Callable[[str], Awaitable[None]],
+    ) -> WrittenEvidence:
+        candidate = new_id()
+        async with tenant_tx(self._sessions, tenant_id) as s:
+            await s.execute(
+                text(
+                    "INSERT INTO evidence_objects (id, tenant_id, job_id, render_id, storage_key, kind,"
+                    " retain_until, source_sha256, source_hash_origin)"
+                    " VALUES (:id, :t, :j, :r, :k, 'production', :ret, :h, 'render')"
+                    " ON CONFLICT (storage_key) DO NOTHING"
+                ),
+                {"id": candidate, "t": tenant_id, "j": job_id, "r": render_id, "k": key,
+                 "ret": retain, "h": sha256},
+            )  # fmt: skip
+        row = await self._row_by_key(tenant_id, key)
+        if row.kind != "production" or (row.job_id, row.render_id) != (job_id, render_id):
+            raise EvidenceIntegrityError(f"{key}: registered for another job, render or kind")
+        if row.source_sha256 != sha256:
+            raise EvidenceIntegrityError(f"{key}: registered with another hash")
+        if row.state == "complete":
+            if (row.sha256, row.size_bytes) != (sha256, size):
+                raise EvidenceIntegrityError(f"{key}: registry {row.sha256} != {sha256}")
+            return WrittenEvidence(row.id, key, sha256, size, row.version_id, deduplicated=True)
+        if row.state != "pending":
+            raise EvidenceIntegrityError(f"{key}: unexpected registry state {row.state}")
+
+        versions = [v for v, marker in await self._versions(key) if not marker]
+        if len(versions) > 1:
+            raise EvidenceIntegrityError(f"{key}: {len(versions)} versions of one native")
+        if versions:  # an earlier attempt copied it and died before completing: verify, complete
+            version = versions[0]
+        else:
+            # an earlier attempt that died mid-copy left its upload open (recorded or not, if it
+            # died before recording it): under the content lock no other copy runs, so abort all
+            await self._abort_open_uploads(key, row.upload_id)
+            version = await self._copy_native(
+                tenant_id, row.id, key, size, row.retain_until, source_key, source_version_id, hit
+            )
+            await hit("native_copied")
+        digest, got = await self._read_hash(key, version, hit)
+        if (digest, got) != (sha256, size):
+            raise EvidenceIntegrityError(
+                f"{key}: version {version} reads {got} bytes sha256 {digest}, the source recorded"
+                f" {size} bytes sha256 {sha256}"
+            )
+        await self._complete(tenant_id, row.id, sha256, size, version)
+        return WrittenEvidence(row.id, key, sha256, size, version, deduplicated=False)
+
+    async def _copy_native(
+        self,
+        tenant_id: uuid.UUID,
+        evidence_id: uuid.UUID,
+        key: str,
+        size: int,
+        retain_until: datetime,
+        source_key: str,
+        source_version_id: str,
+        hit: Callable[[str], Awaitable[None]],
+    ) -> str:
+        """CreateMultipartUpload (COMPLIANCE lock and retain-until at create), UploadPartCopy from the
+        PINNED source version in fixed ranges, CompleteMultipartUpload; any failure aborts."""
+        s3 = self._s3
+        created = await s3.create_multipart_upload(
+            Bucket=self._bucket,
+            Key=key,
+            ObjectLockMode="COMPLIANCE",
+            ObjectLockRetainUntilDate=ensure_utc(retain_until),
+        )
+        upload_id = created["UploadId"]
+        try:
+            async with tenant_tx(self._sessions, tenant_id) as s:
+                await s.execute(
+                    text(  # write-once: a retry's upload is found by listing (_abort_open_uploads)
+                        "UPDATE evidence_objects SET upload_id = :u WHERE id = :id AND state = 'pending'"
+                        " AND upload_id IS NULL"
+                    ),
+                    {"u": upload_id, "id": evidence_id},
+                )
+            source: CopySourceTypeDef = {
+                "Bucket": self._bucket,
+                "Key": source_key,
+                "VersionId": source_version_id,
+            }
+            parts: list[CompletedPartTypeDef] = []
+            step = self._settings.evidence_copy_part_size_bytes
+            for number, start in enumerate(range(0, size, step), start=1):
+                end = min(start + step, size) - 1
+                part = await s3.upload_part_copy(
+                    Bucket=self._bucket,
+                    Key=key,
+                    UploadId=upload_id,
+                    PartNumber=number,
+                    CopySource=source,
+                    CopySourceRange=f"bytes={start}-{end}",
+                )
+                parts.append({"PartNumber": number, "ETag": part["CopyPartResult"]["ETag"]})
+            await hit("native_parts_copied")
+            done = await s3.complete_multipart_upload(
+                Bucket=self._bucket,
+                Key=key,
+                UploadId=upload_id,
+                MultipartUpload={"Parts": parts},
+                IfNoneMatch="*",
+            )
+        except BaseException as exc:
+            try:
+                await s3.abort_multipart_upload(Bucket=self._bucket, Key=key, UploadId=upload_id)
+            except Exception as abort_exc:  # noqa: BLE001 - attached to the original error
+                exc.add_note(f"abort of native copy {upload_id} also failed: {abort_exc!r}")
+            raise
+        version = done.get("VersionId")
+        if not version:
+            raise EvidenceIntegrityError(f"{key}: store returned no VersionId for the copy")
+        return version
+
+    async def _abort_open_uploads(self, key: str, recorded: str | None) -> None:
+        """Abort the recorded upload and every other open multipart upload at exactly ``key``."""
+        ids = {recorded} if recorded else set()
+        resp = await self._s3.list_multipart_uploads(Bucket=self._bucket, Prefix=key)
+        ids |= {u["UploadId"] for u in resp.get("Uploads", []) if u.get("Key") == key}
+        for upload_id in sorted(ids):
+            try:
+                await self._s3.abort_multipart_upload(
+                    Bucket=self._bucket, Key=key, UploadId=upload_id
+                )
+            except ClientError as exc:
+                if str(exc.response.get("Error", {}).get("Code")) != "NoSuchUpload":
+                    raise
+
+    async def _read_hash(
+        self, key: str, version_id: str, hit: Callable[[str], Awaitable[None]]
+    ) -> tuple[str, int]:
+        """One streaming SHA-256 read of exactly this version (our hash, never S3's checksum)."""
+        resp = await self._s3.get_object(Bucket=self._bucket, Key=key, VersionId=version_id)
+        digest, size, first = hashlib.sha256(), 0, True
+        async with resp["Body"] as body:
+            async for chunk in body.iter_chunks(1 << 20):
+                digest.update(chunk)
+                size += len(chunk)
+                if first:
+                    first = False
+                    await hit("native_verifying")
+        return digest.hexdigest(), size
+
     async def _row_by_key(self, tenant_id: uuid.UUID, key: str) -> Any:
         async with tenant_tx(self._sessions, tenant_id) as s:
             return (
                 await s.execute(
                     text(
                         "SELECT id, kind, job_id, render_id, state, sha256, size_bytes, source_sha256,"
-                        " version_id, retain_until FROM evidence_objects WHERE storage_key = :k"
+                        " version_id, retain_until, upload_id FROM evidence_objects WHERE storage_key = :k"
                     ),
                     {"k": key},
                 )

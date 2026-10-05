@@ -19,14 +19,19 @@ from typing import Any
 
 from edisc_core.canonical import canonical_json, to_jsonable
 from edisc_core.time import format_utc
-from edisc_custody.merkle import batch_root
+from edisc_custody.merkle import batch_root, leaf_hash, root_from_leaf_hashes
 from edisc_custody.render_files import (
     RENDER_BATCH_EVENT,
     RENDER_COMPLETED,
     RENDER_LIFECYCLE,
+    RENDER_STARTED,
     RenderFileError,
     batches_root,
+    file_fields,
     files_root,
+    has_natives,
+    native_leaf_record,
+    natives_root,
 )
 
 GENESIS_HASH = "0" * 64
@@ -197,7 +202,11 @@ class ChainVerifier:
     at its seq; no anchor points past the head; hidden anchors (delete markers) fail; a finalized
     stream must be sealed at its head. Render streams (ADR 0015 §14): every ``render_files_batch`` root,
     count, index and first ``ord`` recomputed from its file records, and ``render_completed``'s file
-    count, batch count and root over the batch roots recomputed from the batches before it.
+    count, batch count and root over the batch roots recomputed from the batches before it. From
+    renderer 1.3.0 (the version ``render_started`` records, which also picks the file leaf) every
+    batch's ``natives_root``, count and first native ``ord`` are recomputed from its native records,
+    each native is first referenced by a file of its own batch and recorded once, and
+    ``render_completed``'s native count and root over every native record are recomputed (§20).
     """
 
     def __init__(self, tenant_id: str, stream_id: str) -> None:
@@ -209,6 +218,10 @@ class ChainVerifier:
         self._halted = False
         self._render_roots: list[str] = []
         self._render_files = 0
+        self._renderer_version: str | None = None  # from render_started
+        self._native_leaves: list[bytes] = []  # leaf hashes, 32 bytes per native
+        self._native_shas: set[str] = set()
+        self._native_max_file_ord = -1
 
     # -- anchors
     def add_anchor(self, anchor: Anchor) -> None:
@@ -243,9 +256,10 @@ class ChainVerifier:
         ev: EventRecord,
         batch_items: Iterable[tuple[str, str]] | None = None,
         files: Iterable[Mapping[str, Any]] | None = None,
+        natives: Iterable[Mapping[str, Any]] | None = None,
     ) -> None:
         """``batch_items``: the linked items of a collection batch; ``files``: the file records of a
-        ``render_files_batch``, in render order."""
+        ``render_files_batch``, in render order; ``natives``: that batch's native records, in order."""
         r = self.report
         if self._halted:
             return
@@ -270,8 +284,11 @@ class ChainVerifier:
         r.head_hash = ev.event_hash
         if ev.event_type == BATCH_EVENT:
             self._check_batch(ev, list(batch_items or ()))
+        elif ev.event_type == RENDER_STARTED:
+            version = ev.fields.get("payload", {}).get("renderer_version")
+            self._renderer_version = version if isinstance(version, str) else None
         elif ev.event_type == RENDER_BATCH_EVENT:
-            self._check_render_batch(ev, list(files or ()))
+            self._check_render_batch(ev, list(files or ()), list(natives or ()))
         elif ev.event_type == RENDER_COMPLETED:
             self._check_render_completed(ev)
         for where, anchored_hash in self._anchors.get(ev.seq, ()):
@@ -299,7 +316,16 @@ class ChainVerifier:
                 f"seq {ev.seq}: batch Merkle root mismatch (item rows altered, added or removed)"
             )
 
-    def _check_render_batch(self, ev: EventRecord, files: list[Mapping[str, Any]]) -> None:
+    def _natives_on(self) -> bool:
+        try:
+            return has_natives(self._renderer_version)
+        except RenderFileError as exc:
+            self.report.fail(f"render_started: {exc}")
+            return False
+
+    def _check_render_batch(
+        self, ev: EventRecord, files: list[Mapping[str, Any]], natives: list[Mapping[str, Any]]
+    ) -> None:
         r = self.report
         r.batches_checked += 1
         r.files_checked += len(files)
@@ -321,7 +347,7 @@ class ChainVerifier:
                 f"seq {ev.seq}: first file has ord {files[0].get('ord')}, expected {self._render_files}"
             )
         try:
-            root = files_root(files)
+            root = files_root(files, file_fields(self._renderer_version))
         except RenderFileError as exc:
             r.fail(f"seq {ev.seq}: {exc}")
             root = ""
@@ -329,8 +355,54 @@ class ChainVerifier:
             r.fail(
                 f"seq {ev.seq}: render batch Merkle root mismatch (file records altered, added or removed)"
             )
+        if self._natives_on():
+            self._check_batch_natives(ev, payload, natives, self._render_files, len(files))
+        elif natives or "natives_root" in payload:
+            r.fail(f"seq {ev.seq}: natives in a render of renderer {self._renderer_version}")
         self._render_roots.append(str(payload.get("merkle_root")))
         self._render_files += len(files)
+
+    def _check_batch_natives(
+        self,
+        ev: EventRecord,
+        payload: Mapping[str, Any],
+        natives: list[Mapping[str, Any]],
+        first_file: int,
+        file_count: int,
+    ) -> None:
+        r = self.report
+        first = len(self._native_leaves)
+        if payload.get("native_count") != len(natives) or payload.get("first_native_ord") != first:
+            r.fail(
+                f"seq {ev.seq}: render batch natives {payload.get('native_count')} from"
+                f" {payload.get('first_native_ord')}, found {len(natives)} from {first}"
+            )
+        try:
+            root = natives_root(natives, first)
+        except RenderFileError as exc:
+            r.fail(f"seq {ev.seq}: {exc}")
+            root = ""
+        if root != payload.get("natives_root"):
+            r.fail(
+                f"seq {ev.seq}: render batch natives_root mismatch (native records altered, added or"
+                " removed)"
+            )
+        for n in natives:
+            try:
+                view = native_leaf_record(n)
+            except RenderFileError:
+                continue  # reported with the root above
+            ords = view["file_ords"]
+            if not first_file <= ords[0] < first_file + file_count:
+                r.fail(
+                    f"seq {ev.seq}: native {view['sha256']} is first referenced by file {ords[0]},"
+                    " not by a file of its batch"
+                )
+            if view["sha256"] in self._native_shas:
+                r.fail(f"seq {ev.seq}: native {view['sha256']} recorded twice")
+            self._native_shas.add(view["sha256"])
+            self._native_max_file_ord = max(self._native_max_file_ord, ords[-1])
+            self._native_leaves.append(leaf_hash(canonical_json(view)))
 
     def _check_render_completed(self, ev: EventRecord) -> None:
         r = self.report
@@ -352,6 +424,21 @@ class ChainVerifier:
             return
         if root != payload.get("batches_root"):
             r.fail(f"seq {ev.seq}: render_completed batches_root does not match the batch roots")
+        if not self._natives_on():
+            return
+        total = root_from_leaf_hashes(self._native_leaves).hex()
+        if payload.get("native_count") != len(self._native_leaves):
+            r.fail(
+                f"seq {ev.seq}: render_completed counts {payload.get('native_count')} natives, the"
+                f" batches hold {len(self._native_leaves)}"
+            )
+        if payload.get("natives_root") != total:
+            r.fail(f"seq {ev.seq}: render_completed natives_root does not match the native records")
+        if self._native_max_file_ord >= self._render_files:
+            r.fail(
+                f"seq {ev.seq}: a native is referenced by file {self._native_max_file_ord}, the render"
+                f" has {self._render_files} files"
+            )
 
     # -- end
     def finish(

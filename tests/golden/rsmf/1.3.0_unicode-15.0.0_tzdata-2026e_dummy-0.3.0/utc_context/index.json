@@ -1,0 +1,68 @@
+{
+  "files": [
+    {
+      "name": "C00000DUMMY_2026-01-06_part001of001.rsmf",
+      "sha256": "78b5c2b9272ceb0ad9b85e0947ee91e5a7b80cf8d429d18855dba353d455b969",
+      "size": 79853
+    },
+    {
+      "name": "C00000DUMMY_2026-01-07_part001of001.rsmf",
+      "sha256": "0abbf83a8fcb31f37513aed1affc2f17c85922e2154304baee18aba0c98044b4",
+      "size": 25201
+    },
+    {
+      "name": "D00002DUMMY_2026-01-06_part001of001.rsmf",
+      "sha256": "4228e4f0d00ba58fd63eeb039bc79ff7344675f4b1569d4bf4f127875697bc31",
+      "size": 20087
+    },
+    {
+      "name": "D00002DUMMY_2026-01-07_part001of001.rsmf",
+      "sha256": "de3619fd93f797961e834224a6e820d4fb75ce62c8a0956e07e284ec0507c48e",
+      "size": 133557
+    },
+    {
+      "name": "G00001DUMMY_2026-01-06_part001of001.rsmf",
+      "sha256": "0bb6774ef8719508e833ee5e79c51b63c233254bd2bc1234fd32f28cb898b6e5",
+      "size": 79061
+    },
+    {
+      "name": "G00001DUMMY_2026-01-07_part001of001.rsmf",
+      "sha256": "875542fecdec185ffd21ccc733a20d66611ad422f71659a63b7798e03e580391",
+      "size": 24881
+    },
+    {
+      "name": "G00003DUMMY_2026-01-06_part001of001.rsmf",
+      "sha256": "4ee8de04753351a836904a21f38baf18bfc2932d34322424c84dec6596277ac4",
+      "size": 76184
+    },
+    {
+      "name": "G00003DUMMY_2026-01-07_part001of001.rsmf",
+      "sha256": "070180fbb8a8a1fe91620fb03f0347fb2ff19e8ff576f8b2ba4778cc233fcab8",
+      "size": 18212
+    }
+  ],
+  "options": {
+    "cap": 10000,
+    "external_over_bytes": 1073741824,
+    "include_context": true,
+    "time_zone": "UTC"
+  },
+  "reconciliation": {
+    "attachments": 11,
+    "context_events": 8,
+    "context_events_out_of_scope": 4,
+    "edits": 3,
+    "events_out": 96,
+    "external_attachments": 0,
+    "files": 8,
+    "items_in": 96,
+    "parents_not_rendered": 0,
+    "renderer_version": "1.3.0",
+    "slices": 8,
+    "subject_digest": "d1074566723859c56385e1de6c6385f13860b85597ceb582757ef24978cf370a",
+    "tzdata_version": "2026e",
+    "unavailable_attachments": 3,
+    "unicode_version": "15.0.0"
+  },
+  "renderer_version": "1.3.0"
+}

@@ -548,7 +548,8 @@ class Dataset:
             f"attachment-{index}.{ext}",
             mime,
             ext,
-            200 + h64(self.seed, "fsize", conv, index) % 3800,
+            self.spec.file_size_min
+            + h64(self.seed, "fsize", conv, index) % self.spec.file_size_span,
         )
 
     def file_bytes(self, file_id: str) -> bytes:

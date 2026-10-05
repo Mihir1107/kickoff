@@ -835,6 +835,8 @@ class Render(Base):
     sealed_at: Mapped[datetime | None] = mapped_column(TZ)
     seal_failures: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     last_seal_error: Mapped[str | None] = mapped_column(Text)
+    native_count: Mapped[int | None] = mapped_column(BigInteger)
+    natives_root: Mapped[str | None] = mapped_column(Text)
 
 
 class RenderFile(Base):
@@ -864,6 +866,37 @@ class RenderFile(Base):
     sha256: Mapped[str] = mapped_column(Text)
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     record: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    custody_event_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+
+
+class RenderNative(Base):
+    __tablename__ = "render_natives"
+    __table_args__ = (
+        UniqueConstraint("render_id", "sha256"),
+        ForeignKeyConstraint(["tenant_id", "render_id"], ["renders.tenant_id", "renders.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "evidence_object_id"],
+            ["evidence_objects.tenant_id", "evidence_objects.id"],
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "custody_event_id"],
+            ["custody_events.tenant_id", "custody_events.id"],
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        Index(None, "custody_event_id"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    render_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    ord: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sha256: Mapped[str] = mapped_column(Text)
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    storage_key: Mapped[str] = mapped_column(Text)
+    version_id: Mapped[str] = mapped_column(Text)
+    file_ords: Mapped[list[int]] = mapped_column(ARRAY(Integer))
+    evidence_object_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     custody_event_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
 

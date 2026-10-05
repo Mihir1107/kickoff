@@ -39,7 +39,8 @@ class Expected:
     deleted: bool
     edits: int
     reactions: frozenset[str]
-    files: frozenset[str]  # file ids rendered with their bytes
+    files: frozenset[str]  # file ids rendered with their bytes, or as natives outside the zip
+    external: frozenset[str]  # of `files`, those over the case's threshold (natives)
     unavailable: frozenset[str]  # file ids rendered as placeholders
     root: str | None  # thread root ts for replies
     root_linked: bool  # the job holds the root (in scope, or fetched by the thread policy)
@@ -134,12 +135,14 @@ def build(case: Case) -> RenderOracle:
                     versions.append(_state(seen))
                 if seen is not None and seen.deleted_ts is None:
                     reactions = frozenset(n for n, _ in seen.reactions)
-            held, unavailable = set(), set()
+            held, unavailable, external = set(), set(), set()
             for f in m.files if m.deleted_ts is None else ():
                 if case.source == "export" or any(
                     DummyConnector.file_unavailable_reason(ds, e, f.id) is None for e in case.epochs
                 ):
                     held.add(f.id)
+                    if f.size > case.options.external_over_bytes:
+                        external.add(f.id)
                 else:
                     unavailable.add(f.id)
             subtype = "message_deleted" if m.deleted_ts is not None else m.subtype
@@ -152,7 +155,8 @@ def build(case: Case) -> RenderOracle:
                 subject=f"{ws}/{conv}/{ts}", ts=ts, conversation_id=conv, day=day, type=etype,
                 deleted=m.deleted_ts is not None, edits=len(versions) - 1,
                 reactions=reactions,
-                files=frozenset(held), unavailable=frozenset(unavailable), root=root,
+                files=frozenset(held), external=frozenset(external),
+                unavailable=frozenset(unavailable), root=root,
                 root_linked=bool(root and root in linked_roots),
                 root_primary_same_slice=bool(
                     root_msg is not None and root_msg.sent_at.astimezone(zone).date() == day
@@ -166,7 +170,10 @@ def build(case: Case) -> RenderOracle:
                 and not (root_msg is not None and root_msg.sent_at.astimezone(zone).date() == day)
             ):
                 out.context_roots.add(f"{ws}/{conv}/{root}")
-    out.features = features(case, ds, out)
+                root_files = () if all_days[root].deleted_ts else all_days[root].files
+                if any(f.size > case.options.external_over_bytes for f in root_files):
+                    out.features.add("file:external_in_context")
+    out.features |= features(case, ds, out)
     return out
 
 
@@ -205,6 +212,8 @@ def features(case: Case, ds: Dataset, o: RenderOracle) -> set[str]:
             f.add("file:held")
         if e.unavailable:
             f.add("file:unavailable")
+        if e.external:
+            f.add("file:external")
         if e.root and e.root_primary_same_slice:
             f.add("thread:root_same_slice")
         if e.root and not e.root_linked:
@@ -238,6 +247,21 @@ def features(case: Case, ds: Dataset, o: RenderOracle) -> set[str]:
         f.add(f"files:{case.expect_files}@batch{case.batch_size}")
     if case.spec.messages_per_unit >= 10_000:
         f.add(f"slice_events:{case.spec.messages_per_unit}")
+    days_of: dict[str, set[date]] = {}
+    for e in o.primaries.values():
+        for fid in e.external:
+            days_of.setdefault(fid, set()).add(e.day)
+    by_slice: dict[tuple[str, date], set[str]] = {}
+    for e in o.primaries.values():
+        kinds = by_slice.setdefault((e.conversation_id, e.day), set())
+        kinds |= {"external"} if e.external else set()
+        kinds |= {"unavailable"} if e.unavailable else set()
+    if any(k == {"external", "unavailable"} for k in by_slice.values()):
+        f.add("file:external_with_unavailable")  # one `.rsmf` with both kinds of placeholder
+    if any(len(d) > 1 for d in days_of.values()):
+        f.add("file:external_in_several_slices")
+    if case.entry_limit is not None:
+        f.add("parts:split_by_entries")
     if 1 in case.epochs:
         f.add("renamed:channel_and_user")
     if 2 in case.epochs:
@@ -266,6 +290,8 @@ COVERAGE = {
     "subtype:me_message", "subtype:bot_message",
     "subtype:channel_topic", "subtype:pinned_item",
     "deleted", "edits", "hint_only_edit", "reactions", "reactions:before_deletion", "file:held", "file:unavailable",
+    "file:external", "file:external_with_unavailable", "file:external_in_context",
+    "file:external_in_several_slices", "parts:split_by_entries",
     "thread:root_same_slice", "thread:root_elsewhere", "thread:root_not_collected",
     "text:emoji", "text:rtl", "text:zero_width", "text:combining", "text:long", "text:attachment_only",
     "broadcast", "broadcast:parent_outside_slice", "broadcast:edited", "broadcast:deleted",

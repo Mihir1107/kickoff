@@ -38,6 +38,7 @@ class Case:
     batch_size: int = 500  # render_files_batch_size
     check_threads: bool = True  # thread assertions (off for the cap cases, whose parts move roots)
     expect_files: int | None = None  # exact number of output files, when the case is about it
+    entry_limit: int | None = None  # a tiny per-test zip entry limit (ADR 0015 §20.10)
 
 
 def _spec(**kw: object) -> DatasetSpec:
@@ -114,6 +115,36 @@ CASES: dict[str, Case] = {
         ),
         check_threads=False,
         expect_files=2,
+    ),
+    # natives (ADR 0015 §11, §20): files from 768 KiB to 1.25 MiB against a 1 MiB threshold, so
+    # some leave the zip and some stay; each file is reused across messages and days (one native,
+    # several slices), some are unavailable (placeholders next to natives)
+    "externals": Case(
+        _spec(
+            seed=46,
+            file_size_min=768 << 10,
+            file_size_span=512 << 10,
+            p_file=0.35,
+            failures=UNAVAILABLE,
+        ),
+        options=RenderOptions(external_over_bytes=1 << 20),
+    ),
+    # a native in a thread root rendered as context (day 0 out of range)
+    "externals_context": Case(
+        _spec(
+            seed=47,
+            file_size_min=768 << 10,
+            file_size_span=512 << 10,
+            p_file=0.5,
+            p_reply_prev_day=0.5,
+        ),
+        epochs=(0, 1),
+        first_day=1,
+        options=RenderOptions(external_over_bytes=1 << 20),
+    ),
+    # parts split by the zip entry count, with a tiny per-test limit (6 entries per zip)
+    "entries_split": Case(
+        _spec(seed=48, p_file=0.6, conversations=2), entry_limit=6, check_threads=False
     ),
     # the export dialect: completeness against the archive, the ADR 0014 caveat in every file
     "export_full": Case(_spec(seed=42, dialect="slack_history"), source="export"),

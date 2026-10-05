@@ -177,7 +177,9 @@ async def test_a_render_workflow_records_a_sealed_stream_referencing_the_sealed_
         "seal": {"key": job.seal_storage_key, "version_id": seal_version},
     }
     assert {k: started[k] for k in runtime_versions()} == runtime_versions()
-    assert started["options"] == {"include_context": True, "time_zone": "UTC", "cap": 10_000}
+    assert started["options"] == {
+        "include_context": True, "time_zone": "UTC", "cap": 10_000, "external_over_bytes": 1 << 30,
+    }  # fmt: skip
     batches = [e.payload for e in st["events"][1:-1]]
     assert [b["batch"] for b in batches] == list(range(n_batches))
     assert [b["first_ord"] for b in batches] == list(range(0, len(want), BATCH))

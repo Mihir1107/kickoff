@@ -44,8 +44,8 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         action="append",
         default=[],
-        help="render packages: an output file the package references by hash instead of embedding;"
-        " repeatable, matched by SHA-256",
+        help="render packages: an output file or native the package references by hash instead of"
+        " embedding; repeatable, matched by SHA-256",
     )
     parser.add_argument(
         "--job-package",
@@ -118,7 +118,9 @@ def _render(
             f" batches, {chain.files_checked} files in Merkle roots, {chain.anchors_checked} WORM anchors\n"
             f"  head {chain.head_hash}\n"
         )
-    sys.stdout.write(f"  {report.outputs_checked} output files re-hashed\n")
+    sys.stdout.write(
+        f"  {report.outputs_checked} output files and {report.natives_checked} natives re-hashed\n"
+    )
     if tolerate and is_zip(package):
         sys.stdout.write("  --tolerate-os-metadata does not apply to a zip: verified strictly\n")
     for name in report.tolerated:
