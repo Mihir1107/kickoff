@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from edisc_connector_dummy.dataset import Dataset, Msg, User, h64
+from edisc_connector_dummy.dataset import SYSTEM_SUBTYPES, Dataset, Msg, User, h64
 
 
 def _profile(ds: Dataset, user: User, day_index: int, epoch: int) -> dict[str, Any]:
@@ -57,7 +57,7 @@ def message(ds: Dataset, m: Msg, epoch: int) -> dict[str, Any]:
         out["bot_id"] = author.bot_id
         if author.is_app_user:
             out["app_id"] = f"A{author.id[1:6]}DUMMY"
-    if m.subtype != "channel_join":
+    if m.subtype not in SYSTEM_SUBTYPES:
         out["client_msg_id"] = (
             f"{h64(ds.seed, 'cmid', m.conversation_id, m.ts):016x}-0000-4000-8000-000000000000"
         )
@@ -84,9 +84,18 @@ def message(ds: Dataset, m: Msg, epoch: int) -> dict[str, Any]:
             out["is_locked"] = False
             out["subscribed"] = False
         else:
-            out["parent_user_id"] = next(
-                p.user for p in ds.thread(m.conversation_id, m.thread_ts, epoch)[:1]
-            )
+            parent = ds.thread(m.conversation_id, m.thread_ts, epoch)[:1]
+            out["parent_user_id"] = next(p.user for p in parent)
+            if m.subtype == "thread_broadcast" and parent:
+                # Slack embeds the thread root in a broadcast; volatile (its counters move with
+                # every reply), never part of the broadcast's own version
+                out["root"] = {
+                    "text": parent[0].text if parent[0].deleted_ts is None else "",
+                    "user": parent[0].user,
+                    "ts": parent[0].ts,
+                    "thread_ts": parent[0].ts,
+                    "reply_count": len(parent[0].reply_ts),
+                }
     if m.edited:
         out["edited"] = {"user": m.edited[0], "ts": m.edited[1]}
     if m.files:

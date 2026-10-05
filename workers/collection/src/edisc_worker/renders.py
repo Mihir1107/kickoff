@@ -281,6 +281,7 @@ class RenderRun:
             return str(row.status)
         self._check_versions(row)
         check = await self.check_source(tenant_id, row.job_id)
+        await self.hooks.hit("begin_checked")
         async with tenant_tx(self.sessions, tenant_id) as s:
             cur = await self._locked(s, render_id)
             if cur.status != "requested":
@@ -329,6 +330,8 @@ class RenderRun:
                     },
                 )
                 status = "rendering"
+            await self.hooks.hit("begin_tx")
+        await self.hooks.hit("begin_committed")
         await self._anchor(tenant_id, render_id)
         await self.hooks.hit("after_begin")
         return status
@@ -423,7 +426,7 @@ class RenderRun:
         try:
             out = await render_and_store(
                 self.sessions, self.s3, self.settings, tenant_id=tenant_id, job_id=row.job_id,
-                render_id=render_id, options=options_of(row), on_stored=sink,
+                render_id=render_id, options=options_of(row), on_stored=sink, hooks=self.hooks,
             )  # fmt: skip
             if pending:
                 await self._commit_batch(tenant_id, render_id, pending, size)
@@ -452,6 +455,7 @@ class RenderRun:
                 {"n": out.file_count, "root": batches_root(roots), "sum": json.dumps(summary),
                  "i": render_id},
             )  # fmt: skip
+            await self.hooks.hit("files_tx")
         await self.hooks.hit("after_files")
         return "rendered"
 
@@ -566,6 +570,8 @@ class RenderRun:
                 ),
                 {"n": len(files), "i": render_id},
             )
+            await self.hooks.hit("batch_tx")
+        await self.hooks.hit("batch_committed")
         await self._anchor(tenant_id, render_id)
         await self.hooks.hit("after_batch")
 
@@ -598,6 +604,8 @@ class RenderRun:
                         ),
                         {"i": render_id},
                     )
+                    await self.hooks.hit("complete_tx")
+            await self.hooks.hit("complete_committed")
             await self._anchor(tenant_id, render_id)
             await self.hooks.hit("after_completed")
             row = await self.row(tenant_id, render_id)
@@ -644,6 +652,8 @@ class RenderRun:
                         {"i": new_id(), "t": tenant_id, "j": cur.job_id,
                          "m": f"render {render_id} failed: {error_type}: {error}"[:2000]},
                     )  # fmt: skip
+                    await self.hooks.hit("fail_tx")
+            await self.hooks.hit("fail_committed")
             await self._anchor(tenant_id, render_id)
         return await self.seal(tenant_id, render_id)
 
@@ -791,6 +801,8 @@ class RenderRun:
                         "seal": {"key": key, "version_id": version},
                     },
                 )
+            await self.hooks.hit("seal_tx")
+        await self.hooks.hit("sealed")
         await anchor_if_due(
             self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=tenant_id
         )

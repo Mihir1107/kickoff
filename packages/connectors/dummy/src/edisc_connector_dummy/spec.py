@@ -62,6 +62,10 @@ class DatasetSpec(BaseModel):
     p_reply_same_day: float = 0.20
     p_reply_prev_day: float = 0.06
     p_file: float = 0.10
+    # message kinds (0.3.0); conversation 0 also forces one of each (dataset docstring)
+    p_broadcast: float = 0.10  # a reply also sent to the channel (subtype thread_broadcast)
+    p_me_message: float = 0.03
+    p_uninterpretable: float = 0.02  # subtypes the renderer cannot interpret (rendered `unknown`)
     # evolution per epoch
     p_edit: float = 0.06
     p_hint_only_edit: float = 0.03

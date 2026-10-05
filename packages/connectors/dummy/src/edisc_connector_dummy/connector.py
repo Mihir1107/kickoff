@@ -91,7 +91,7 @@ def _decode(cursor: Cursor | None) -> int:
 
 class DummyConnector:
     source = "dummy"
-    version = "0.2.0"  # 0.2.0: conversation metadata pages in the directory unit
+    version = "0.3.0"  # 0.3.0: leaves, thread broadcasts, me_message, uninterpretable subtypes
     item_source = "slack"  # both dialects simulate the Slack Web API
     dialect = "api"
     archive_backed = False
@@ -194,8 +194,9 @@ class DummyConnector:
             body = json.dumps({"ok": False, "error": reason.value}, separators=(",", ":")).encode()
             raise ConversationInaccessibleError(conversation_id, reason, body)
 
+    @staticmethod
     def file_unavailable_reason(
-        self, ds: Dataset, epoch: int, file_ref: str
+        ds: Dataset, epoch: int, file_ref: str
     ) -> FileUnavailableReason | None:
         f = ds.spec.failures
         if (

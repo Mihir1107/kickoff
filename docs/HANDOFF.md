@@ -100,6 +100,8 @@ carrying the render id with matter retention, and `edisc-verify` render packages
 Step 4 follow-ups (ADR 0015 §15): visible stuck sealing (migration 0027) and version-keyed render
 queues (`renders.r<renderer>.u<unicode>.tz<tzdata>`); render episodes for unroutable renders and stuck
 sealing (§16, migration 0028). ADR 0017 (old triples) is a DRAFT waiting for review.
+**Step 5:** parts A (corpus, dummy 0.3.0) and B (crash matrix) done (§17). Part C (render package
+download endpoint) waits for the stream-zip decision.
 
 **Fixed 2026-10-04 (3e47bec):** an ABA race in the batch checkpoint guard (a unit starts and ends at
 cursor NULL): a stalled zombie attempt re-applied its first page after the retry finished the unit.

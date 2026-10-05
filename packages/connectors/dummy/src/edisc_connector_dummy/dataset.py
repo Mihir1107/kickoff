@@ -9,6 +9,14 @@ message, threads (same-day replies and replies on the NEXT day), files (some sha
 reactions, edits, bot and app messages, and messy content (emoji, RTL, zero-width and combining
 characters, a very long message, an attachment with an empty body).
 
+Message kinds (0.3.0): the system message of a unit is a ``channel_join`` on even days and a
+``channel_leave`` on odd days; replies may be ``thread_broadcast`` (also sent to the channel); some
+top-level messages are ``me_message`` or a subtype the renderer cannot interpret (``channel_topic``,
+``pinned_item``). Conversation 0 forces one of each: day 0 slot 3 (the forced same-day reply) is a
+broadcast that is edited at epoch 1 and deleted at epoch 2, day 1 slot 4 (a reply to a parent of the
+previous day) is a broadcast, day 0 slot 6 is a ``me_message``, and the first two eligible top-level
+slots of day 1 are ``channel_topic`` and ``pinned_item``.
+
 Epochs: epoch ``k >= 1`` adds one new day of messages and changes existing ones (edits, edit markers
 that change without a content change, deletions, reaction changes, renamed users). Edits made in an
 epoch are timestamped after the original collection window.
@@ -50,6 +58,8 @@ WORDS = (
     "audit",
     "merger",
 )
+SYSTEM_SUBTYPES = ("channel_join", "channel_leave")  # no profile embed, no blocks, never edited
+UNINTERPRETABLE = ("channel_topic", "pinned_item")
 REACTIONS = ("thumbsup", "eyes", "white_check_mark", "tada", "joy", "pray")
 MIMES = (
     ("pdf", "application/pdf"),
@@ -344,6 +354,14 @@ class Dataset:
                 if s.role == "reply_prev" and s.parent_slot is not None:
                     replies[s.parent_slot].append(self.ts(conv, d + 1, i))
 
+        conv0 = conv == self.conversations()[0].id
+        # conversation 0, day 1: the first two eligible top-level slots get uninterpretable subtypes
+        eligible = [
+            i for i, s in enumerate(slots) if 5 <= i < k - 1 and s.role == "top" and not s.is_parent
+        ]
+        forced_unknown = (
+            dict(zip(eligible[:2], UNINTERPRETABLE, strict=False)) if conv0 and d == 1 else {}
+        )
         out: list[Msg] = []
         for i, s in enumerate(slots):
             ts = self.ts(conv, d, i)
@@ -372,10 +390,11 @@ class Dataset:
             files: tuple[FileRef, ...] = ()
             if s.role == "system":
                 subtype, text, flavor = (
-                    "channel_join",
-                    f"<@{author}> has joined the channel",
-                    "system",
+                    ("channel_join", f"<@{author}> has joined the channel", "system")
+                    if d % 2 == 0
+                    else ("channel_leave", f"<@{author}> has left the channel", "system")
                 )
+                tags.append(subtype)
             else:
                 words = " ".join(
                     WORDS[h64(self.seed, "w", conv, d, i, n) % len(WORDS)] for n in range(6)
@@ -395,6 +414,28 @@ class Dataset:
                     )
                 if author_user.is_bot:
                     subtype = "bot_message"
+                is_reply = s.role in ("reply_same", "reply_prev")
+                if is_reply and (
+                    (conv0 and (d, i) in ((0, 3), (1, 4)))
+                    or unit(self.seed, "bcast", conv, d, i) < spec.p_broadcast
+                ):
+                    subtype = "thread_broadcast"
+                    tags.append("thread_broadcast")
+                elif s.role == "top" and not s.is_parent and not author_user.is_bot:
+                    roll = unit(self.seed, "kind", conv, d, i)
+                    if i in forced_unknown or (
+                        not (conv0 and d == 1) and roll < spec.p_uninterpretable
+                    ):
+                        subtype = forced_unknown.get(
+                            i, UNINTERPRETABLE[h64(self.seed, "unk", conv, d, i) % 2]
+                        )
+                        tags.append("uninterpretable")
+                    elif (conv0 and (d, i) == (0, 6)) or (
+                        roll >= spec.p_uninterpretable
+                        and roll < spec.p_uninterpretable + spec.p_me_message
+                    ):
+                        subtype = "me_message"
+                        tags.append("me_message")
             if flavor != "plain":
                 tags.append(flavor)
 
@@ -427,10 +468,13 @@ class Dataset:
                 if deleted_ts is not None or s.role == "system":
                     break
                 # conversation 0 / day 0 / epoch 1 forces one of each change onto fixed slots (5..8)
-                forced = conv == self.conversations()[0].id and d == 0 and step == 1 and 5 <= i <= 8
+                forced = conv0 and d == 0 and step == 1 and 5 <= i <= 8
+                broadcast = conv0 and d == 0 and i == 3  # the forced broadcast: edit, then delete
                 roll = unit(self.seed, "evo", conv, ts, step)
                 when = self.epoch_time(step)
-                if forced:
+                if broadcast:
+                    change = {1: "edit", 2: "delete"}.get(step)
+                elif forced:
                     change = {5: "edit", 6: "hint", 7: "delete", 8: None}[i]
                 elif roll < spec.p_delete:
                     change = "delete"

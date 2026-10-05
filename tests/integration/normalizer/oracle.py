@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from edisc_connector_dummy.dataset import Dataset, h64
+from edisc_connector_dummy.dataset import SYSTEM_SUBTYPES, Dataset, h64
 
 
 class _Stream:
@@ -93,7 +93,7 @@ def expected(ds: Dataset, last_epoch: int) -> dict[str, Any]:
                     r_state = tuple(sorted((name, tuple(sorted(who))) for name, who in m.reactions))
                     if r_state or f"{mid}#reactions" in reactions:
                         reactions.setdefault(f"{mid}#reactions", _Stream()).observe(r_state)
-                    if m.subtype != "channel_join":
+                    if m.subtype not in SYSTEM_SUBTYPES:
                         u = users[index[m.user]]
                         i = index[m.user]
                         display = ds.display_name_at(i, m.day_index, epoch)

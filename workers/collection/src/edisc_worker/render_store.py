@@ -19,7 +19,7 @@ all held in memory.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,6 +36,7 @@ from edisc_renderers.rsmf import (
     RenderOptions,
     render_slice,
 )
+from edisc_worker.pipeline import CrashHooks
 from edisc_worker.render_loader import LoadedJob, RenderLoader
 
 
@@ -63,6 +64,15 @@ class RenderOutput:
     verified_objects: int  # pages and archive entries read by pinned version and verified
 
 
+async def _hooked(chunks: AsyncIterator[bytes], hooks: CrashHooks) -> AsyncIterator[bytes]:
+    first = True
+    async for chunk in chunks:
+        yield chunk
+        if first:
+            first = False
+            await hooks.hit("mid_upload")
+
+
 def _plan_key(f: RenderedFile) -> dict[str, Any]:
     return f.record()
 
@@ -77,7 +87,12 @@ async def render_and_store(
     render_id: uuid.UUID,
     options: RenderOptions,
     on_stored: Callable[[StoredFile], Awaitable[None]] | None = None,
+    hooks: CrashHooks | None = None,
 ) -> RenderOutput:
+    """``hooks``: the crash-matrix seam (no-op in production): ``planning`` after each planned slice,
+    ``planned`` between the passes, ``mid_upload`` inside a file's upload after its first chunk,
+    ``file_stored`` after a file is stored and before it is handed on."""
+    hooks = hooks or CrashHooks()
     loader = RenderLoader(
         sessions, s3, settings, tenant_id=tenant_id, job_id=job_id, options=options
     )
@@ -90,7 +105,9 @@ async def render_and_store(
         files = render_slice(inp, options)
         reconciler.add_slice(inp, files)
         planned.extend(_plan_key(f) for f in files)
+        await hooks.hit("planning")
     summary = reconciler.finish(job.expected_items, job.expected_digest)
+    await hooks.hit("planned")
 
     # pass 2: render again (deterministic), compare with the plan, stream into WORM
     writer = EvidenceWriter(sessions, s3, settings)
@@ -108,8 +125,9 @@ async def render_and_store(
                 render_id=render_id,
                 name=f.name,
                 matter_retention_until=job.matter_retention_until,
-                stream=lambda f=f: f.astream(opener),  # type: ignore[misc]
+                stream=lambda f=f: _hooked(f.astream(opener), hooks),  # type: ignore[misc]
             )
+            await hooks.hit("file_stored")
             one = StoredFile(
                 ord=index,
                 name=f.name,

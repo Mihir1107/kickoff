@@ -79,7 +79,7 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Layout/tier rules: `edisc_connector_slack_export.layout`. Format details marked *(confirm on real
   export)* in ADR 0014 stay provisional until the real exports are fixtures.
 
-## RSMF renders (M15, ADR 0015; steps 1-4 done: schema, pure renderer, loader + storage, workflow + custody + API; 5 not yet)
+## RSMF renders (M15, ADR 0015; steps 1-4 done; step 5: corpus + crash matrix done, package download next)
 - Renders read normalized items and derivations, never raw pages (raw evidence only to embed file
   bytes, by pinned version). The renderer `edisc_renderers.rsmf` is pure (no DB/S3/clock imports; a
   test enforces it). A worker loader builds `SliceInput`s and streams evidence through a `FileOpener`.
@@ -88,8 +88,11 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   boundary and Message-ID derived from the source hash. Time zones ONLY via `rsmf.runtime.load_zone`
   (pinned `tzdata` package, never system zoneinfo); Python pinned to the patch in `.python-version`
   (fixes `unicodedata`). Changing output bytes needs a `RENDERER_VERSION` bump (`rsmf/version.py`);
-  goldens live in `tests/golden/rsmf/<golden_key()>/` (renderer + Unicode + tzdata versions), recorded
-  with `EDISC_RECORD_RSMF=1` (never overwrites an existing generation).
+  goldens live in `tests/golden/rsmf/<golden_key()>_dummy-<version>/` (renderer + Unicode + tzdata +
+  dummy versions), recorded with `EDISC_RECORD_RSMF=1` (never overwrites, refused in CI). Goldens are
+  regression guards; correctness comes from oracles. The render corpus (`tests/integration/corpus`,
+  oracle + coverage matrix + masked goldens via `EDISC_RECORD_CORPUS=1`) and the render crash matrix
+  must stay green; a dummy connector change bumps its version and records new generations.
 - Oversized attachments leave the zip as natives referenced by hash (ADR 0015 §11, not yet built);
   until then `ZipLimitError` refuses the render up front.
 - Reconciliation: every in-scope message appears as exactly ONE event across the render's files, plus

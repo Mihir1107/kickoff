@@ -524,3 +524,46 @@ minute). Supersedes `renders.sealing_stuck_at` of §15.
    the transaction that records the seal. A seal is final and recorded once (the guard trigger
    refuses any change), so a sealed render cannot get stuck again: later seal attempts are no-ops,
    with no new episode or alert (tested). A render therefore has at most one stuck-sealing episode.
+
+## 17. Step 5, parts A and B: corpus and crash matrix (2026-10-05, for review)
+1. **Dummy connector 0.3.0.** New message kinds: `channel_leave` (the system message on odd days),
+   `thread_broadcast` replies (conversation 0 forces one edited at epoch 1 and deleted at epoch 2, and
+   one replying to a parent of the previous day), `me_message`, and the uninterpretable `channel_topic`
+   and `pinned_item` (rendered `unknown`). Broadcasts embed their thread root (volatile, never part of
+   the version). `tests/golden/dummy/small.json` regenerated deliberately.
+2. **`thread_broadcast`** (approved recommendation). The normalizer already treats a broadcast as an
+   ordinary message: one subject per (workspace, conversation, ts), so the copy in the history and the
+   copy in the thread are the same item; `subtype` and `thread_root` are in the version fingerprint,
+   and the embedded `root` is not. The renderer maps it to one `message` event with its thread
+   `parent` and `custom` `slack.subtype = thread_broadcast`. The corpus proves each condition:
+   counted exactly once in reconciliation, sliced by its own timestamp, rendered when its parent is
+   outside the slice or out of range (context or `parent_not_rendered`), and its edit and deletion
+   rendered. The legacy subtype `reply_broadcast` (older exports) still renders as `unknown`; mapping
+   it too would change bytes (a renderer version bump), not done.
+3. **Corpus** (`tests/integration/corpus`, `tests/integration/api/test_corpus_export.py`): 16 named
+   cases collected through the real pipeline or the real export path and rendered. Every render is
+   checked against an oracle computed from the dataset alone (every in-scope message exactly once;
+   type, deletion, edits, reactions, attachments and placeholders per message; parents, context roots
+   and `parent_not_rendered` reasons; slices by local day), the structural EML checks, `edisc-verify`
+   on the package, and a golden. A coverage matrix (`oracle.COVERAGE`) must be exercised by the cases.
+   Boundaries on both sides: 10,000 and 10,001 events in one slice (one file, two parts), 3 and 4 files
+   at batch size 3, and 500 and 501 files at the production batch size (an acceptance run). Time zones:
+   New York DST start (23 h) and end (25 h), Asia/Kolkata (+05:30), Asia/Kathmandu (+05:45).
+   - Found by the corpus: a message deleted after a reaction snapshot keeps the reactions last
+     observed (a tombstone has none and records no new snapshot), like its earlier text in `edits`.
+     The oracle encodes this; say if a deleted message should render without reactions instead.
+4. **Goldens are regression guards only.** Renderer goldens and corpus goldens are keyed by
+   `golden_key()` plus `_dummy-<DummyConnector.version>` (existing generations renamed to record their
+   dummy version), so a dummy bump makes a new key and never rewrites one. Corpus goldens hash the
+   manifests with the tenant- and job-derived values masked (stable across runs). Recording needs
+   `EDISC_RECORD_RSMF=1` / `EDISC_RECORD_CORPUS=1`, never overwrites, and refuses to run in CI.
+5. **Crash matrix** (`tests/integration/renders/test_render_crash_matrix.py`): 25 points on the clean
+   path (19 boundaries, 6 of them at their 1st and 2nd occurrence: planning, mid-upload, file stored,
+   inside and after the batch transaction), a crash after an object is written but before its row
+   completes, 4 points on the failure path and 4 on the refused path. Each resumes to the oracle's
+   bytes with every event and audit once, no pending row, one object version per production and
+   anchor key, a verified chain and a verified package. Plus: the anchor sweeper racing a recovering
+   render on the same unanchored tail (one object and one registry row per anchor key), two identical
+   requests racing on the deduplication key (one render, one set of events), and a real SIGKILL of the
+   worker process during planning. A real SIGKILL during the seal is not reliably reachable (the window
+   is milliseconds); the seal's sub-steps are covered by the simulated crashes.

@@ -1,0 +1,146 @@
+{
+  "files": [
+    {
+      "name": "C00000DUMMY_2026-01-05_part001of001.rsmf",
+      "sha256": "59902848600885e1fb40fcee455dd8845ccd327a417d3a0951b2039b17e551ed",
+      "size": 15689
+    },
+    {
+      "name": "C00000DUMMY_2026-01-06_part001of003.rsmf",
+      "sha256": "a9bcdd18a744c1351a46690b96ccc137b885e162f092cd1939257aa0f69d92be",
+      "size": 18427
+    },
+    {
+      "name": "C00000DUMMY_2026-01-06_part002of003.rsmf",
+      "sha256": "36b6a5fe4eb9bb991d40e720e25b6a3ec8f354f34ffc2ce30d92cabb04f95fef",
+      "size": 66989
+    },
+    {
+      "name": "C00000DUMMY_2026-01-06_part003of003.rsmf",
+      "sha256": "5223fa7e7f7bf064a40fd3effc92e551a469cec01d6db805a06620c4bddaceca",
+      "size": 9277
+    },
+    {
+      "name": "C00000DUMMY_2026-01-07_part001of002.rsmf",
+      "sha256": "a9a61df1fa742693c8707c21e73c412a84653ab480eee4654560278cb10d324c",
+      "size": 13369
+    },
+    {
+      "name": "C00000DUMMY_2026-01-07_part002of002.rsmf",
+      "sha256": "bc971ac318d730f5fb793920dbde176e7418c83d6b6ffbbe66a2ff5fbb3de5d4",
+      "size": 11125
+    },
+    {
+      "name": "D00002DUMMY_2026-01-05_part001of001.rsmf",
+      "sha256": "909d8b1d4cb62a7281a31f7977f31e2358007bf66c7b6bc43f72d4943eafb30a",
+      "size": 7013
+    },
+    {
+      "name": "D00002DUMMY_2026-01-06_part001of003.rsmf",
+      "sha256": "1d39c218f52a5401eca11a2bef06540cc73e86af9f85ff3b3b48648fabc0556f",
+      "size": 12523
+    },
+    {
+      "name": "D00002DUMMY_2026-01-06_part002of003.rsmf",
+      "sha256": "7e30b6c0dd3442b60d004ec28c011de0b43bdf5a83efae1c6b93afa5014f8b6c",
+      "size": 9045
+    },
+    {
+      "name": "D00002DUMMY_2026-01-06_part003of003.rsmf",
+      "sha256": "f18b77e5be5bfe26acdbbf8b18482c509d0c241c8b00933d8630442cbb33b630",
+      "size": 5715
+    },
+    {
+      "name": "D00002DUMMY_2026-01-07_part001of002.rsmf",
+      "sha256": "c3eea82147ce9274a1bf8d16e45c9d3edcdb7be3b2c014a02ad30d4dc2d55fbf",
+      "size": 124275
+    },
+    {
+      "name": "D00002DUMMY_2026-01-07_part002of002.rsmf",
+      "sha256": "54e10c85cb061847ad94c0b06069dd89833cfcf82333c020fc8f0420714547bb",
+      "size": 10855
+    },
+    {
+      "name": "G00001DUMMY_2026-01-05_part001of001.rsmf",
+      "sha256": "f8d64c8c0acc2504183cde515ccefccbea39a147350261bb56210155a8d0d812",
+      "size": 9729
+    },
+    {
+      "name": "G00001DUMMY_2026-01-06_part001of003.rsmf",
+      "sha256": "cc77bdb3628419a41872f5b1462e0e1f34c166e6b11a255da5c69ae965fff2e3",
+      "size": 13687
+    },
+    {
+      "name": "G00001DUMMY_2026-01-06_part002of003.rsmf",
+      "sha256": "e089fe96c66f9c8888d196123568cf626308edc4e5b826e124c4a84198584ad2",
+      "size": 17197
+    },
+    {
+      "name": "G00001DUMMY_2026-01-06_part003of003.rsmf",
+      "sha256": "de72489e6490b7eda3aad0f5ab53c0c34d4e27f1e4291f57dcfdb710ad913865",
+      "size": 8377
+    },
+    {
+      "name": "G00001DUMMY_2026-01-07_part001of002.rsmf",
+      "sha256": "d7f3ec281164d81123b874471c1bfa1c1e67e26e6147b471ff40b46c95667607",
+      "size": 12915
+    },
+    {
+      "name": "G00001DUMMY_2026-01-07_part002of002.rsmf",
+      "sha256": "2a9eced9c6b5eb50389258513a57456095d9dd385ccc9a375b72da16d3cdf253",
+      "size": 13599
+    },
+    {
+      "name": "G00003DUMMY_2026-01-05_part001of001.rsmf",
+      "sha256": "49088c9c45470610ae622fe9970ddfc2a9efffb8c75d03a2cf9411342ce61e75",
+      "size": 8336
+    },
+    {
+      "name": "G00003DUMMY_2026-01-06_part001of003.rsmf",
+      "sha256": "d517f19e59f67f5a1062e8fdb46d305c343e7ad0ea60c108d51816f29653104e",
+      "size": 11202
+    },
+    {
+      "name": "G00003DUMMY_2026-01-06_part002of003.rsmf",
+      "sha256": "cb3302227d797e95e834f7cc1e590f3148f0d17c6bd4c4eb01507178bf8efcd0",
+      "size": 12700
+    },
+    {
+      "name": "G00003DUMMY_2026-01-06_part003of003.rsmf",
+      "sha256": "8a46f03b482c470aea2f834d56f6db728c956745601e04ec516bc298d200e77c",
+      "size": 7934
+    },
+    {
+      "name": "G00003DUMMY_2026-01-07_part001of002.rsmf",
+      "sha256": "bc9bc63b04ff9aa5bd7ec94126550ac477d6014e23e9fc1459bed288e818f3b5",
+      "size": 10906
+    },
+    {
+      "name": "G00003DUMMY_2026-01-07_part002of002.rsmf",
+      "sha256": "e412517c2fa10d409b40ccc7f8461d80c5c5cf9fa7c5d86071a0f1dd619ef24e",
+      "size": 8788
+    }
+  ],
+  "options": {
+    "cap": 5,
+    "include_context": false,
+    "time_zone": "America/New_York"
+  },
+  "reconciliation": {
+    "attachments": 9,
+    "context_events": 0,
+    "context_events_out_of_scope": 0,
+    "edits": 3,
+    "events_out": 96,
+    "files": 24,
+    "items_in": 96,
+    "parents_not_rendered": 35,
+    "renderer_version": "1.1.0",
+    "slices": 12,
+    "subject_digest": "d1074566723859c56385e1de6c6385f13860b85597ceb582757ef24978cf370a",
+    "tzdata_version": "2026e",
+    "unavailable_attachments": 3,
+    "unicode_version": "15.0.0"
+  },
+  "renderer_version": "1.1.0"
+}
