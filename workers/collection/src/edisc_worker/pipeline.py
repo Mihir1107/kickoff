@@ -199,6 +199,16 @@ class CrashHooks:
         return None
 
 
+def _by_key(
+    items: Sequence[Derived], tenant_id: uuid.UUID, source: str
+) -> list[tuple[str, Derived]]:
+    """The batch's items by idempotency key, first wins, sorted (hashing: runs in a thread)."""
+    by_key: dict[str, Derived] = {}
+    for d in items:
+        by_key.setdefault(d.idempotency_key(tenant_id, source), d)
+    return sorted(by_key.items())
+
+
 @dataclass
 class Pipeline:
     sessions: async_sessionmaker[AsyncSession]
@@ -629,7 +639,8 @@ class Pipeline:
         bounded by that x the small-file threshold; every download still takes a rate-limit token).
         The first unexpected failure cancels the rest and is raised unchanged, so its error class
         decides the retry; failures of the cancelled writes are attached to it as notes."""
-        file_ids = list(dict.fromkeys(meta.file_id for meta in file_refs(body, dialect, select)))
+        refs = await asyncio.to_thread(file_refs, body, dialect, select)  # parses the page
+        file_ids = list(dict.fromkeys(meta.file_id for meta in refs))
         if not file_ids:
             return {}
         gate = asyncio.Semaphore(self.settings.evidence_file_concurrency)
@@ -768,6 +779,13 @@ class Pipeline:
             None if directory or unit is None else unit.day,
             self.connector.dialect,
         )
+        # pure CPU work on the page (parse, hash) runs in a thread, never on the event loop:
+        # the activity heartbeats from the loop (ADR 0015 §23, §24)
+        fragment = (
+            await asyncio.to_thread(messages_fragment_hash, batch.body, dialect)
+            if batch.kind is BatchKind.HISTORY
+            else None
+        )
         # 2. one short transaction
         async with tenant_tx(self.sessions, tenant_id) as s:
             current = (
@@ -785,16 +803,16 @@ class Pipeline:
             ):
                 return False  # already applied (retry after commit, or a stalled zombie): no-op
             if directory:
-                subjects = directory_page_subjects(batch.body, ctx=ctx)
+                subjects = await asyncio.to_thread(directory_page_subjects, batch.body, ctx=ctx)
                 prior = await load_prior(
                     s, tenant_id=tenant_id, source=ctx.source, subjects=subjects
                 )
-                result = normalize_directory_page(
-                    batch.body, ctx=ctx, page_ref=page_ref, prior=prior
+                result = await asyncio.to_thread(
+                    normalize_directory_page, batch.body, ctx=ctx, page_ref=page_ref, prior=prior
                 )
                 extra: tuple[Derived, ...] = ()
             else:
-                subjects = message_page_subjects(batch.body, ctx=ctx)
+                subjects = await asyncio.to_thread(message_page_subjects, batch.body, ctx=ctx)
                 if current.pages_done == 0 and batch.kind is BatchKind.HISTORY:
                     subjects = subjects | {
                         access_subject(ctx.workspace_id, ctx.conversation_id or "")
@@ -802,7 +820,8 @@ class Pipeline:
                 prior = await load_prior(
                     s, tenant_id=tenant_id, source=ctx.source, subjects=subjects
                 )
-                result = normalize_messages_page(
+                result = await asyncio.to_thread(
+                    normalize_messages_page,
                     batch.body,
                     ctx=ctx,
                     page_ref=page_ref,
@@ -811,7 +830,9 @@ class Pipeline:
                     select=batch.select,
                 )
                 extra = (
-                    access_restored(ctx=ctx, page=batch.body, page_ref=page_ref, prior=prior)
+                    await asyncio.to_thread(
+                        access_restored, ctx=ctx, page=batch.body, page_ref=page_ref, prior=prior
+                    )
                     if current.pages_done == 0 and batch.kind is BatchKind.HISTORY
                     else ()
                 )
@@ -846,9 +867,7 @@ class Pipeline:
                     "g": len(result.unavailable_files),
                     "hist": batch.kind is BatchKind.HISTORY,
                     "ev": page.evidence_id,
-                    "frag": messages_fragment_hash(batch.body, dialect)
-                    if batch.kind is BatchKind.HISTORY
-                    else None,
+                    "frag": fragment,
                     "acc": None if archive_counts is None else archive_counts[0],
                     "anom": 0 if archive_counts is None else archive_counts[1],
                     "j": job_id,
@@ -893,10 +912,7 @@ class Pipeline:
             s, ctx=ctx, job_id=job_id, connector_version=self.connector.version, items=items
         )
         event_id = new_id()
-        by_key: dict[str, Derived] = {}
-        for d in items:
-            by_key.setdefault(d.idempotency_key(ctx.tenant_id, ctx.source), d)
-        ordered = sorted(by_key.items())
+        ordered = await asyncio.to_thread(_by_key, items, ctx.tenant_id, ctx.source)
         linked: set[uuid.UUID] = set(
             (
                 await s.execute(
@@ -1051,7 +1067,7 @@ class Pipeline:
                         )
                     ]
                 )
-                fragment = messages_fragment_hash(body)
+                fragment = await asyncio.to_thread(messages_fragment_hash, body)
             last_page = (fragment, EvidenceRef(row.last_page_evidence_id, key))
             workspace = await self.connector.item_workspace(conn, row.conversation_id)
         async with tenant_tx(self.sessions, tenant_id) as s:
@@ -1086,7 +1102,8 @@ class Pipeline:
                     source=ctx.source,
                     subjects=[*missing, *(f"{m}#observation" for m in missing)],
                 )
-                absent = finalize_unit(
+                absent = await asyncio.to_thread(  # one event per missing message: CPU
+                    finalize_unit,
                     ctx=ctx,
                     previously_observed=before,
                     observed=observed,

@@ -161,7 +161,7 @@ async def render_and_store(
     referenced: dict[str, list[int]] = {}  # native SHA-256 -> ords of the files that reference it
     async for inp in loader.slices():
         files = await _render_slice(inp, options, hooks)
-        reconciler.add_slice(inp, files)
+        await asyncio.to_thread(reconciler.add_slice, inp, files)  # CPU, writes nothing: a thread
         for f in files:
             for digest in sorted({a.sha256 for a in f.externals}):
                 referenced.setdefault(digest, []).append(len(planned))

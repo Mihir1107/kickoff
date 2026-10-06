@@ -251,13 +251,23 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Tests have a 120 s timeout (pytest-timeout): a hang is a failure. Only the acceptance runs
   (`tests/integration/acceptance`) carry an explicit, larger `@pytest.mark.timeout`.
 - **A test that fails intermittently is a bug until proven otherwise.** Never re-run CI (or a test)
-  to green without diagnosing the failure first: get the logs and histories, reproduce it in a loop
+  to green without diagnosing the failure first: get the logs and histories (a failed CI integration
+  run uploads `integration-failure-<run>-<attempt>`: per failed test its worker logs, Temporal
+  histories and custody streams, `tests/integration/artifacts.py`), reproduce it in a loop
   (with CPU contention), classify it (product bug or test bug) and fix the cause. A test bug is fixed
   with barriers or conditions, never with sleeps or loosened timeouts. Record the finding in the ADR.
 - Activities heartbeat from the event loop (`_ticking`): CPU-bound work inside an activity (rendering
   a slice, layout, schema validation of a large document) runs in a worker thread
   (`asyncio.to_thread`), never on the loop. A loop blocked longer than the heartbeat timeout makes
-  Temporal time out a LIVE attempt, and every retry repeats it (ADR 0015 §23).
+  Temporal time out a LIVE attempt, and every retry repeats it (ADR 0015 §23). A thread cannot be
+  cancelled: what runs in one must be pure and write nothing (no DB, S3, files); writes stay on the
+  loop. Work that must be killable or memory-limited (the report PDF) runs in a child process.
+- Every test fails if the event loop was blocked longer than `EDISC_TEST_LOOP_BLOCK_MS` (250 ms;
+  `tests/conftest.py`, `edisc_core.loopguard`), in the test process or in any worker it spawned, with
+  the blocked stack in the failure. Every function the product runs in a thread is listed in
+  `OFF_LOOP` there (a call on a loop thread fails the test, however fast): a new `to_thread` site
+  adds its function there and a mutation entry (ADR 0015 §24). Async generators over sources that
+  may not suspend (`jsonstream`, the RSMF envelope) `await asyncio.sleep(0)` per chunk.
 
 ## Measurements (re-run before and after performance changes; results go in docs/runs/)
 - `scripts/measure_breakdown.py` (storage per component + per-stage throughput), `scripts/bench_pipeline.py`,

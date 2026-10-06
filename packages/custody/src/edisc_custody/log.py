@@ -21,7 +21,7 @@ import asyncio
 import hashlib
 import json
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -469,6 +469,23 @@ def event_record_from_row(row: Any) -> EventRecord:
     return EventRecord(str(row.id), fields, row.prev_hash, row.event_hash)
 
 
+def _verify_page(
+    verifier: ChainVerifier,
+    rows: Sequence[Any],
+    batch_ids: Sequence[uuid.UUID],
+    linked: Sequence[Any],
+    files: Mapping[uuid.UUID, list[dict[str, Any]]],
+    natives: Mapping[uuid.UUID, list[dict[str, Any]]],
+) -> None:
+    items: dict[uuid.UUID, list[tuple[str, str]]] = {i: [] for i in batch_ids}
+    for link in linked:
+        items[link.custody_event_id].append((link.idempotency_key, link.content_hash))
+    for row in rows:
+        verifier.add_event(
+            event_record_from_row(row), items.get(row.id), files.get(row.id), natives.get(row.id)
+        )
+
+
 async def verify_chain(
     sessions: async_sessionmaker[AsyncSession],
     s3: S3Client,
@@ -515,18 +532,18 @@ async def verify_chain(
             if not rows:
                 break
             batch_ids = [r.id for r in rows if r.event_type == BATCH_EVENT]
-            items: dict[uuid.UUID, list[tuple[str, str]]] = {i: [] for i in batch_ids}
+            linked: Sequence[Any] = ()
             if batch_ids:
-                linked = await session.execute(
-                    text(
-                        "SELECT ji.custody_event_id, i.idempotency_key, i.content_hash FROM job_items ji"
-                        " JOIN items i ON i.tenant_id = ji.tenant_id AND i.id = ji.item_id"
-                        " WHERE ji.custody_event_id = ANY(:ids)"
-                    ),
-                    {"ids": batch_ids},
-                )
-                for link in linked:
-                    items[link.custody_event_id].append((link.idempotency_key, link.content_hash))
+                linked = (
+                    await session.execute(
+                        text(
+                            "SELECT ji.custody_event_id, i.idempotency_key, i.content_hash FROM job_items ji"
+                            " JOIN items i ON i.tenant_id = ji.tenant_id AND i.id = ji.item_id"
+                            " WHERE ji.custody_event_id = ANY(:ids)"
+                        ),
+                        {"ids": batch_ids},
+                    )
+                ).all()
             file_batches = [r.id for r in rows if r.event_type == RENDER_BATCH_EVENT]
             files: dict[uuid.UUID, list[dict[str, Any]]] = {i: [] for i in file_batches}
             if file_batches:
@@ -563,11 +580,9 @@ async def verify_chain(
                          "storage_key": n.storage_key, "version_id": n.version_id,
                          "file_ords": list(n.file_ords)}
                     )  # fmt: skip
-            for row in rows:
-                verifier.add_event(
-                    event_record_from_row(row), items.get(row.id), files.get(row.id),
-                    natives.get(row.id),
-                )  # fmt: skip
+            # hashing every event and recomputing every batch's Merkle root is CPU work: in a
+            # thread, one page at a time (the verifier is only ever touched by one thread at once)
+            await asyncio.to_thread(_verify_page, verifier, rows, batch_ids, linked, files, natives)
             after = rows[-1].seq
     expected_head = (head.last_seq, head.last_hash) if head is not None else None
     seal = bool(finished) if require_seal is None else require_seal

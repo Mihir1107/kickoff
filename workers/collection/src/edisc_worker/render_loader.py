@@ -20,6 +20,7 @@ The loader feeds the pure renderer one slice at a time:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid
@@ -107,6 +108,105 @@ def _version_key(v: str) -> tuple[int, ...]:
 def _chunks[T](values: Sequence[T], size: int = ID_CHUNK) -> Iterable[Sequence[T]]:
     for i in range(0, len(values), size):
         yield values[i : i + size]
+
+
+def _build_messages(
+    entries: Sequence[_Indexed], versions: Mapping[str, list[Any]],
+    snapshots: Mapping[str, list[Any]], file_names: dict[str, str],
+) -> list[Message]:  # fmt: skip
+    """The messages of one slice from their item versions and derivations (pure: in a thread)."""
+    out = []
+    for e in entries:
+        rows = [(r, d) for r, d in versions.get(e.source_item_id, []) if r.version <= e.max_version]
+        if not rows or rows[-1][0].version != e.max_version:
+            raise RenderInputIntegrityError(f"{e.source_item_id}: linked version not found")
+        current = rows[-1][1]
+        if not current.get("deleted") and current.get("file_ids"):
+            if "files" not in current:
+                raise RenderInputIntegrityError(
+                    f"{e.source_item_id}: derivation has no file references; reprocess the job's"
+                    " pages with normalizer >= 0.2.0"
+                )
+            for fid, name, _mime in current["files"]:
+                file_names.setdefault(fid, name)
+        states = tuple(
+            MessageState(
+                item=ItemRef(r.source_item_id, r.version, r.idempotency_key, r.content_hash),
+                author=d["author_external_id"],
+                text=d["text"],
+                subtype=d["subtype"],
+                thread_root=d["thread_root"],
+                deleted=bool(d["deleted"]),
+                file_ids=tuple(d["file_ids"]),
+                edited_ts=d.get("edited_ts"),
+                deleted_ts=d.get("deleted_ts"),
+            )
+            for r, d in rows
+        )
+        reactions = None
+        snap = snapshots.get(f"{e.source_item_id}#reactions")
+        if snap:
+            r, d = snap[-1]
+            reactions = Reactions(
+                ItemRef(r.source_item_id, r.version, r.idempotency_key, r.content_hash),
+                tuple((name, tuple(users)) for name, users in d["reactions"]),
+            )
+        out.append(
+            Message(e.source_item_id.split("/")[1], e.ts, e.sent_at, e.in_scope, states, reactions)
+        )
+    return out
+
+
+def _index_rows(
+    rows: Sequence[Any], scope: Mapping[uuid.UUID, bool], conversation_id: str,
+    out: dict[str, _Indexed],
+) -> str | None:  # fmt: skip
+    """Fold one chunk of linked items into the conversation's index (pure: runs in a thread).
+    Returns the items' source, if any message was seen."""
+    source = None
+    for r in rows:
+        if r.item_type != ItemType.MESSAGE.value:
+            continue
+        source = r.source
+        ws_conv, _, ts = r.source_item_id.rpartition("/")
+        if not ws_conv.endswith("/" + conversation_id):
+            raise RenderInputIntegrityError(
+                f"{r.source_item_id} linked under conversation {conversation_id}"
+            )
+        entry = out.get(r.source_item_id)
+        if entry is None:
+            out[r.source_item_id] = _Indexed(
+                r.source_item_id, ts, r.sent_at, r.version, scope[r.id]
+            )
+        else:
+            if scope[r.id] != entry.in_scope:  # the normalizer decides scope by time
+                raise RenderInputIntegrityError(
+                    f"{r.source_item_id}: versions linked with different scope"
+                )
+            entry.max_version = max(entry.max_version, r.version)
+    return source
+
+
+def _check_derivations(rows: Sequence[Any]) -> None:
+    """Every derivation still hashes to its recorded `derived_hash` (pure: runs in a thread)."""
+    for d in rows:
+        if canonical_hash(d.derived) != d.derived_hash:
+            raise RenderInputIntegrityError(f"derivation of item {d.item_id} was altered")
+
+
+def _check_page(data: bytes, items: Sequence[Any]) -> None:
+    """Every item's sub-document of a verified page matches its `raw_hash` (pure: runs in a
+    thread, so the activity keeps heartbeating while a large page is parsed and hashed)."""
+    document = json.loads(data)
+    for item in items:
+        try:
+            node = resolve(document, item.json_path)
+        except JsonPathError as exc:
+            raise RenderInputIntegrityError(f"item {item.id}: {exc}") from exc
+        if canonical_hash(node) != item.raw_hash:
+            raise RenderInputIntegrityError(
+                f"item {item.id}: sub-document at {item.json_path} does not match raw_hash"
+            )
 
 
 class RenderLoader:
@@ -275,26 +375,8 @@ class RenderLoader:
                         {"ids": list(ids)},
                     )
                 ).all()
-                for r in rows:
-                    if r.item_type != ItemType.MESSAGE.value:
-                        continue
-                    self._source = r.source
-                    ws_conv, _, ts = r.source_item_id.rpartition("/")
-                    if not ws_conv.endswith("/" + conversation_id):
-                        raise RenderInputIntegrityError(
-                            f"{r.source_item_id} linked under conversation {conversation_id}"
-                        )
-                    entry = out.get(r.source_item_id)
-                    if entry is None:
-                        out[r.source_item_id] = _Indexed(
-                            r.source_item_id, ts, r.sent_at, r.version, scope[r.id]
-                        )
-                    else:
-                        if scope[r.id] != entry.in_scope:  # the normalizer decides scope by time
-                            raise RenderInputIntegrityError(
-                                f"{r.source_item_id}: versions linked with different scope"
-                            )
-                        entry.max_version = max(entry.max_version, r.version)
+                source = await asyncio.to_thread(_index_rows, rows, scope, conversation_id, out)
+                self._source = source or self._source
         return out
 
     async def _conversation_info(
@@ -433,7 +515,7 @@ class RenderLoader:
         rows = [r for r in rows if r.item_type == item_type]
         derived: dict[uuid.UUID, tuple[tuple[int, ...], dict[str, Any]]] = {}
         for chunk in _chunks([r.id for r in rows]):
-            for d in (
+            found = (
                 await s.execute(
                     text(
                         "SELECT item_id, normalizer_version, derived, derived_hash FROM item_derivations"
@@ -441,9 +523,9 @@ class RenderLoader:
                     ),
                     {"ids": list(chunk)},
                 )
-            ).all():
-                if canonical_hash(d.derived) != d.derived_hash:
-                    raise RenderInputIntegrityError(f"derivation of item {d.item_id} was altered")
+            ).all()
+            await asyncio.to_thread(_check_derivations, found)  # CPU: off the event loop
+            for d in found:
                 key = _version_key(d.normalizer_version)
                 if d.item_id not in derived or key > derived[d.item_id][0]:
                     derived[d.item_id] = (key, d.derived)
@@ -464,50 +546,10 @@ class RenderLoader:
             snapshots = await self._items(
                 s, [f"{x}#reactions" for x in sids], ItemType.EVENT.value, job
             )
-        out = []
-        for e in entries:
-            rows = [
-                (r, d) for r, d in versions.get(e.source_item_id, []) if r.version <= e.max_version
-            ]
-            if not rows or rows[-1][0].version != e.max_version:
-                raise RenderInputIntegrityError(f"{e.source_item_id}: linked version not found")
-            current = rows[-1][1]
-            if not current.get("deleted") and current.get("file_ids"):
-                if "files" not in current:
-                    raise RenderInputIntegrityError(
-                        f"{e.source_item_id}: derivation has no file references; reprocess the job's"
-                        " pages with normalizer >= 0.2.0"
-                    )
-                for fid, name, _mime in current["files"]:
-                    self._file_names.setdefault(fid, name)
-            states = tuple(
-                MessageState(
-                    item=ItemRef(r.source_item_id, r.version, r.idempotency_key, r.content_hash),
-                    author=d["author_external_id"],
-                    text=d["text"],
-                    subtype=d["subtype"],
-                    thread_root=d["thread_root"],
-                    deleted=bool(d["deleted"]),
-                    file_ids=tuple(d["file_ids"]),
-                    edited_ts=d.get("edited_ts"),
-                    deleted_ts=d.get("deleted_ts"),
-                )
-                for r, d in rows
-            )
-            reactions = None
-            snap = snapshots.get(f"{e.source_item_id}#reactions")
-            if snap:
-                r, d = snap[-1]
-                reactions = Reactions(
-                    ItemRef(r.source_item_id, r.version, r.idempotency_key, r.content_hash),
-                    tuple((name, tuple(users)) for name, users in d["reactions"]),
-                )
-            out.append(
-                Message(
-                    e.source_item_id.split("/")[1], e.ts, e.sent_at, e.in_scope, states, reactions
-                )
-            )
-        return out
+        # building every message state of the slice is CPU work: in a thread (ADR 0015 §24)
+        return await asyncio.to_thread(
+            _build_messages, entries, versions, snapshots, self._file_names
+        )
 
     async def _files(
         self, job: LoadedJob, workspace: str, messages: Sequence[Message]
@@ -627,16 +669,8 @@ class RenderLoader:
             if ev.kind == "file":
                 continue  # verified while streaming (size + SHA-256 against this registry row)
             data = await self._read_pinned(ev)
-            document = json.loads(data)
-            for item in by_evidence[evidence_id]:
-                try:
-                    node = resolve(document, item.json_path)
-                except JsonPathError as exc:
-                    raise RenderInputIntegrityError(f"item {item.id}: {exc}") from exc
-                if canonical_hash(node) != item.raw_hash:
-                    raise RenderInputIntegrityError(
-                        f"item {item.id}: sub-document at {item.json_path} does not match raw_hash"
-                    )
+            # parsing the page and hashing every item's sub-document is CPU work: off the loop
+            await asyncio.to_thread(_check_page, data, by_evidence[evidence_id])
             self._verified.add(evidence_id)
 
     async def _read_pinned(self, ev: Any) -> bytes:

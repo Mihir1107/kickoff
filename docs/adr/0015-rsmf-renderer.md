@@ -1005,3 +1005,88 @@ what was done and why.
 6. **Rule (CLAUDE.md):** a test that fails intermittently is a bug until proven otherwise; CI is
    never re-run to green without a diagnosis. CPU-bound work in an activity runs off the event loop.
    ADR 0018 §6 applies the same rule to the report's PDF rendering.
+
+## 24. Stage 0 before M16: nothing CPU-bound on the event loop, enforced by every test (2026-10-06)
+1. **The render thread writes nothing.** `render_store._render_slice` runs only `render_slice`
+   (pure: the purity test forbids DB/S3/clock imports) and the test-only barrier, which writes its
+   `.reached` marker into the test's own directory. Shared state is two read-only `@cache`s (zone,
+   schema). Every write (`write_native`, `write_production`, `on_stored`, custody) happens on the
+   loop after the thread has returned. A thread cannot be cancelled, so an orphaned thread of a
+   timed-out attempt can only finish computing and be discarded. Locked in by
+   `tests/unit/renderers/test_render_thread_writes_nothing.py`: in a subprocess, an audit hook fails
+   on any write-mode open, filesystem change, socket or process from any thread other than the
+   loop's while `_render_slice` runs (mutation `render_thread_writes`).
+2. **The sweep.** Every Temporal activity was swept twice: by reading the code paths, and by running
+   the whole suite under the loop guard (item 3) at 50 ms in report mode, which samples the blocked
+   stack. Offenders found and moved:
+   | Where | What blocked the loop | Largest block seen (test-sized data) | Now |
+   |---|---|---|---|
+   | dummy connector (`collect_pages`) | building every page and the unit's plan (dataset generation, JSON) | 617 ms | `asyncio.to_thread` |
+   | `Pipeline.process_batch` | page parsing, `*_page_subjects`, normalizer (canonical hashes per message), fragment hash, `access_restored` | 292 ms | thread |
+   | `Pipeline._link_batch` | idempotency key per item | 126 ms (worker, 50k run) | thread |
+   | `Pipeline.finalize_unit` | absence detection (`finalize_unit`, one event per missing message); the pre-0014 fallback's fragment hash | found by `OFF_LOOP`, not by timing | thread |
+   | `Pipeline._files` | `file_refs` (parses the page again) | found by reading | thread |
+   | `normalizer.store.persist` | ordering + keys, UUIDv7 ids, item rows (canonical change hints), derivation canonical JSON + hash | 159 ms | thread (four pure helpers) |
+   | `custody.log.verify_chain` (renders' `check_source`, API verify, reports) | event hashing, Merkle recompute per batch, folding the page's links | 233 ms | thread, one page at a time |
+   | `render_loader` | page verification (`json.loads`, `raw_hash` per item), derivation hashes, the conversation index, building slice messages | 165 ms | thread (`_check_page`, `_check_derivations`, `_index_rows`, `_build_messages`) |
+   | `render_store` | `Reconciler.add_slice` | 91 ms | thread (pure, writes nothing) |
+   | `edisc_core.jsonstream` (export validation: `users.json`, day files) | scanning (about 20 MB/s) a coalesced 8 MiB window without suspending | 0.4 s per window measured | `await asyncio.sleep(0)` per chunk |
+   | RSMF envelope (`aenvelope`) | base64 of a stream whose chunks are ready without suspending | 1.9 s (unit test) | `await asyncio.sleep(0)` per chunk |
+   Checked and left: schema validation, canonical JSON of the manifest and zip sizing all run inside
+   `render_slice` (already in the thread); evidence hashing is chunk-bounded C code that releases
+   the GIL; `edisc_custody.archive.open_entry` must stay suspension-free because the offline
+   verifier drives it synchronously (`rsmf_check._run`), and its window is bounded by the coalescing
+   source (8 MiB, about 40 ms); S3 listing parses (botocore, 1,000 versions per page, about 85 ms);
+   one-time `s3_client` creation at startup. Found and recorded in BACKLOG instead: log redaction
+   recompiles one regex over every registered secret (66-87 ms per registration late in the
+   suite), and the render loader's `_index` still decodes all of a conversation's links in one query
+   (ADR 0018 step 6's day-bounded loader is the fix).
+3. **The guard.** `edisc_core.loopguard` + `tests/conftest.py`: a callback re-arms on the loop every
+   `threshold / 4`; a watchdog thread notices when it is late by more than
+   `EDISC_TEST_LOOP_BLOCK_MS` and samples the loop thread's stack WHILE it is blocked. Workers a
+   test spawns inherit the setting and report each block as a file; the test fails at the end of
+   the phase (setup, call, teardown) with the stack. Attribution: the chain of coroutines the loop
+   is running, from the task inward, up to the first synchronous frame; the innermost of OUR frames
+   in it is blamed (product code or unattributable: counts; a test's own coroutine doing setup:
+   recorded, does not count; a coroutine driven synchronously by a sync function, like the offline
+   verifier's readers, is its caller's work). Excused, because no code of ours could change it:
+   garbage collection inside the stall (`gc.callbacks`; a collection holds the GIL, so the stack
+   sampled afterwards would blame whatever ran next), and a loop sampled inside its selector or a
+   non-blocking socket call of the transport (the process was not scheduled: the laptop at 97% disk
+   produced a 446 ms stall inside `sock.recv` next to selector samples). Recorded as `library`,
+   not counted: asyncpg's SCRAM-SHA-256 handshake of a NEW connection (4,096 PBKDF2 iterations of
+   Python-level HMAC in the transport callback; 285 ms seen in a burst of new connections), a cost
+   of pool growth in the driver (BACKLOG: pre-warm pools).
+   **250 ms**, because: the tightest heartbeat timeout in the suite is 3 s (real-SIGKILL tests) with
+   a ticker every second, so about 2 s of stall already risks a timed-out live attempt; CI hosts run
+   2-5x slower under load (item 3 of §23), so 250 ms here is 0.5-1.25 s there, inside that budget;
+   and a stall of 250 ms on test-sized inputs is minutes on production inputs (60 s timeout). The
+   noise floor after the moves (item 4) is below it.
+   **Deterministic half:** timing only catches what is slow at test size, so every function the
+   product runs in a thread is listed in `OFF_LOOP` (`tests/conftest.py`) and wrapped for the
+   session: called on a thread that is running an event loop, it fails the test however fast it
+   was. It found a call the timing guard could not see (the pre-0014 fragment hash fallback, fast on
+   test pages). Mutation round `s24-loop` (31 breaks): each move undone, each guard mechanism broken, the
+   render thread writing; the timing guard alone catches `render_slice` put back on the loop in
+   `test_live_case[cap_10001]`.
+4. **Measured** (the whole integration suite on this laptop, report mode, threshold 50 ms):
+   before the moves, 204 blocks: 83 product (largest 617 ms), 45 unattributed (352 ms, garbage
+   collection and stalls of the process: the reason for the excusals of item 3), 76 test setup.
+   After the first moves, 112: 23 product (largest 233 ms, `verify_chain` folding links: moved
+   since), 11 unattributed (446 ms: the `sock.recv` stall), 50 idle, 28 test. Then in failing mode at
+   250 ms the only counted block was the SCRAM handshake (now `library`), and the `OFF_LOOP` check
+   found the pre-0014 fragment hash fallback. Test setup still blocks for seconds (building
+   datasets, the offline verifier, the 50k soak): recorded, never counted.
+5. **CI failure artifacts.** A failing integration test now leaves, per test, its worker logs, the
+   Temporal histories of every workflow started during it and every custody stream it touched
+   (`tests/integration/artifacts.py`, `EDISC_TEST_ARTIFACTS_DIR`), uploaded with the stack logs as
+   `integration-failure-<run>-<attempt>` (14 days). §23's diagnosis had to be rebuilt locally
+   because CI kept none of this.
+6. **Not diagnosed.** One failing-mode run on the reused test stack had three failures (most likely
+   `test_posts_without_a_key_are_separate_jobs`, `test_reopen_relocks_what_lapsed_and_records_every_gap`,
+   `test_live_case[cap_10000]`, from their positions) and then made no progress; its output was lost
+   (stopped at the 60-minute limit; `-q` prints failures only at the end). The same tests passed in
+   the four later runs, including the full suite on a fresh stack (973 passed). That run overlapped
+   with work in the tree (an unrelated migration file existed for about a minute, and heavy commands
+   ran next to it), which is the likeliest cause but is NOT proven. Recorded so that the next
+   failure of any of these tests is investigated with this in mind (CI now keeps the artifacts).

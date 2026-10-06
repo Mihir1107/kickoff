@@ -332,8 +332,16 @@ Where the data is (verified 2026-10-05/06):
 - **Heartbeats come from the event loop:** anything CPU-bound in an activity must run in a thread;
   otherwise a live attempt is timed out and retried until it fails (ADR 0015 §23). The real
   SIGKILL tests use `heartbeat_timeout_seconds=3`, which makes such starvation show up in tests.
-- **CI keeps no worker logs or Temporal history:** a failing integration test that spawns workers
-  must be diagnosed by reproducing it locally in a loop (with CPU contention); never re-run to green.
+- **CI failure artifacts (ADR 0015 §24):** a failed integration run uploads
+  `integration-failure-<run>-<attempt>` with, per failed test, the worker logs, the Temporal
+  histories of the workflows it started and the custody streams it touched
+  (`tests/integration/artifacts.py`). Still reproduce locally in a loop before fixing; never re-run
+  to green.
+- **The loop guard (ADR 0015 §24):** every test fails if the event loop (its own or a spawned
+  worker's) was blocked > 250 ms (`EDISC_TEST_LOOP_BLOCK_MS`), with the blocked stack; functions run
+  in threads are listed in `OFF_LOOP` in `tests/conftest.py` and fail a test if called on a loop
+  thread. Measuring: `EDISC_TEST_LOOP_BLOCK_MS=50 EDISC_TEST_LOOP_BLOCK_MODE=report
+  EDISC_TEST_LOOP_BLOCK_LOG=<file>` records every block as JSON lines without failing.
 - **Mutation checks:** after writing a test, break the code it protects and confirm the test fails, through
   `scripts/mutation/` (it isolates the bytecode cache per run: two same-sized edits of one file within a
   second once loaded a stale `.pyc` and made a break look harmless). Several tests were vacuous until this

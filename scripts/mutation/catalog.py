@@ -9,6 +9,8 @@ Rounds (ADR 0015):
 - ``s21-review``: the review of §21 (name encoding, concurrent writers, the dummy pin).
 - ``ci-heartbeat``: slice rendering off the event loop, so heartbeats keep flowing (CI run
   37412915073; ADR 0015 §23).
+- ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``),
+  every CPU step moved off the loop, the render thread writing nothing (ADR 0015 §24).
 """
 
 from __future__ import annotations
@@ -35,6 +37,18 @@ AP = "tests/integration/api/test_render_packages.py"
 AC = "tests/integration/api/test_content_reads_anchored.py"
 CN = "tests/integration/custody/test_render_package_natives.py"
 CP = "tests/integration/custody/test_render_package.py"
+LG = "packages/core/src/edisc_core/loopguard.py"
+DC = "packages/connectors/dummy/src/edisc_connector_dummy/connector.py"
+ULG = "tests/unit/core/test_loopguard.py"
+UJ = "tests/unit/core/test_jsonstream.py"
+UE = "tests/unit/renderers/test_eml.py"
+UT = "tests/unit/renderers/test_render_thread_writes_nothing.py"
+UDE = "tests/unit/dummy/test_epochs_failures_policy.py"
+CORPUS = "tests/integration/corpus/test_corpus.py"
+PL = "tests/integration/pipeline/test_pipeline.py"
+CL = "tests/integration/custody/test_custody_log.py"
+RS = "tests/integration/renders/test_render_store.py"
+NS = "packages/normalizer/src/edisc_normalizer/store.py"
 
 
 @dataclass(frozen=True)
@@ -234,7 +248,8 @@ CATALOG: list[Mutation] = [
       '"natives_root": natives_root(natives, first_native),', '"natives_root": natives_root([], first_native),',
       IN, "copied_once"),
     m("verify_chain_no_natives", "s20-natives", C + "log.py",
-      "                    natives.get(row.id),\n", "                    None,\n", IN, "altered_native_record"),
+      "files.get(row.id), natives.get(row.id)\n", "files.get(row.id), None\n", IN,
+      "altered_native_record"),
     m("retention_job_route", "s20-natives", C + "retention_extension.py",
       '"   JOIN evidence_objects e ON e.job_id = j.id"',
       "\"   JOIN evidence_objects e ON e.job_id = j.id AND e.storage_key NOT LIKE '%/natives/%'\"",
@@ -316,4 +331,90 @@ CATALOG: list[Mutation] = [
     m("slice_render_on_event_loop", "ci-heartbeat", W + "render_store.py",
       "    return await asyncio.to_thread(_render_slice_blocking, inp, options, hooks)",
       "    return _render_slice_blocking(inp, options, hooks)", CM, "keeps_heartbeating"),
+    # ------------------------------------------------------------------ the loop guard (§24)
+    # the timing guard alone (render_slice itself is not in OFF_LOOP): the 10,001-event slice
+    m("guard_slice_render_on_loop", "s24-loop", W + "render_store.py",
+      "    return await asyncio.to_thread(_render_slice_blocking, inp, options, hooks)",
+      "    return render_slice(inp, options)", CORPUS, "cap_10001"),
+    m("render_thread_writes", "s24-loop", W + "render_store.py",
+      "    return render_slice(inp, options)",
+      '    open("/dev/null", "w").close()\n    return render_slice(inp, options)', UT),
+    m("guard_blames_tests", "s24-loop", LG, 'return "product", where', 'return "test", where', ULG),
+    m("guard_gc_not_excused", "s24-loop", LG,
+      "if (late - paused) * 1000 <= self.threshold_ms:", "if False:", ULG, "garbage"),
+    m("guard_selector_not_idle", "s24-loop", LG, 'return "idle", f"', 'return "product", f"',
+      ULG, "selector"),
+    m("guard_scram_counted", "s24-loop", LG, "    if _connection_auth(stack):\n", "    if False:\n",
+      ULG, "scram"),
+    m("guard_follows_sync_drivers", "s24-loop", LG,
+      "        if not f.f_code.co_flags & (_ASYNC | inspect.CO_GENERATOR):\n            break\n", "",
+      ULG, "synchronously"),
+    m("jsonstream_no_yield", "s24-loop", "packages/core/src/edisc_core/jsonstream.py",
+      "        await asyncio.sleep(0)\n", "", UJ, "turn"),
+    m("envelope_no_yield", "s24-loop", R + "eml.py", "        await asyncio.sleep(0)\n", "", UE, "turn"),
+    # each pure function the product runs in a thread, called on the loop instead (OFF_LOOP)
+    m("dummy_page_on_loop", "s24-loop", DC, "result: T = await asyncio.to_thread(respond)",
+      "result: T = respond()", UDE, "oracle_model"),
+    m("dummy_plan_on_loop", "s24-loop", DC,
+      "batches = await asyncio.to_thread(self.plan, conn, unit_, scope)",
+      "batches = self.plan(conn, unit_, scope)", UDE, "oracle_model"),
+    m("fragment_hash_on_loop", "s24-loop", W + "pipeline.py",
+      "await asyncio.to_thread(messages_fragment_hash, batch.body, dialect)",
+      "messages_fragment_hash(batch.body, dialect)", PL, "three_epochs"),
+    m("fallback_fragment_hash_on_loop", "s24-loop", W + "pipeline.py",
+      "fragment = await asyncio.to_thread(messages_fragment_hash, body)",
+      "fragment = messages_fragment_hash(body)", PL, "pre_0014_fallback"),
+    m("absence_on_loop", "s24-loop", W + "pipeline.py",
+      "absent = await asyncio.to_thread(  # one event per missing message: CPU\n                    finalize_unit,\n",
+      "absent = finalize_unit(\n", PL, "three_epochs"),
+    m("file_refs_on_loop", "s24-loop", W + "pipeline.py",
+      "refs = await asyncio.to_thread(file_refs, body, dialect, select)",
+      "refs = file_refs(body, dialect, select)", PL, "unavailable_files_are_recorded"),
+    m("directory_subjects_on_loop", "s24-loop", W + "pipeline.py",
+      "subjects = await asyncio.to_thread(directory_page_subjects, batch.body, ctx=ctx)",
+      "subjects = directory_page_subjects(batch.body, ctx=ctx)", PL, "three_epochs"),
+    m("directory_normalize_on_loop", "s24-loop", W + "pipeline.py",
+      "result = await asyncio.to_thread(\n                    normalize_directory_page, batch.body,",
+      "result = normalize_directory_page(\n                    batch.body,", PL, "three_epochs"),
+    m("message_subjects_on_loop", "s24-loop", W + "pipeline.py",
+      "subjects = await asyncio.to_thread(message_page_subjects, batch.body, ctx=ctx)",
+      "subjects = message_page_subjects(batch.body, ctx=ctx)", PL, "three_epochs"),
+    m("normalize_on_loop", "s24-loop", W + "pipeline.py",
+      "result = await asyncio.to_thread(\n                    normalize_messages_page,\n",
+      "result = normalize_messages_page(\n", PL, "three_epochs"),
+    m("access_restored_on_loop", "s24-loop", W + "pipeline.py",
+      "await asyncio.to_thread(\n                        access_restored, ctx=ctx,",
+      "access_restored(\n                        ctx=ctx,", PL, "three_epochs"),
+    m("derivation_encoding_on_loop", "s24-loop", "packages/normalizer/src/edisc_normalizer/store.py",
+      "docs, hashes = await asyncio.to_thread(_encode_derivations, ",
+      "docs, hashes = _encode_derivations(", PL, "three_epochs"),
+    m("verify_page_on_loop", "s24-loop", C + "log.py",
+      "await asyncio.to_thread(_verify_page, verifier,", "_verify_page(verifier,", CL,
+      "periodic_and_final"),
+    m("index_rows_on_loop", "s24-loop", W + "render_loader.py",
+      "source = await asyncio.to_thread(_index_rows, rows, scope, conversation_id, out)",
+      "source = _index_rows(rows, scope, conversation_id, out)", RS, "locked_productions"),
+    m("derivation_check_on_loop", "s24-loop", W + "render_loader.py",
+      "await asyncio.to_thread(_check_derivations, found)", "_check_derivations(found)", RS,
+      "locked_productions"),
+    m("page_check_on_loop", "s24-loop", W + "render_loader.py",
+      "await asyncio.to_thread(_check_page, data, by_evidence[evidence_id])",
+      "_check_page(data, by_evidence[evidence_id])", RS, "locked_productions"),
+    m("order_items_on_loop", "s24-loop", NS,
+      "await asyncio.to_thread(_order_items, items, tenant, source)",
+      "_order_items(items, tenant, source)", PL, "three_epochs"),
+    m("assign_ids_on_loop", "s24-loop", NS,
+      "await asyncio.to_thread(_assign_ids, ordered, keys, item_ids, tenant, source)",
+      "_assign_ids(ordered, keys, item_ids, tenant, source)", PL, "three_epochs"),
+    m("item_rows_on_loop", "s24-loop", NS, "rows = await asyncio.to_thread(\n        _item_rows, ",
+      "rows = _item_rows(\n        ", PL, "three_epochs"),
+    m("batch_keys_on_loop", "s24-loop", W + "pipeline.py",
+      "await asyncio.to_thread(_by_key, items, ctx.tenant_id, ctx.source)",
+      "_by_key(items, ctx.tenant_id, ctx.source)", PL, "three_epochs"),
+    m("build_messages_on_loop", "s24-loop", W + "render_loader.py",
+      "return await asyncio.to_thread(\n            _build_messages, ",
+      "return _build_messages(\n            ", RS, "locked_productions"),
+    m("reconcile_on_loop", "s24-loop", W + "render_store.py",
+      "await asyncio.to_thread(reconciler.add_slice, inp, files)",
+      "reconciler.add_slice(inp, files)", RS, "locked_productions"),
 ]  # fmt: skip

@@ -3,7 +3,8 @@
 Status: **Accepted** (2026-10-06), not implemented. Built from `docs/plans/m16.md` (the proposal,
 kept as history) with the review decisions D1-D14 of 2026-10-06 folded in, and the PDF spike S1
 (§5.10) passed. **Amended 2026-10-06** (§18): compressed streams, no Japanese font, report worker
-limits and an OOM crash point, admission by PDF goldens, the ICC licence, the spike as evidence. Two points wait for the mentor (§17); neither blocks the build.
+limits and an OOM crash point, admission by PDF goldens, the ICC licence, the spike as evidence,
+and (amendment 7) the PDF render in a child process with its own memory limit. Two points wait for the mentor (§17); neither blocks the build.
 Builds on ADR 0005 (units, statuses), 0014 §4 (archive caveat), 0015 (render custody stream, loader,
 determinism, packages, first-byte rule), 0017 (worker images per runtime identity, generalised here).
 
@@ -343,11 +344,28 @@ equal on every host, over:
   - container memory limit **3 GiB** per report worker container (1.2 GB render + streaming JSONL
     writers + Python/Temporal baseline, with headroom; a hard limit, no swap), CPU 1;
   - scale out by adding report workers, never by raising concurrency inside one container;
-  - the WeasyPrint render (about 30 s of CPU, more under load) and every other CPU-bound step
-    (canonical JSON of large documents, HTML building, glyph coverage) run off the event loop
-    (`asyncio.to_thread`, or a subprocess if the GIL starves the loop), so the activity's
-    heartbeats keep flowing; a test holds the render at a synchronous barrier for more than twice
-    the heartbeat timeout and requires one attempt and no timeout (the pattern of ADR 0015 §23);
+  - **the WeasyPrint render runs in a CHILD PROCESS, never a thread (amendment 7).** A thread
+    cannot be cancelled or memory-limited: a timed-out attempt's render would keep running next to
+    its retry, and an out-of-memory render would take the whole worker (and every activity on it)
+    down with it. The activity spawns one child per PDF (`python -m edisc_worker.report_pdf`, the
+    same image and toolchain) that reads the stored `report.html` bytes on stdin and writes the PDF
+    on stdout, nothing else: the child has no DB, S3 or Temporal access and writes no file. The
+    **memory limit is applied to the child**: `RLIMIT_AS` = `EDISC_REPORT_PDF_MEMORY_BYTES`
+    (default 2.5 GiB, under the 3 GiB container; checked in step 3 against the S1 cap render's
+    virtual size, which is larger than its 1.2 GB RSS) set in the child before WeasyPrint is imported,
+    and `oom_score_adj` = 1000, so that if the container's cgroup limit is reached anyway the
+    kernel kills the child, not the worker. The parent awaits the child asynchronously (the loop
+    keeps heartbeating), enforces a wall-clock limit (`EDISC_REPORT_PDF_TIMEOUT_SECONDS`) and kills
+    the child when the attempt is cancelled or times out. A child that dies (signal, `MemoryError`,
+    any non-zero exit) or overruns fails the attempt with a classified retryable error
+    (`ReportPdfRenderError`); nothing is written before the child exits 0 and its output is complete
+    (an empty or truncated stdout is the same failure), so a killed child leaves no partial PDF
+    object or row, and the retry renders again from the stored HTML;
+  - every other CPU-bound step (canonical JSON of large documents, JSONL building, HTML building,
+    glyph coverage) runs in a worker thread (`asyncio.to_thread`): it is pure, bounded and writes
+    nothing, so an orphaned thread is harmless (the ADR 0015 §23 rule); heartbeats keep flowing; a
+    test holds the PDF child at a barrier for more than twice the heartbeat timeout and requires
+    one attempt and no timeout;
   - a PDF render whose HTML exceeds the D5 cap cannot occur (the cap bounds pages); the worker still
     checks the HTML size against `EDISC_REPORT_MAX_HTML_BYTES` (4 MiB, about 2.6x the S1 cap size)
     before rendering and fails the report as an integrity error above it.
@@ -474,10 +492,16 @@ report anchors carry the report id.
 Status fences moved in the same transaction as the event; each point at the 1st and 2nd occurrence
 where it repeats: the snapshot tx; after verification and inside / after `report_started`; mid-upload
 of each `.jsonl`, after the object before its row, after the row; after `report.json`, after
-`report.html`, mid-PDF, **an OOM kill during PDF rendering (amendment 3: a real report worker
-container started with a memory limit below one render's peak, e.g. 512 MiB, is killed by the
-kernel (exit 137) while WeasyPrint lays out; a worker with the normal limit then resumes the report
-to the oracle's bytes, with no partial PDF object or row left behind)**, after the PDF object before
+`report.html`, mid-PDF, **an OOM kill of the PDF child (amendments 3 and 7): a real report worker
+whose child memory limit is below one render's peak (S1: 512 MiB is not enough) starts a
+render; the CHILD dies of it while WeasyPrint lays out; the test asserts that the worker process
+is still alive and still heartbeating, that the attempt failed with the classified retryable
+`ReportPdfRenderError` (not a heartbeat timeout, not a worker crash), that no PDF object version,
+`report_files` row or `report_generated` event exists, and that the report is still `generating`;
+then the limit is raised (a worker with the normal limit) and the RETRY completes the report to the
+oracle's bytes. Both kill paths are covered: the child's own `RLIMIT_AS`, and, in the amd64 image
+job, a worker container whose cgroup limit is below the peak, where `oom_score_adj` makes the
+kernel kill the child (SIGKILL) and not the worker**, after the PDF object before
 its row; inside / after `report_generated`; the
 seal sub-steps with REAL SIGKILLs (`EDISC_TEST_REPORT_BARRIER`, test/ci only); the failure and
 refused paths; `ensure-job-reports` racing a manual request; two identical requests racing; the
@@ -575,6 +599,13 @@ recorded digests only, and the output says so.
 6. **The spike is on main** (`spikes/m16-pdf/`, manual-only workflow `spike-m16-pdf.yml`) as the
    evidence for byte identity (§5.10); installers (`pip`, `setuptools`, `wheel`) are excluded from
    the toolchain id.
+
+7. **The PDF render runs in a child process with the memory limit on the child** (§6, §13;
+   2026-10-06, before the build): not a thread, because a thread can be neither cancelled nor
+   limited, so an orphaned render would outlive its attempt and an OOM would kill the worker. A
+   child that dies fails the attempt cleanly and the activity retries; the OOM crash point tests
+   exactly that (the worker survives, nothing is written, the retry completes). Supersedes the
+   "worker container killed with exit 137" form of the OOM crash point in amendment 3.
 
 Re-check of the amended spike image (2026-10-06, the Mac under Rosetta, 2 runs per variant; the full
 four-host S1 above was on the S1 image): fonts 10 files (no JP), installers gone from the id,

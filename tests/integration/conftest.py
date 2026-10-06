@@ -2,9 +2,11 @@
 
 import asyncio
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+import sys
+from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Mapping
+from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import asyncpg
 import pytest
@@ -19,6 +21,7 @@ from edisc_db.bootstrap import bootstrap
 from edisc_db.migrate import upgrade
 from edisc_db.session import create_engine, session_factory
 from edisc_evidence.s3 import s3_client
+from tests.integration import artifacts
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -48,6 +51,48 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     for item in items:
         if "tests/integration" in str(item.path):
             item.add_marker(pytest.mark.integration)
+
+
+# ------------------------------------------------------------------ failure artifacts (CI)
+_FAILED = pytest.StashKey[dict[str, artifacts.Failed]]()
+_STARTED = pytest.StashKey[datetime]()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item: pytest.Item) -> Generator[None, Any, None]:
+    item.stash[_STARTED] = artifacts.now()
+    yield
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[None]
+) -> Generator[None, Any, None]:
+    outcome = yield
+    report: pytest.TestReport = outcome.get_result()
+    if not report.failed or not os.environ.get("EDISC_TEST_ARTIFACTS_DIR"):
+        return
+    failed = item.config.stash.setdefault(_FAILED, {})
+    entry = failed.setdefault(
+        item.nodeid, artifacts.Failed(item.nodeid, item.stash[_STARTED], artifacts.now())
+    )
+    entry.stop, entry.phases = artifacts.now(), [*entry.phases, report.when]
+    tmp = getattr(item, "funcargs", {}).get("tmp_path")
+    if isinstance(tmp, Path):
+        entry.tmp_path = tmp
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    root = os.environ.get("EDISC_TEST_ARTIFACTS_DIR")
+    failed = session.config.stash.get(_FAILED, {})
+    if not root or not failed:
+        return
+    try:
+        notes = artifacts.collect(list(failed.values()), Path(root))
+    except Exception as exc:  # the run has failed already: say loudly why artifacts are missing
+        print(f"\nFAILURE ARTIFACTS NOT COLLECTED: {exc!r}", file=sys.stderr)
+        return
+    print(f"\nfailure artifacts in {root}:\n" + "\n".join(notes), file=sys.stderr)
 
 
 Role = Literal["app", "owner", "superuser", "sweeper"]

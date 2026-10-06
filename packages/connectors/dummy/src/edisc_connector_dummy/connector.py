@@ -19,6 +19,7 @@ Every request takes a rate-limit token through ``call_with_limits`` first.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from collections.abc import AsyncIterator
@@ -159,7 +160,9 @@ class DummyConnector:
         async def do() -> T:
             self._check_auth(conn)
             self._maybe_fail(ds, request_key)
-            result: T = respond()
+            # the simulated server builds the response off the event loop: a page of a large unit
+            # is CPU work, and an activity's heartbeats come from the loop (ADR 0015 §23, §24)
+            result: T = await asyncio.to_thread(respond)
             return result
 
         return await call_with_limits(self._limiter, self._bucket(conn, method), do)
@@ -293,7 +296,7 @@ class DummyConnector:
     ) -> AsyncIterator[RawBatch]:
         ds, epoch = self.dataset(conn)
         self._check_access(ds, epoch, unit_.conversation_id)
-        batches = self.plan(conn, unit_, scope)
+        batches = await asyncio.to_thread(self.plan, conn, unit_, scope)  # CPU: off the loop
         index = _decode(cursor)
         if index > len(batches):
             raise InvalidCursorError(f"cursor beyond the end of {unit_.unit_key}")

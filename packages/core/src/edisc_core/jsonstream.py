@@ -8,6 +8,7 @@ escapes, nesting); each element's own JSON validity is checked by whoever parses
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import AsyncIterable, AsyncIterator
 
@@ -36,6 +37,9 @@ async def iter_array_elements(
             raise JsonStreamError(f"array element larger than {max_element_bytes} bytes")
 
     async for chunk in _without_bom(chunks):
+        # scanning is CPU work (about 20 MB/s here) and a coalescing source serves megabytes
+        # without suspending: give the event loop (and the activity's heartbeats) a turn per chunk
+        await asyncio.sleep(0)
         pos, n = 0, len(chunk)
         while pos < n:
             if done:

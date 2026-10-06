@@ -78,3 +78,17 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
   handle them, and the dummy connector emits them (ADR 0004 amendment 2026-10-04; ADR 0015 §13).
 - `edisc-verify` on JOB custody packages (`verify_package`) does not flag files the manifest does not
   account for; make it strict like render packages (with the same `--tolerate-os-metadata` rule).
+- Log redaction (`edisc_core.redaction.register_secret`) recompiles one regex over EVERY secret the
+  process has registered, on each new secret, and `redact_text` runs it on every log line: both grow
+  with the number of decrypted tokens a long-lived worker has seen (66-87 ms per registration on the
+  event loop at the end of the integration suite, ADR 0015 §24). Bound it (per-connection scrubbers
+  that are dropped with the connection, or a multi-pattern matcher) before a worker serves many
+  tenants.
+- The render loader's `_index` still fetches every `job_items` link of a conversation in one query
+  (decoded on the event loop by asyncpg): bounded only by the conversation's size. The day-bounded
+  loader of ADR 0018 step 6 (`RenderLoader.day_slice`) should be used for renders too.
+- asyncpg authenticates every NEW connection with SCRAM-SHA-256 on the event loop (4,096 PBKDF2
+  iterations in Python-level HMAC calls: tens of ms each, 285 ms seen during a burst of new
+  connections under load). Production workers open pooled connections on demand; pre-warm the pools
+  at worker start (or cap pool growth per second) so a burst of activities cannot stall heartbeats.
+  The test loop guard records this as `library` time (ADR 0015 §24).

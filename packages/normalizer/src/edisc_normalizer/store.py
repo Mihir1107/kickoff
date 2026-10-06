@@ -10,8 +10,9 @@ normalizer adds rows there and never touches items' evidence pointers or evidenc
 
 from __future__ import annotations
 
+import asyncio
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -126,6 +127,77 @@ async def previously_observed(
     return {m for m in ids if obs[f"{m}#observation"].observation_status != NO_LONGER_OBSERVED}
 
 
+def _encode_derivations(docs: Sequence[Mapping[str, Any]]) -> tuple[list[str], list[str]]:
+    return [canonical_json(doc).decode() for doc in docs], [canonical_hash(doc) for doc in docs]
+
+
+def _order_items(
+    items: Sequence[Derived], tenant: uuid.UUID, source: str
+) -> tuple[list[Derived], list[str], list[str]]:
+    # parents before children: messages and files, then events
+    ordered = sorted(items, key=lambda d: (d.item_type.value == "event", d.source_item_id))
+    keys = [d.idempotency_key(tenant, source) for d in ordered]
+    return ordered, keys, sorted({d.source_item_id for d in ordered})
+
+
+def _assign_ids(
+    ordered: Sequence[Derived], keys: Sequence[str], item_ids: dict[str, uuid.UUID],
+    tenant: uuid.UUID, source: str,
+) -> tuple[list[tuple[Derived, str]], list[str]]:  # fmt: skip
+    """Ids are assigned here (UUIDv7) so children in the same batch can reference their parents.
+    Returns the fresh items and the parent keys still to look up."""
+    fresh: list[tuple[Derived, str]] = []
+    for d, key in zip(ordered, keys, strict=True):
+        if key not in item_ids:
+            item_ids[key] = new_id()
+            fresh.append((d, key))
+    parent_keys = {
+        idempotency_key(tenant, source, d.parent[0], d.parent[1])
+        for d, _ in fresh
+        if d.parent is not None
+    }
+    return fresh, sorted(parent_keys - item_ids.keys())
+
+
+_ITEM_COLUMNS = ("id", "sid", "v", "type", "kind", "ch", "rh", "ev", "key", "path", "parent",
+                 "hints", "sent", "ik")  # fmt: skip
+
+
+def _item_rows(
+    fresh: Sequence[tuple[Derived, str]], item_ids: Mapping[str, uuid.UUID],
+    item_ids_parents: Mapping[str, uuid.UUID], next_version: dict[str, int], tenant: uuid.UUID,
+    source: str,
+) -> dict[str, list[Any]]:  # fmt: skip
+    rows: dict[str, list[Any]] = {c: [] for c in _ITEM_COLUMNS}
+    for d, key in fresh:
+        parent_id = None
+        if d.parent is not None:
+            parent_key = idempotency_key(tenant, source, d.parent[0], d.parent[1])
+            parent_id = item_ids.get(parent_key) or item_ids_parents.get(parent_key)
+            if parent_id is None:
+                raise LookupError(f"{d.source_item_id}: parent {d.parent[0]} version not recorded")
+        version = next_version.get(d.source_item_id, 1)
+        next_version[d.source_item_id] = version + 1
+        for col, value in (
+            ("id", item_ids[key]),
+            ("sid", d.source_item_id),
+            ("v", version),
+            ("type", d.item_type.value),
+            ("kind", d.event_kind.value if d.event_kind else None),
+            ("ch", d.content_hash),
+            ("rh", d.raw_hash),
+            ("ev", d.evidence.evidence_id),
+            ("key", d.evidence.storage_key),
+            ("path", d.json_path),
+            ("parent", parent_id),
+            ("hints", canonical_json(dict(d.change_hints)).decode()),
+            ("sent", d.sent_at),
+            ("ik", key),
+        ):
+            rows[col].append(value)
+    return rows
+
+
 async def persist(
     session: AsyncSession,
     *,
@@ -137,10 +209,8 @@ async def persist(
     """A constant number of statements per batch (not per item): advisory locks, existing keys,
     next versions, missing parents, then one multi-row INSERT each for items and derivations."""
     tenant, source = ctx.tenant_id, ctx.source
-    # parents before children: messages and files, then events
-    ordered = sorted(items, key=lambda d: (d.item_type.value == "event", d.source_item_id))
-    keys = [d.idempotency_key(tenant, source) for d in ordered]
-    sids = sorted({d.source_item_id for d in ordered})
+    # the pure parts (ordering, keys, ids, rows: hashing per item) run in a thread (ADR 0015 §24)
+    ordered, keys, sids = await asyncio.to_thread(_order_items, items, tenant, source)
     if not ordered:
         return PersistResult(0, 0, 0, {})
     # per-subject locks, always taken in the same (byte) order: no deadlocks between batches
@@ -174,18 +244,7 @@ async def persist(
         ).all()
     }
     item_ids: dict[str, uuid.UUID] = dict(existing)
-    # ids are assigned here (UUIDv7) so children in the same batch can reference their parents
-    fresh: list[tuple[Derived, str]] = []
-    for d, key in zip(ordered, keys, strict=True):
-        if key not in item_ids:
-            item_ids[key] = new_id()
-            fresh.append((d, key))
-    parent_keys = {
-        idempotency_key(tenant, source, d.parent[0], d.parent[1])
-        for d, _ in fresh
-        if d.parent is not None
-    }
-    unknown = sorted(parent_keys - item_ids.keys())
+    fresh, unknown = await asyncio.to_thread(_assign_ids, ordered, keys, item_ids, tenant, source)
     if unknown:
         item_ids_parents: dict[str, uuid.UUID] = dict(
             (
@@ -199,53 +258,9 @@ async def persist(
         )
     else:
         item_ids_parents = {}
-    rows: dict[str, list[Any]] = {
-        c: []
-        for c in (
-            [
-                "id",
-                "sid",
-                "v",
-                "type",
-                "kind",
-                "ch",
-                "rh",
-                "ev",
-                "key",
-                "path",
-                "parent",
-                "hints",
-                "sent",
-                "ik",
-            ]
-        )
-    }
-    for d, key in fresh:
-        parent_id = None
-        if d.parent is not None:
-            parent_key = idempotency_key(tenant, source, d.parent[0], d.parent[1])
-            parent_id = item_ids.get(parent_key) or item_ids_parents.get(parent_key)
-            if parent_id is None:
-                raise LookupError(f"{d.source_item_id}: parent {d.parent[0]} version not recorded")
-        version = next_version.get(d.source_item_id, 1)
-        next_version[d.source_item_id] = version + 1
-        for col, value in (
-            ("id", item_ids[key]),
-            ("sid", d.source_item_id),
-            ("v", version),
-            ("type", d.item_type.value),
-            ("kind", d.event_kind.value if d.event_kind else None),
-            ("ch", d.content_hash),
-            ("rh", d.raw_hash),
-            ("ev", d.evidence.evidence_id),
-            ("key", d.evidence.storage_key),
-            ("path", d.json_path),
-            ("parent", parent_id),
-            ("hints", canonical_json(dict(d.change_hints)).decode()),
-            ("sent", d.sent_at),
-            ("ik", key),
-        ):
-            rows[col].append(value)
+    rows = await asyncio.to_thread(
+        _item_rows, fresh, item_ids, item_ids_parents, next_version, tenant, source
+    )
     if fresh:
         await session.execute(
             text(
@@ -269,7 +284,8 @@ async def persist(
                 **rows,
             },
         )
-    derived_docs = [dict(d.derived) for d in ordered]
+    # canonical JSON + hash of every derivation is CPU work: off the event loop (ADR 0015 §24)
+    docs, hashes = await asyncio.to_thread(_encode_derivations, [dict(d.derived) for d in ordered])
     result = await session.execute(
         text(
             "INSERT INTO item_derivations (tenant_id, item_id, normalizer_version, derived, derived_hash)"
@@ -281,8 +297,8 @@ async def persist(
             "t": tenant,
             "nv": ctx.normalizer_version,
             "i": [item_ids[key] for key in keys],
-            "d": [canonical_json(doc).decode() for doc in derived_docs],
-            "h": [canonical_hash(doc) for doc in derived_docs],
+            "d": docs,
+            "h": hashes,
         },
     )
     derivations: int = result.rowcount  # type: ignore[attr-defined]

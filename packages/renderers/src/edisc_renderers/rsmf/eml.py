@@ -4,6 +4,7 @@ encoded-words split on code-point boundaries. Everything is a pure function of i
 
 from __future__ import annotations
 
+import asyncio
 import binascii
 from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
 from datetime import datetime
@@ -141,11 +142,14 @@ async def aenvelope(
     summary: str,
     zip_chunks: AsyncIterator[bytes],
 ) -> AsyncIterator[bytes]:
-    """The whole EML as an async stream of byte chunks."""
+    """The whole EML as an async stream of byte chunks. Yields to the event loop after every
+    chunk: a source whose reads complete without suspending (buffered or in-memory bytes) must not
+    keep the loop, and the activity's heartbeats, waiting for a whole multi-GB stream."""
     yield _head(headers, boundary, summary)
     encoder = _Base64Lines()
     async for chunk in zip_chunks:
         out = encoder.feed(chunk)
         if out:
             yield out
+        await asyncio.sleep(0)
     yield encoder.finish() + f"--{boundary}--".encode("ascii") + CRLF

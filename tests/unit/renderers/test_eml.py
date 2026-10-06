@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import email
 import email.policy
+from collections.abc import AsyncIterator
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from edisc_renderers.rsmf.eml import base64_lines, header, rfc5322_date
+from edisc_core import loopguard
+from edisc_renderers.rsmf.eml import aenvelope, base64_lines, header, rfc5322_date
 
 NAMES = ("Subject", "X-RSMF-Participants", "X-RSMF-Custodian")
 
@@ -72,3 +75,25 @@ def test_rfc5322_date() -> None:
         rfc5322_date(parse_utc("2026-01-05T23:59:59.999000Z")) == "Mon, 05 Jan 2026 23:59:59 +0000"
     )
     assert rfc5322_date(parse_utc("2026-02-28T00:00:00+05:30")) == "Fri, 27 Feb 2026 18:30:00 +0000"
+
+
+async def test_the_envelope_gives_the_loop_a_turn_per_chunk() -> None:
+    """A zip stream whose chunks are ready without suspending (buffered reads) must not keep the
+    event loop for the whole multi-GB attachment (ADR 0015 §24)."""
+    chunk = bytes(range(256)) * 256  # 64 KiB
+
+    async def ready() -> AsyncIterator[bytes]:
+        for _ in range(3_000):  # about 190 MiB, never suspending
+            yield chunk
+
+    blocks: list[loopguard.Block] = []
+    guard = loopguard.LoopGuard(asyncio.get_running_loop(), 100, blocks.append)
+    guard.start()
+    try:
+        total = 0
+        async for out in aenvelope([("Subject", "s")], "b", "summary", ready()):
+            total += len(out)
+    finally:
+        guard.stop()
+    assert total > 3_000 * len(chunk)
+    assert [b for b in blocks if b.counts] == []
