@@ -21,6 +21,7 @@ Central directory records are kept in memory until the end (about 100 bytes per 
 
 from __future__ import annotations
 
+import asyncio
 import struct
 import zlib
 from collections.abc import AsyncIterable, AsyncIterator, Callable
@@ -98,6 +99,9 @@ async def zip_stream(members: AsyncIterable[ZipMember]) -> AsyncIterator[bytes]:
         central.append(_central_record(name, crc, size, offset))
         offset += len(header) + size + len(descriptor)
         count += 1
+        # many small members whose bytes are ready without suspending must not keep the event
+        # loop for the whole archive (ADR 0015 §24)
+        await asyncio.sleep(0)
     directory = b"".join(central)
     yield directory
     yield _end_records(count, len(directory), offset)

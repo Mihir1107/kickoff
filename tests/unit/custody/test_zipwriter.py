@@ -31,6 +31,7 @@ from edisc_custody.archive import (
 )
 from edisc_custody.package_source import PACKAGE_LIMITS, ZipSource, read_all
 from edisc_custody.zipwriter import MAX16, MAX32, ZipMember, ZipSizeError, ZipSizer, zip_stream
+from tests.unit.turns import turns_during
 
 
 def member(name: str, data: bytes, *, declared: int | None = None, pieces: int = 3) -> ZipMember:
@@ -387,3 +388,12 @@ async def test_needs_zip64_agrees_with_what_the_writer_writes() -> None:
         data = await build([member(n, b"") for n in names])
         has_zip64 = struct.pack("<I", 0x06064B50) in data[-200:]
         assert has_zip64 == _sizer([(n, 0) for n in names]).needs_zip64(), count
+
+
+async def test_many_ready_members_still_give_the_loop_a_turn() -> None:
+    """Members whose bytes are ready without suspending (in memory, buffered): the writer yields to
+    the event loop per member, so a large package never blocks heartbeats (ADR 0015 §24)."""
+    items = [member(f"{i:06d}", b"x" * 64, pieces=1) for i in range(5_000)]
+    turns, archive = await turns_during(build(items))
+    assert archive
+    assert turns >= 5_000

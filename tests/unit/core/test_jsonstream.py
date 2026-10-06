@@ -10,8 +10,8 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from edisc_core import loopguard
 from edisc_core.jsonstream import JsonStreamError, iter_array_elements
+from tests.unit.turns import turns_during
 
 JSON = st.recursive(
     st.none() | st.booleans() | st.integers() | st.floats(allow_nan=False) | st.text(),
@@ -83,19 +83,15 @@ async def test_a_source_that_never_suspends_still_gives_the_loop_a_turn_per_chun
     """Scanning is CPU work and a coalescing source serves megabytes without suspending: the
     scanner yields to the loop per chunk, so a large file never blocks heartbeats (ADR 0015 §24)."""
     data = json.dumps([{"ts": f"1.{i:06d}", "text": "x" * 200} for i in range(40_000)]).encode()
+    chunks = -(-len(data) // (1 << 16))
 
     async def ready() -> AsyncIterator[bytes]:  # in-memory: never suspends
         for i in range(0, len(data), 1 << 16):
             yield data[i : i + (1 << 16)]
 
-    blocks: list[loopguard.Block] = []
-    guard = loopguard.LoopGuard(asyncio.get_running_loop(), 100, blocks.append)
-    guard.start()
-    try:
-        n = 0
-        async for _ in iter_array_elements(ready(), max_element_bytes=1 << 20):
-            n += 1
-    finally:
-        guard.stop()
+    async def scan_all() -> int:
+        return len([e async for e in iter_array_elements(ready(), max_element_bytes=1 << 20)])
+
+    turns, n = await turns_during(scan_all())
     assert n == 40_000
-    assert [b for b in blocks if b.counts] == []
+    assert turns >= chunks

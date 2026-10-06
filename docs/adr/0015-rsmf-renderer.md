@@ -1032,12 +1032,11 @@ what was done and why.
    | `render_store` | `Reconciler.add_slice` | 91 ms | thread (pure, writes nothing) |
    | `edisc_core.jsonstream` (export validation: `users.json`, day files) | scanning (about 20 MB/s) a coalesced 8 MiB window without suspending | 0.4 s per window measured | `await asyncio.sleep(0)` per chunk |
    | RSMF envelope (`aenvelope`) | base64 of a stream whose chunks are ready without suspending | 1.9 s (unit test) | `await asyncio.sleep(0)` per chunk |
+   | `edisc_custody.zipwriter.zip_stream` (render packages, the package download) | 65,535 in-memory members without suspending | 381 ms (CI only: sampled in test code locally) | `await asyncio.sleep(0)` per member |
+   | `edisc_custody.archive.open_entry` (exports, render packages, natives) | inflating and hashing an entry whose source never suspends | 5.6 s for 4 GiB (unit test under CPU contention) | `await asyncio.sleep(0)` per chunk; the offline verifier's synchronous drivers (`package_source._run`, `rsmf_check._run`) now step over a bare cooperative turn and still refuse a real suspension |
    Checked and left: schema validation, canonical JSON of the manifest and zip sizing all run inside
    `render_slice` (already in the thread); evidence hashing is chunk-bounded C code that releases
-   the GIL; `edisc_custody.archive.open_entry` must stay suspension-free because the offline
-   verifier drives it synchronously (`rsmf_check._run`), and its window is bounded by the coalescing
-   source (8 MiB, about 40 ms); S3 listing parses (botocore, 1,000 versions per page, about 85 ms);
-   one-time `s3_client` creation at startup. Found and recorded in BACKLOG instead: log redaction
+   the GIL; S3 listing parses (botocore, 1,000 versions per page, about 85 ms); one-time `s3_client` creation at startup. Found and recorded in BACKLOG instead: log redaction
    recompiles one regex over every registered secret (66-87 ms per registration late in the
    suite), and the render loader's `_index` still decodes all of a conversation's links in one query
    (ADR 0018 step 6's day-bounded loader is the fix).
@@ -1066,7 +1065,7 @@ what was done and why.
    product runs in a thread is listed in `OFF_LOOP` (`tests/conftest.py`) and wrapped for the
    session: called on a thread that is running an event loop, it fails the test however fast it
    was. It found a call the timing guard could not see (the pre-0014 fragment hash fallback, fast on
-   test pages). Mutation round `s24-loop` (31 breaks): each move undone, each guard mechanism broken, the
+   test pages). Mutation round `s24-loop` (35 breaks): each move undone, each guard mechanism broken, the
    render thread writing; the timing guard alone catches `render_slice` put back on the loop in
    `test_live_case[cap_10001]`.
 4. **Measured** (the whole integration suite on this laptop, report mode, threshold 50 ms):

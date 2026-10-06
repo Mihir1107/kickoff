@@ -28,6 +28,7 @@ DUMMY = "packages/connectors/dummy/src/edisc_connector_dummy/spec.py"
 UX = "tests/unit/renderers/test_externals.py"
 UF = "tests/unit/custody/test_render_files.py"
 UZ = "tests/unit/custody/test_zipwriter.py"
+ULT = "tests/unit/custody/test_loop_turns.py"
 UR = "tests/unit/custody/test_rsmf_check.py"
 UD = "tests/unit/dummy/test_oracle_and_determinism.py"
 IN = "tests/integration/renders/test_render_natives.py"
@@ -351,6 +352,17 @@ CATALOG: list[Mutation] = [
       ULG, "synchronously"),
     m("jsonstream_no_yield", "s24-loop", "packages/core/src/edisc_core/jsonstream.py",
       "        await asyncio.sleep(0)\n", "", UJ, "turn"),
+    m("zipwriter_no_yield", "s24-loop", C + "zipwriter.py",
+      "        await asyncio.sleep(0)\n", "", UZ, "ready_members"),
+    m("entry_reader_no_yield", "s24-loop", C + "archive.py",
+      "        await asyncio.sleep(0)\n        if inflater is None:", "        if inflater is None:",
+      ULT, "turn_per_chunk"),
+    m("sync_driver_refuses_turns", "s24-loop", C + "package_source.py",
+      "        while steps.send(None) is None:\n            pass\n",
+      "        if steps.send(None) is None:\n            pass\n", ULT, "drivers"),
+    m("rsmf_driver_refuses_turns", "s24-loop", C + "rsmf_check.py",
+      "        while steps.send(None) is None:\n            pass\n",
+      "        if steps.send(None) is None:\n            pass\n", ULT, "drivers"),
     m("envelope_no_yield", "s24-loop", R + "eml.py", "        await asyncio.sleep(0)\n", "", UE, "turn"),
     # each pure function the product runs in a thread, called on the loop instead (OFF_LOOP)
     m("dummy_page_on_loop", "s24-loop", DC, "result: T = await asyncio.to_thread(respond)",

@@ -154,11 +154,17 @@ class Base64Zip:
 
 
 def _run[T](awaitable: Awaitable[T]) -> T:
+    """Run an awaitable that never suspends to completion, without an event loop.
+    A cooperative turn (`await asyncio.sleep(0)`, which yields None: the readers give an event loop a
+    turn per chunk, ADR 0015 §24) is stepped over; a real suspension (a future) means the source is
+    not synchronous."""
     steps = awaitable.__await__()
     try:
-        next(steps)
+        while steps.send(None) is None:
+            pass
     except StopIteration as done:
         return cast("T", done.value)
+    steps.close()
     raise RuntimeError("rsmf read suspended: not a synchronous source")
 
 

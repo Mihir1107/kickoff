@@ -17,6 +17,7 @@ directory cannot be held in memory, so the worker enforces it with a database un
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 import struct
@@ -473,6 +474,10 @@ async def open_entry(
         n = min(limits.read_chunk, end - pos)
         data = await _read_exact(src, pos, n, f"entry {entry.index} data")
         pos += n
+        # one chunk of inflating and hashing at a time: a source whose reads complete without
+        # suspending (coalesced, in memory) must not keep the event loop for a whole entry. The
+        # synchronous drivers (`package_source._run`, `rsmf_check._run`) step over this turn.
+        await asyncio.sleep(0)
         if inflater is None:
             yield take(data)
             continue
