@@ -9,6 +9,7 @@ Rounds (ADR 0015):
 - ``s21-review``: the review of §21 (name encoding, concurrent writers, the dummy pin).
 - ``ci-heartbeat``: slice rendering off the event loop, so heartbeats keep flowing (CI run
   37412915073; ADR 0015 §23).
+- ``m16-model``: the collection report model and loader (ADR 0018 §4, §7, §8, §12; M16 step 1).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``),
   every CPU step moved off the loop, the render thread writing nothing (ADR 0015 §24).
 """
@@ -50,6 +51,13 @@ PL = "tests/integration/pipeline/test_pipeline.py"
 CL = "tests/integration/custody/test_custody_log.py"
 RS = "tests/integration/renders/test_render_store.py"
 NS = "packages/normalizer/src/edisc_normalizer/store.py"
+RM = "packages/renderers/src/edisc_renderers/report/model.py"
+RL = "workers/collection/src/edisc_worker/report_loader.py"
+UM = "tests/unit/renderers/test_report_model.py"
+RT = "tests/integration/report/test_report_model.py"
+RR = "tests/integration/renders/test_report_renders.py"
+WR = "tests/integration/worker/test_report_cases.py"
+AE = "tests/integration/api/test_report_export.py"
 
 
 @dataclass(frozen=True)
@@ -429,4 +437,51 @@ CATALOG: list[Mutation] = [
     m("reconcile_on_loop", "s24-loop", W + "render_store.py",
       "await asyncio.to_thread(reconciler.add_slice, inp, files)",
       "reconciler.add_slice(inp, files)", RS, "locked_productions"),
+    # ------------------------------------------------------------------ M16 step 1: the report model
+    m("clean_ignores_custody", "m16-model", RM, "is_clean and custody_ok and divergences == 0",
+      "is_clean and divergences == 0", UM, "clean"),
+    m("clean_ignores_divergences", "m16-model", RM, "custody_ok and divergences == 0 and retention",
+      "custody_ok and retention", UM, "clean"),
+    m("clean_ignores_retention_gaps", "m16-model", RM, " and retention_gaps == 0\n", "\n", RT,
+      "retention_gap"),
+    m("custody_failure_not_announced", "m16-model", RM,
+      '        lines.append("CUSTODY VERIFICATION FAILED")', "        pass", UM, "banners"),
+    m("archive_caveat_dropped", "m16-model", RM, "        lines.append(ARCHIVE_CAVEAT)\n", "", UM,
+      "banners"),
+    m("zero_rows_dropped", "m16-model", RM, "for v in (*order, *extra)]",
+      "for v in (*order, *extra) if counts.get(v)]", UM, "enum_value"),
+    m("unknown_printed_as_none", "m16-model", RM, "return UNKNOWN if value is None else value",
+      "return value", UM, "unknowns"),
+    m("severity_order_swapped", "m16-model", RM, '    "failed", "access_lost", "gap",',
+      '    "access_lost", "failed", "gap",', UM, "capped"),
+    m("database_value_stated", "m16-model", RM, "            stated[key] = cs[0]",
+      "            stated[key] = ds[0] if ds else cs[0]", UM, "compare_units"),
+    m("duplicate_events_unnoticed", "m16-model", RM, "        if len(cs) > 1:", "        if False:",
+      UM, "compare_units"),
+    m("error_truncation_ignored", "m16-model", RM, "return (kind, rest[:2000]) if sep",
+      "return (kind, rest) if sep", UM, "truncations"),
+    m("buckets_never_differ", "m16-model", RM,
+      "        return [i for i in range(BUCKETS) if self.buckets[i] != other.buckets[i]]",
+      "        return []", RT, "tampered_work_unit"),
+    m("jsonl_digest_skips_lines", "m16-model", RM, "        self.sha.update(line)\n", "", RT,
+      "states_the_oracle"),
+    m("pause_resumer_lost", "m16-model", RM, "p.resumed_at, p.resumed_by = e.created_at, e.actor",
+      "p.resumed_at, p.resumed_by = e.created_at, None", WR, "pause"),
+    m("database_nlo_ignored", "m16-model", RM, "no_longer_observed=no_longer_observed,",
+      "no_longer_observed=0,", RT, "no_longer_observed"),
+    m("units_file_unordered", "m16-model", RL,
+      '("file", False): _UNIT_COLUMNS + " ORDER BY w.conversation_id, w.day, w.unit_key LIMIT :n"',
+      '("file", False): _UNIT_COLUMNS + " ORDER BY w.unit_key DESC LIMIT :n"', RT, "states_the_oracle"),
+    m("divergent_unit_states_database", "m16-model", RL,
+      "fact: m.UnitFact | None = stated.get(key)", "fact: m.UnitFact | None = None", RT,
+      "tampered_work_unit"),
+    m("render_externals_dropped", "m16-model", RL, 'render["externals"] = [', 'render["dropped"] = [',
+      RR, "external_natives"),
+    m("zone_not_recorded", "m16-model", W + "pipeline.py", '                "unit_day_zone": "UTC",\n',
+      "", RT, "states_the_oracle"),
+    m("blind_spots_not_recorded", "m16-model", W + "pipeline.py",
+      '"blind_spots": None if access.blind_spots is None else list(access.blind_spots),',
+      '"blind_spots": None,', AE),
+    m("connection_blind_spots_not_stored", "m16-model", "apps/api/src/edisc_api/routes/connections.py",
+      '"blind": list(info.blind_spots), "cfg"', '"blind": None, "cfg"', AE),
 ]  # fmt: skip

@@ -8,10 +8,10 @@ and `docs/BACKLOG.md`. `docs/plans/m16.md` is the superseded proposal (history o
 ## Current state
 **Branch and CI:** `main`, green on GitHub CI (lint, typecheck, unit, integration including the 50k SIGKILL
 acceptance run). Repo: `github.com/Mihir1107/kickoff`. One commit per milestone or review round;
-`git log` is the history. Migrations at head: **0029**. Renderer **1.3.1**, dummy connector **0.4.0**.
-Nothing of M16 is built: only the ADR, the spike (`spikes/m16-pdf/`, the evidence for byte identity)
-and its manual-only CI workflow (`.github/workflows/spike-m16-pdf.yml`, `gh workflow run
-spike-m16-pdf`).
+`git log` is the history. Migrations at head: **0030**. Renderer **1.3.1**, dummy connector **0.4.0**,
+report renderer **1.0.0**. M16 **step 1 is built** (the pure report model, the loader, the access
+facts in `job_started`, oracle tests: ADR 0018 §19); steps 2-7 are not. The spike (`spikes/m16-pdf/`)
+and its manual-only CI workflow (`gh workflow run spike-m16-pdf`) remain the PDF evidence.
 
 **Phase 1 (M0-M13) is complete:** WORM evidence (S3 Object Lock COMPLIANCE on MinIO, rolling retention
 plus extension floor); hash-chained custody with WORM anchors, seals and the offline verifier

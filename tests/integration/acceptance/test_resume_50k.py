@@ -69,3 +69,25 @@ async def test_50k_messages_survive_sigkills_and_a_full_restart_exactly(
         JobRun(result.job_id, JobStatus(result.status), True),
         0,
     )
+    # the job's collection report states the oracle too (ADR 0018 §12)
+    import json
+    from collections.abc import AsyncIterator
+
+    from edisc_connector_dummy.dataset import Dataset
+    from edisc_worker.report_loader import ReportLoader
+
+    from ..report import oracle
+
+    units: list[dict[str, object]] = []
+
+    async def sink(name: str, chunks: AsyncIterator[bytes]) -> None:
+        async for chunk in chunks:
+            if name == "units.jsonl":
+                units.extend(json.loads(line) for line in chunk.splitlines())
+
+    built = await ReportLoader(
+        app_sessions, s3, settings, tenant_id=result.tenant_id, job_id=result.job_id
+    ).build(sink)
+    want = oracle.units(Dataset(cfg.spec()), 0)
+    oracle.check(built.document, units, want, oracle.job_status(want))  # type: ignore[arg-type]
+    assert built.document["divergences"]["divergences"] == []

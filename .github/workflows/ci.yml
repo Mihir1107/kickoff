@@ -56,7 +56,9 @@ jobs:
   integration:
     runs-on: ubuntu-24.04
     needs: [lint, typecheck, unit]
-    timeout-minutes: 30
+    # the suite alone takes 27-29 min on hosted runners (2026-10-06); 30 cut a passing run off
+    # during the stack teardown. The per-test 120 s timeout still catches hangs.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.2.0

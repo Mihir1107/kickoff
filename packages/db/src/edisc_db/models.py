@@ -109,6 +109,7 @@ class Connection(Base):
     external_org_id: Mapped[str] = mapped_column(Text)
     plan_tier: Mapped[str | None] = mapped_column(Text)
     granted_scopes: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
+    blind_spots: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
     encrypted_access_token: Mapped[bytes | None] = mapped_column(LargeBinary)
     encrypted_refresh_token: Mapped[bytes | None] = mapped_column(LargeBinary)
     token_expires_at: Mapped[datetime | None] = mapped_column(TZ)
@@ -220,6 +221,7 @@ class WorkUnit(Base):
             ["tenant_id", "job_id"], ["collection_jobs.tenant_id", "collection_jobs.id"]
         ),
         Index(None, "job_id", "status"),
+        Index(None, "job_id", "conversation_id", "day", "unit_key"),  # report order (ADR 0018 §12)
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)

@@ -628,3 +628,58 @@ for the real image, by admission (§6).
 - Minus: a zlib change needs a new toolchain id and admitted image (compressed streams, §5.6).
 - Minus: Japanese text shows Chinese glyph forms (§5.4).
 - Minus: one forced anchor per preview page view until measured otherwise.
+
+## 19. Implementation notes, step 1: the report model (2026-10-06)
+1. **Pure model** `edisc_renderers.report.model` (+ `version.py`: format `edisc-collection-report/1`,
+   `REPORT_RENDERER_VERSION` 1.0.0). DB-free (the purity test covers it). It owns: the unit fact
+   from the chain (`unit_fact_from_event`) and from a `work_units` row (`unit_fact_from_row`), the
+   additive digest over 4,096 buckets (`DigestFold`), the unit-by-unit comparison of differing
+   buckets (`compare_units`: `unit_differs`, `duplicate_unit_event`, `unit_unsettled_in_database`,
+   `unit_missing_from_chain`), the chain fold (`ChainFold`: `job_started`, final event, stops,
+   pauses with `resumed_by`, actors, the unit digest), the JSONL rows and their bytes, `clean`,
+   the banner lines, capped lists (`Capped`: worst first, then the key; exact totals; the remainder
+   named by file and SHA-256), zero rows, UNKNOWN, and `report.json` (`report_document`).
+2. **What `units.jsonl` states.** Each row carries `source`: `job_chain` when the chain has the
+   unit's `unit_reconciled` / `unit_failed` (then the chain's values are stated: when the bucket
+   agreed, the database row IS the chain fact; when it differed, the chain fact is re-read and
+   stated, and the row says `divergent`), else `database` (an unsettled unit of a cancelled or
+   failed job: no chain event is due, so none is a divergence). Kind, conversation, scopes
+   (indexes into `job_started.scopes`) and the access-lost reason are database facts. The day label
+   is the unit key's date; the zone is `job_started.unit_day_zone`, else
+   `UTC (ADR 0005; not recorded in the chain)`. The database side of the cross-check counts the
+   unit's `no_longer_observed` links, so the observation count is compared with the chain too.
+   Error text: the chain keeps `error[:2000]`, `work_units.last_error` keeps
+   `"<type>: <error>"[:4000]`; the comparison splits and truncates the same way.
+3. **Job-level divergences:** final status (chain vs `collection_jobs.status`), a missing final
+   event, duplicate `job_started` / final events, pauses (chain vs `job_pauses`: reason,
+   connection, resumed or not). Times are not compared (the database and the application use
+   different clocks).
+4. **§7.2 recorded:** `job_started` now carries `plan_tier`, `granted_scopes` (sorted),
+   `blind_spots`, `unit_day_zone: "UTC"` and, for exports, `export: {id, sha256}`. The blind spots
+   come from the connection: **migration 0030** adds `connections.blind_spots` (set when a
+   connection is created through the API, from `validate_connection`, and for exports from the
+   validation's tier, equal to `findings.blind_spots`). Connections created before 0030 have NULL:
+   their jobs record `null` and the report prints UNKNOWN. So the report tables migration is
+   **0031** (step 4), not 0030 as §16 planned.
+5. **Renders and externals.** `renders.jsonl` lists every render sealed at the snapshot with its
+   identity, head, seal, file and native counts, native bytes and every external native as its
+   custody-anchored record (`render_natives`: ord, SHA-256, size, the ords of the files that
+   reference it). The `{file_id}_EXTERNAL.txt` names of §1 live only inside the `.rsmf` zips;
+   reading every render file to list them is not done (the record is what custody anchors).
+6. **Loader** `edisc_worker.report_loader.ReportLoader`: verification (with the seal listed from S3,
+   exactly one version, anchoring the verified head; a failure is reported, never raised), chain
+   pass, database pass, bucket resolution, then each file streamed through a sink (step 4 stores
+   them). All folding runs in threads (ADR 0015 §24). The snapshot (renders sealed now, retention
+   gaps touching the job's evidence, bucket lock settings, the tenant audit head) has a digest;
+   step 4 stores it write-once. `conversations.jsonl` is not produced yet (only needed above the
+   cap; it comes with the HTML caps in step 2).
+7. **Tests:** the oracle `tests/integration/report/oracle.py` (from `Dataset` + the injected
+   conditions); cases: clean, gaps, unverifiable, access lost, failed units, cancelled, failed job,
+   pause re-authorized by a named principal, no-longer-observed across a rerun, unavailable files
+   by reason, export (archive caveat byte-equal, export id/SHA-256, blind spots), live access facts,
+   overlapping scopes, renders with external natives, a retention gap, a pre-change job (UNKNOWN),
+   a tampered `work_units` row (divergence, chain stated, not clean), determinism (two builds,
+   identical bytes), the 50k acceptance job; the never-clean property (hypothesis). Mutation round
+   `m16-model` (21 breaks, all caught).
+8. **Scale** (`scripts/measure_report.py`, synthetic sealed jobs on the test stack): see
+   docs/runs/2026-10-06-report-scale.md.

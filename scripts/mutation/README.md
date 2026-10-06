@@ -41,6 +41,7 @@ broken next to a `<name>.mutation-backup` copy: the runner refuses to start unti
 | `s20-natives` | oversized attachments as natives (§20, §21) | 45 |
 | `s21-review` | placeholder name encoding, concurrent writers, the dummy connector pin (§21 review) | 8 |
 | `ci-heartbeat` | slice rendering off the event loop: heartbeats never starved (CI run 37412915073, ADR 0015 §23) | 1 |
+| `m16-model` | the collection report model, loader and recorded access facts (ADR 0018, M16 step 1) | 21 |
 | `s24-loop` | the event-loop guard, every CPU step of an activity off the loop, the render thread writes nothing (ADR 0015 §24) | 35 |
 
 The `s19-*` rounds were run by hand when they were built and only their categories were written

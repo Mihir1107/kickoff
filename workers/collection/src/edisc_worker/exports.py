@@ -296,11 +296,12 @@ class ExportIngest:
             await s.execute(
                 text(
                     "INSERT INTO connections (id, tenant_id, client_id, source, external_org_id,"
-                    " plan_tier, granted_scopes, status, config) VALUES (:i, :t, :c, 'slack_export',"
-                    " :org, :tier, '{}', 'active', CAST(:cfg AS jsonb))"
+                    " plan_tier, granted_scopes, blind_spots, status, config) VALUES (:i, :t, :c,"
+                    " 'slack_export', :org, :tier, '{}', :blind, 'active', CAST(:cfg AS jsonb))"
                 ),
                 {"i": connection_id, "t": tenant_id, "c": row.client_id,
                  "org": scan.workspace or f"slack-export:{export_id}", "tier": tier.tier,
+                 "blind": list(tier.blind_spots),
                  "cfg": json.dumps({"export_id": str(export_id)})},
             )  # fmt: skip
             done = await s.execute(

@@ -140,12 +140,12 @@ async def create_connection(
         await s.execute(
             text(
                 "INSERT INTO connections (id, tenant_id, client_id, source, external_org_id, plan_tier,"
-                " granted_scopes, status, config) VALUES (:i, :t, :c, :src, :org, :tier, :scopes, 'pending',"
-                " CAST(:cfg AS jsonb))"
+                " granted_scopes, blind_spots, status, config) VALUES (:i, :t, :c, :src, :org, :tier,"
+                " :scopes, :blind, 'pending', CAST(:cfg AS jsonb))"
             ),
             {"i": connection_id, "t": caller.tenant_id, "c": client_id, "src": body.source,
              "org": body.external_org_id, "tier": info.plan_tier, "scopes": list(info.granted_scopes),
-             "cfg": _json(body.config)},
+             "blind": list(info.blind_spots), "cfg": _json(body.config)},
         )  # fmt: skip
     await store_tokens(
         res.sessions, res.box, tenant_id=caller.tenant_id, connection_id=connection_id,

@@ -318,6 +318,16 @@ class Pipeline:
                     "p": scope.thread_parent_policy.value,
                 },
             )
+        access = (
+            await s.execute(
+                text(
+                    "SELECT c.plan_tier, c.granted_scopes, c.blind_spots, e.id AS export_id,"
+                    " e.sha256 AS export_sha256 FROM connections c LEFT JOIN slack_exports e"
+                    " ON e.connection_id = c.id WHERE c.id = :c ORDER BY e.id LIMIT 1"
+                ),
+                {"c": connection_id},
+            )
+        ).one()
         await append(
             s,
             tenant_id=tenant_id,
@@ -329,6 +339,17 @@ class Pipeline:
                 "connector": self.connector.source,
                 "connector_version": self.connector.version,
                 "connection_id": str(connection_id),
+                # what the collection report states from the chain (ADR 0018 §7.2); null where the
+                # connection never recorded it (created before migration 0030)
+                "plan_tier": access.plan_tier,
+                "granted_scopes": sorted(access.granted_scopes or []),
+                "blind_spots": None if access.blind_spots is None else list(access.blind_spots),
+                "unit_day_zone": "UTC",
+                **(
+                    {"export": {"id": str(access.export_id), "sha256": access.export_sha256}}
+                    if access.export_id is not None
+                    else {}
+                ),
                 "scopes": [
                     {
                         "type": sc.scope_type.value,

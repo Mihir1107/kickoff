@@ -39,3 +39,26 @@ def test_no_clock_randomness_or_environment_in_the_source() -> None:
         if FORBIDDEN_CALLS.search(line.split("#")[0])
     ]
     assert offenders == []
+
+
+def test_the_report_model_is_pure_too() -> None:
+    """`edisc_renderers.report` is imported by the offline verifier (ADR 0018 §14)."""
+    import edisc_renderers.report.model as report_model
+
+    code = (
+        "import sys, edisc_renderers.report.model; "
+        f"bad = [m for m in sys.modules if m.split('.')[0] in {FORBIDDEN_MODULES!r}]; "
+        "print(bad); sys.exit(1 if bad else 0)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    root = pathlib.Path(report_model.__file__).parent
+    offenders = [
+        f"{path.name}:{n}: {line.strip()}"
+        for path in sorted(root.glob("*.py"))
+        for n, line in enumerate(path.read_text().splitlines(), 1)
+        if FORBIDDEN_CALLS.search(line.split("#")[0])
+    ]
+    assert offenders == []
