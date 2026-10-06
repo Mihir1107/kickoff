@@ -111,6 +111,20 @@ def production_key(tenant_id: uuid.UUID, render_id: uuid.UUID, name: str) -> str
     return f"t/{tenant_id}/productions/{render_id}/{name}"
 
 
+def report_key(tenant_id: uuid.UUID, report_id: uuid.UUID, name: str) -> str:
+    return f"t/{tenant_id}/reports/{report_id}/{name}"
+
+
+@dataclass(frozen=True)
+class _Owner:
+    """Whose output a production-like object is: its evidence kind, hash origin and owner id."""
+
+    kind: str
+    origin: str
+    render_id: uuid.UUID | None = None
+    report_id: uuid.UUID | None = None
+
+
 def native_key(tenant_id: uuid.UUID, render_id: uuid.UUID, sha256: str) -> str:
     """A render's native (ADR 0015 §11, §20.3): one object per (render, SHA-256). Production names
     never contain '/', so this never collides with an output file."""
@@ -220,15 +234,40 @@ class EvidenceWriter:
             raise ValueError(f"unsafe production name {name!r}")
         key = production_key(tenant_id, render_id, name)
         async with self._content_lock(key):
-            return await self._write_production_locked(
-                tenant_id, job_id, render_id, key, matter_retention_until, stream
-            )
+            return await self._write_output_locked(
+                tenant_id, job_id, _Owner("production", "render", render_id=render_id), key,
+                matter_retention_until, stream,
+            )  # fmt: skip
 
-    async def _write_production_locked(
+    async def write_report_file(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        job_id: uuid.UUID,
+        report_id: uuid.UUID,
+        name: str,
+        matter_retention_until: datetime,
+        stream: Callable[[], AsyncIterable[bytes]],
+    ) -> WrittenEvidence:
+        """A collection report's file (ADR 0018 §11) as locked evidence of kind ``report`` at
+        `t/{tenant}/reports/{report}/{name}`, tied to the reported job (its matter owns the retention)
+        and to the report. The same rules as ``write_production``: the file is rebuilt, never
+        buffered (``stream`` is a factory), its hash (origin ``report``) is persisted before the object
+        can exist, a retry dedups or pins the stored version, a different rebuild is an incident."""
+        if "/" in name or not name:
+            raise ValueError(f"unsafe report file name {name!r}")
+        key = report_key(tenant_id, report_id, name)
+        async with self._content_lock(key):
+            return await self._write_output_locked(
+                tenant_id, job_id, _Owner("report", "report", report_id=report_id), key,
+                matter_retention_until, stream,
+            )  # fmt: skip
+
+    async def _write_output_locked(
         self,
         tenant_id: uuid.UUID,
         job_id: uuid.UUID,
-        render_id: uuid.UUID,
+        owner: _Owner,
         key: str,
         matter_retention_until: datetime,
         stream: Callable[[], AsyncIterable[bytes]],
@@ -238,13 +277,17 @@ class EvidenceWriter:
         if existing is None:
             evidence_id = new_id()
             await self._register(
-                tenant_id, job_id, evidence_id, key, "production", retain, render_id
+                tenant_id, job_id, evidence_id, key, owner.kind, retain, owner.render_id,
+                owner.report_id,
+            )  # fmt: skip
+            return await self._upload_production(
+                tenant_id, evidence_id, key, retain, stream(), owner.origin
             )
-            return await self._upload_production(tenant_id, evidence_id, key, retain, stream())
-        if existing.kind != "production" or (existing.job_id, existing.render_id) != (
-            job_id,
-            render_id,
-        ):
+        if existing.kind != owner.kind or (
+            existing.job_id,
+            existing.render_id,
+            existing.report_id,
+        ) != (job_id, owner.render_id, owner.report_id):
             raise EvidenceIntegrityError(f"{key}: registered for another job or kind")
         digest, size = await _hash_stream(stream())
         if existing.state == "complete":
@@ -262,10 +305,10 @@ class EvidenceWriter:
         version = await self._find_version(key, digest, size)
         if version is None:
             return await self._upload_production(
-                tenant_id, existing.id, key, existing.retain_until, stream()
+                tenant_id, existing.id, key, existing.retain_until, stream(), owner.origin
             )
         if existing.source_sha256 is None:
-            await self._persist_source_hash(tenant_id, existing.id, digest, "render")
+            await self._persist_source_hash(tenant_id, existing.id, digest, owner.origin)
         await self._complete(tenant_id, existing.id, digest, size, version)
         return WrittenEvidence(existing.id, key, digest, size, version, deduplicated=False)
 
@@ -276,6 +319,7 @@ class EvidenceWriter:
         key: str,
         retain: datetime,
         stream: AsyncIterable[bytes],
+        origin: str = "render",
     ) -> WrittenEvidence:
         async def record_upload(upload_id: str) -> None:
             async with tenant_tx(self._sessions, tenant_id) as s:
@@ -295,7 +339,7 @@ class EvidenceWriter:
                         f"{key}: render hash differs from the persisted one"
                     )
                 return
-            await self._persist_source_hash(tenant_id, evidence_id, sha256, "render")
+            await self._persist_source_hash(tenant_id, evidence_id, sha256, origin)
 
         result = await stream_upload(
             self._s3,
@@ -522,8 +566,9 @@ class EvidenceWriter:
             return (
                 await s.execute(
                     text(
-                        "SELECT id, kind, job_id, render_id, state, sha256, size_bytes, source_sha256,"
-                        " version_id, retain_until, upload_id FROM evidence_objects WHERE storage_key = :k"
+                        "SELECT id, kind, job_id, render_id, report_id, state, sha256, size_bytes,"
+                        " source_sha256, version_id, retain_until, upload_id FROM evidence_objects"
+                        " WHERE storage_key = :k"
                     ),
                     {"k": key},
                 )
@@ -1039,18 +1084,20 @@ class EvidenceWriter:
         kind: str,
         retain: datetime,
         render_id: uuid.UUID | None = None,
+        report_id: uuid.UUID | None = None,
     ) -> None:
         async with tenant_tx(self._sessions, tenant_id) as s:
             await s.execute(
                 text(
-                    "INSERT INTO evidence_objects (id, tenant_id, job_id, render_id, storage_key, kind,"
-                    " retain_until) VALUES (:id, :t, :j, :rid, :k, :kind, :r)"
+                    "INSERT INTO evidence_objects (id, tenant_id, job_id, render_id, report_id,"
+                    " storage_key, kind, retain_until) VALUES (:id, :t, :j, :rid, :rep, :k, :kind, :r)"
                 ),
                 {
                     "id": evidence_id,
                     "t": tenant_id,
                     "j": job_id,
                     "rid": render_id,
+                    "rep": report_id,
                     "k": key,
                     "kind": kind,
                     "r": retain,

@@ -9,6 +9,8 @@ Rounds (ADR 0015):
 - ``s21-review``: the review of §21 (name encoding, concurrent writers, the dummy pin).
 - ``ci-heartbeat``: slice rendering off the event loop, so heartbeats keep flowing (CI run
   37412915073; ADR 0015 §23).
+- ``m16-stream``: the report's lifecycle, custody stream, storage, retention and episodes (ADR 0018
+  §9, §11, §13; M16 step 4).
 - ``m16-model``: the collection report model and loader (ADR 0018 §4, §7, §8, §12; M16 step 1).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``),
   every CPU step moved off the loop, the render thread writing nothing (ADR 0015 §24).
@@ -58,6 +60,10 @@ RT = "tests/integration/report/test_report_model.py"
 RR = "tests/integration/renders/test_report_renders.py"
 WR = "tests/integration/worker/test_report_cases.py"
 AE = "tests/integration/api/test_report_export.py"
+RW = "workers/collection/src/edisc_worker/reports.py"
+RLC = "tests/integration/reports/test_report_lifecycle.py"
+RWF = "tests/integration/reports/test_report_workflow.py"
+ROP = "tests/integration/reports/test_report_operations.py"
 
 
 @dataclass(frozen=True)
@@ -264,8 +270,8 @@ CATALOG: list[Mutation] = [
       "\"   JOIN evidence_objects e ON e.job_id = j.id AND e.storage_key NOT LIKE '%/natives/%'\"",
       IN, "only-via-job_id"),
     m("retention_render_route", "s20-natives", C + "retention_extension.py",
-      '"   JOIN evidence_objects e ON e.render_id = r.id),"',
-      "\"   JOIN evidence_objects e ON e.render_id = r.id AND e.storage_key NOT LIKE '%/natives/%'),\"",
+      '"   JOIN evidence_objects e ON e.render_id = r.id"\n',
+      "\"   JOIN evidence_objects e ON e.render_id = r.id AND e.storage_key NOT LIKE '%/natives/%'\"\n",
       IN, "only-via-render_id"),
     m("pkg_reference_mismatch", "s20-natives", C + "render_package.py",
       "        if named != listed:", "        if False:", CN, "rewritten_reference"),
@@ -326,8 +332,10 @@ CATALOG: list[Mutation] = [
       "                async with asyncio.timeout(self._settings.evidence_copy_timeout_seconds):\n"
       "                    return await self._native_locked(", IN, "two_writers"),
     m("production_write_unlocked", "s21-review", EV,
-      "        async with self._content_lock(key):\n            return await self._write_production_locked(",
-      "        async with asyncio.timeout(None):\n            return await self._write_production_locked(",
+      "        async with self._content_lock(key):\n            return await self._write_output_locked(\n"
+      '                tenant_id, job_id, _Owner("production"',
+      "        async with asyncio.timeout(None):\n            return await self._write_output_locked(\n"
+      '                tenant_id, job_id, _Owner("production"',
       IN, "executors_render"),
     m("no_relist_after_abort", "s21-review", EV,
       "            await self._abort_open_uploads(key, row.upload_id)\n"
@@ -353,6 +361,9 @@ CATALOG: list[Mutation] = [
       "if (late - paused) * 1000 <= self.threshold_ms:", "if False:", ULG, "garbage"),
     m("guard_selector_not_idle", "s24-loop", LG, 'return "idle", f"', 'return "product", f"',
       ULG, "selector"),
+    m("guard_counts_idle_stalls", "s24-loop", LG,
+      "return (self.cpu_ms - self.gc_ms) >= BUSY_SHARE * (self.total_ms - self.gc_ms)",
+      "return True", ULG, "without_cpu"),
     m("guard_scram_counted", "s24-loop", LG, "    if _connection_auth(stack):\n", "    if False:\n",
       ULG, "scram"),
     m("guard_follows_sync_drivers", "s24-loop", LG,
@@ -371,6 +382,9 @@ CATALOG: list[Mutation] = [
     m("rsmf_driver_refuses_turns", "s24-loop", C + "rsmf_check.py",
       "        while steps.send(None) is None:\n            pass\n",
       "        if steps.send(None) is None:\n            pass\n", ULT, "drivers"),
+    m("api_routes_built_on_the_loop", "s24-loop", "apps/api/src/edisc_api/app.py",
+      "        await asyncio.to_thread(warm_routes, app)  # never on the loop at the first requests\n",
+      "", "tests/unit/api/test_warm_routes.py", "startup"),
     m("envelope_no_yield", "s24-loop", R + "eml.py", "        await asyncio.sleep(0)\n", "", UE, "turn"),
     # each pure function the product runs in a thread, called on the loop instead (OFF_LOOP)
     m("dummy_page_on_loop", "s24-loop", DC, "result: T = await asyncio.to_thread(respond)",
@@ -484,4 +498,43 @@ CATALOG: list[Mutation] = [
       '"blind_spots": None,', AE),
     m("connection_blind_spots_not_stored", "m16-model", "apps/api/src/edisc_api/routes/connections.py",
       '"blind": list(info.blind_spots), "cfg"', '"blind": None, "cfg"', AE),
+    # ------------------------------------------------------------------ M16 step 4: the report stream
+    m("report_begin_unfenced", "m16-stream", RW, '            if cur.status != "snapshotted":\n                return str(cur.status)\n            await close_episodes',
+      "            if False:\n                return str(cur.status)\n            await close_episodes", RLC, "two_executors"),
+    m("report_file_record_unchecked", "m16-stream", RW,
+      "                if file_record(dict(existing._mapping)) != record:", "                if False:",
+      RLC, "does_not_reproduce"),
+    m("report_generated_unchecked", "m16-stream", RW,
+      "            if recorded != stored or cur.files_done != len(stored):", "            if False:",
+      RLC, "file_list_unlike"),
+    m("report_seal_recorded_twice", "m16-stream", RW,
+      '" WHERE id = :i AND seal_storage_key IS NULL RETURNING id"', '" WHERE id = :i RETURNING id"',
+      RLC, "two_executors"),
+    m("report_unsealed_job_accepted", "m16-stream", RW,
+      "        if job.sealed_at is None or job.seal_storage_key is None:", "        if False:", RLC,
+      "not_sealed"),
+    m("report_runtime_unchecked", "m16-stream", RW,
+      "        self._check_identity(row)\n        async with tenant_tx(self.sessions, tenant_id) as s:\n            job = (",
+      "        async with tenant_tx(self.sessions, tenant_id) as s:\n            job = (", RLC,
+      "another_runtime"),
+    m("report_missing_never_closed", "m16-stream", RW,
+      '                    await close_episodes(s, cur.job_id, "report_completed", kind="report_missing")\n',
+      "                    pass\n", RWF, "ensure_job_reports"),
+    m("report_divergence_unalerted", "m16-stream", RW,
+      "                await self._divergence_alert(s, cur, len(built.divergences))", "                pass",
+      RLC, "divergence"),
+    m("report_sealing_stuck_never_flagged", "m16-stream", RW,
+      "            if failures >= self.settings.render_seal_stuck_attempts:", "            if False:",
+      ROP, "sealing_stuck"),
+    m("report_unroutable_never_flagged", "m16-stream", W + "report_ops.py",
+      "            elif await open_episode(", "            elif False and await open_episode(", ROP,
+      "unroutable"),
+    m("report_evidence_stats_unfixed", "m16-stream", RL,
+      " AND report_id IS NULL AND kind NOT IN ('production', 'report')", "", RLC, "identical_identity"),
+    m("report_anchor_unowned", "m16-stream", C + "log.py", "    if report is not None:",
+      "    if False:", ROP, "files_and_anchors"),
+    m("report_retention_route", "m16-stream", C + "retention_extension.py",
+      '"   JOIN collection_jobs j ON j.matter_id = m.id JOIN reports rp ON rp.job_id = j.id"',
+      '"   JOIN collection_jobs j ON j.matter_id = m.id JOIN reports rp ON false"', ROP,
+      "files_and_anchors"),
 ]  # fmt: skip

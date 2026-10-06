@@ -296,10 +296,31 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
             f"t/{t}/productions/{render}/natives/sha256/{HEX}",
         )
         await conn.execute(
-            "INSERT INTO render_episodes (id, tenant_id, render_id, kind) VALUES ($1, $2, $3, 'unroutable')",
+            "INSERT INTO production_episodes (id, tenant_id, render_id, subject_id, kind)"
+            " VALUES ($1, $2, $3, $3, 'unroutable')",
             new_id(),
             t,
             render,
+        )
+        # reports (migration 0031)
+        report = new_id()
+        await conn.execute(
+            "INSERT INTO reports (id, tenant_id, job_id, matter_id, renderer_version,"
+            " unicode_version, toolchain_id, paper, requested_by)"
+            " VALUES ($1, $2, $3, $4, '1', '1', 'none', 'letter', 'seed')",
+            report,
+            t,
+            ids["job"],
+            ids["matter"],
+        )
+        await conn.execute(
+            "INSERT INTO report_files (tenant_id, report_id, ord, name, media_type,"
+            " evidence_object_id, version_id, sha256, size_bytes, rows)"
+            " VALUES ($1, $2, 0, 'report.json', 'application/json', $3, 'v', $4, 1, NULL)",
+            t,
+            report,
+            ids["ev"],
+            HEX,
         )
         await conn.execute(
             "INSERT INTO retention_gaps (id, tenant_id, evidence_object_id, owner_type, owner_id,"
@@ -368,6 +389,8 @@ TENANT_TABLES = [
     "renders",
     "render_files",
     "render_natives",
-    "render_episodes",
+    "production_episodes",
+    "reports",
+    "report_files",
 ]
 ALL_TABLES = ["tenants", *TENANT_TABLES]

@@ -60,7 +60,12 @@ MATTER_CANDIDATES = (
     "  UNION ALL"
     "  SELECT e.id, m.id, m.retention_until FROM active m"
     "   JOIN collection_jobs j ON j.matter_id = m.id JOIN renders r ON r.job_id = j.id"
-    "   JOIN evidence_objects e ON e.render_id = r.id),"
+    "   JOIN evidence_objects e ON e.render_id = r.id"
+    # a report's own stream's anchors (its files carry the job id): report -> job -> matter
+    "  UNION ALL"
+    "  SELECT e.id, m.id, m.retention_until FROM active m"
+    "   JOIN collection_jobs j ON j.matter_id = m.id JOIN reports rp ON rp.job_id = j.id"
+    "   JOIN evidence_objects e ON e.report_id = rp.id),"
     # an archive entry is protected by locking its archive (the entry is never an object of its own)
     " owned AS (SELECT coalesce(x.archive_evidence_id, x.id) AS id, r.matter_id, r.retention_until"
     "  FROM refs r JOIN evidence_objects x ON x.id = r.id)"

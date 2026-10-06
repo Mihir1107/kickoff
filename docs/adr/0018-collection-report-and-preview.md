@@ -683,3 +683,58 @@ for the real image, by admission (§6).
    `m16-model` (21 breaks, all caught).
 8. **Scale** (`scripts/measure_report.py`, synthetic sealed jobs on the test stack): see
    docs/runs/2026-10-06-report-scale.md.
+
+## 20. Implementation notes, step 4 first (the report custody stream), 2026-10-07
+**Order.** Step 4 (records, custody stream, workflow, schedule, episodes) was built right after step
+1, before steps 2 (HTML) and 3 (PDF), so that `report.json` and the JSONL files are produced, stored
+and sealed end to end first (the user asked to stop there for review). Steps 2 and 3 add files to
+the same `report_files` / `report_generated`; nothing in the stream changes shape.
+1. **Migration 0031** (0030 went to step 1, §19.4): `reports` (guard trigger: identity, write-once
+   snapshot, job reference, the generated verdict and the seal are immutable; transitions
+   `requested -> snapshotted -> generating -> generated -> completed`, `refused` from requested or
+   snapshotted, `failed` from any live status), `report_files` (insert-only), `custody_events.report_id`
+   and `evidence_objects.report_id` (report files are kind `report`, hash origin `report`), and
+   **`render_episodes` renamed to `production_episodes`** (render, report or job subject; every
+   render episode keeps its row; render code and the renders API now read it). A downgrade refuses
+   while report rows with origin `report` exist (they cannot be removed: no deletes).
+2. **Identity** = (job, snapshot digest, report renderer, PDF toolchain id, Unicode, paper), unique
+   among live reports. The PDF toolchain id is `none` until step 3: then a new identity (and a new
+   queue `reports.r1.0.0.p<toolchain12>.u15.0.0`; today `reports.r1.0.0.pnone.u15.0.0`). Every
+   completed report appends `audit.report_completed`, which moves the tenant audit head inside the
+   next snapshot: so a later request is a NEW identity and a new report (earlier reports are never
+   replaced), and only two requests snapshotted with nothing in between collide; the second ends
+   `refused` with reason `duplicate_identity` (the API of step 5 returns the existing report).
+3. **The snapshot** also captures the job's own collected evidence statistics (retain-until range,
+   objects, not-complete), excluding render productions and report files that carry the job id:
+   retention and other outputs move on, the report's bytes must not.
+4. **Lifecycle** (`edisc_worker.reports.ReportRun`): `snapshot`, `begin` (`report_started` with
+   the job reference, the verification verdict and its errors, the snapshot digest, the identity,
+   the image digest, the requester and reason), `files` (each file stored with
+   `EvidenceWriter.write_report_file`, the generalised production path, then recorded, fenced by
+   `files_done`; a rebuild unlike its record is an integrity failure at that file; then
+   `report_generated` with every record and the root over them,
+   `edisc_custody.report_files.files_root`), the seal (forced anchor, then in one transaction
+   `completed`, the seal, `audit.report_completed` and the closing of the job's `report_missing`
+   episode), `fail` (retried without limit). Divergences raise one `report_divergence` alert and
+   `audit.report_divergence` in the generated transaction. Report stream anchors are owned by the
+   report (report -> job -> matter) for retention: a new route in the retention extension.
+5. **ReportWorkflow** and `ReportActivities` (`--reports` on the worker, queue of its runtime,
+   `EDISC_REPORT_ACTIVITY_CONCURRENCY`); `EDISC_TEST_REPORT_BARRIER` for real SIGKILLs.
+6. **`ensure-job-reports`** (maintenance, every 5 minutes): every sealed job of an open matter with
+   no report gets one (actor `system`, paper `letter`); a job whose report failed or was refused is
+   not given another automatically (a deterministic failure would loop): its `report_missing`
+   episode (after `EDISC_REPORT_MISSING_SECONDS`, one alert `report_missing`) asks a human. The same
+   run applies the render routing rule to reports (`unroutable`, alert `report_unroutable`); a seal
+   failing `EDISC_RENDER_SEAL_STUCK_ATTEMPTS` times opens `sealing_stuck` (alert
+   `report_sealing_stuck`). Discovery through sweeper-owned SECURITY DEFINER functions (ids only).
+7. **Tests:** the crash matrix (every boundary, first and second occurrence where it repeats,
+   simulated), a crash between an object and its registry row, real SIGKILLs of the worker process
+   at nine barriers (snapshot, start, mid-upload, a file's record, generated, the four seal
+   sub-steps), refused, duplicate identity (sequential and racing), the failure path through a
+   crash, a divergence, the runtime check, a tampered file record and an extra recorded file, two
+   executors at once, retention of files and anchors, the sweeper racing a recovering seal,
+   `sealing_stuck`, `unroutable`, `ensure-job-reports` with its episode. Mutation round `m16-stream`
+   (13 breaks, all caught).
+8. **Not built here (by plan):** the OOM crash point needs the PDF child (step 3); the API routes,
+   the report package and `edisc-verify` recomputation are step 5; manual regeneration (`POST`) is
+   step 5.

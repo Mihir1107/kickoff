@@ -203,9 +203,9 @@ async def open_episode(
     opened = (
         await s.execute(
             text(
-                "INSERT INTO render_episodes (id, tenant_id, render_id, kind, detail)"
-                " VALUES (:i, :t, :r, :k, :d)"
-                " ON CONFLICT (render_id, kind) WHERE ended_at IS NULL DO NOTHING RETURNING id"
+                "INSERT INTO production_episodes (id, tenant_id, render_id, subject_id, kind, detail)"
+                " VALUES (:i, :t, :r, :r, :k, :d)"
+                " ON CONFLICT (subject_id, kind) WHERE ended_at IS NULL DO NOTHING RETURNING id"
             ),
             {"i": new_id(), "t": tenant_id, "r": render_id, "k": kind, "d": detail[:2000]},
         )
@@ -227,7 +227,7 @@ async def close_episodes(
     """Close the open episode(s) of a render (all kinds, or one); closed episodes are history."""
     result = await s.execute(
         text(
-            "UPDATE render_episodes SET ended_at = now(), end_reason = :why WHERE render_id = :r"
+            "UPDATE production_episodes SET ended_at = now(), end_reason = :why WHERE subject_id = :r"
             " AND ended_at IS NULL AND (CAST(:k AS text) IS NULL OR kind = :k)"
         ),
         {"why": reason, "r": render_id, "k": kind},
@@ -806,7 +806,7 @@ class RenderRun:
             return (
                 await s.execute(
                     text(
-                        "SELECT 1 FROM render_episodes WHERE render_id = :r AND kind = :k"
+                        "SELECT 1 FROM production_episodes WHERE subject_id = :r AND kind = :k"
                         " AND ended_at IS NULL"
                     ),
                     {"r": render_id, "k": kind},

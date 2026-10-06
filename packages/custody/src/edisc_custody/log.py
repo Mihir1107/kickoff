@@ -77,11 +77,12 @@ async def append(
     created_at: datetime | None = None,
     event_id: uuid.UUID | None = None,
     render_id: uuid.UUID | None = None,
+    report_id: uuid.UUID | None = None,
 ) -> AppendedEvent:
     """Append one event to ``stream_id`` inside the caller's (tenant-scoped) transaction.
 
-    ``render_id``: set on every event of a render's own stream (stream id = render id, job_id NULL;
-    a database check enforces both)."""
+    ``render_id`` / ``report_id``: set on every event of a render's / a report's own stream (stream
+    id = that id, job_id NULL; a database check enforces both)."""
     created = ensure_utc(created_at) if created_at else utc_now()
     await session.execute(
         text(
@@ -116,8 +117,9 @@ async def append(
     await session.execute(
         text(
             "INSERT INTO custody_events (id, tenant_id, stream_id, job_id, seq, event_type, actor, item_id,"
-            " payload, prev_hash, event_hash, created_at, render_id) VALUES (:id, :t, :s, :j, :seq, :et,"
-            " :actor, :item, CAST(:payload AS jsonb), :prev, :hash, :created, :render)"
+            " payload, prev_hash, event_hash, created_at, render_id, report_id) VALUES (:id, :t, :s, :j,"
+            " :seq, :et, :actor, :item, CAST(:payload AS jsonb), :prev, :hash, :created, :render,"
+            " :report)"
         ),
         {
             "id": event_id,
@@ -133,6 +135,7 @@ async def append(
             "hash": event_hash,
             "created": created,
             "render": render_id,
+            "report": report_id,
         },
     )
     due = bool(
@@ -193,10 +196,11 @@ async def append_batch(
 # ------------------------------------------------------------------ anchoring
 async def _anchor_retain_until(
     session: AsyncSession, settings: Settings, stream_id: uuid.UUID
-) -> tuple[datetime, uuid.UUID | None, uuid.UUID | None]:
-    """(retain until, job id, render id) for an anchor of ``stream_id``: a job stream belongs to its
-    job's matter; a render stream to its render, whose job's matter owns the retention (render ->
-    job -> matter); the tenant stream has the rolling window only."""
+) -> tuple[datetime, uuid.UUID | None, uuid.UUID | None, uuid.UUID | None]:
+    """(retain until, job id, render id, report id) for an anchor of ``stream_id``: a job stream
+    belongs to its job's matter; a render or report stream to its render / report, whose job's matter
+    owns the retention (render -> job -> matter, report -> job -> matter); the tenant stream has the
+    rolling window only."""
     row = (
         await session.execute(
             text(
@@ -207,7 +211,7 @@ async def _anchor_retain_until(
         )
     ).first()
     if row is not None:
-        return effective_retain_until(settings, row.retention_until), row.job_id, None
+        return effective_retain_until(settings, row.retention_until), row.job_id, None, None
     render = (
         await session.execute(
             text(
@@ -219,8 +223,20 @@ async def _anchor_retain_until(
         )
     ).first()
     if render is not None:
-        return effective_retain_until(settings, render.retention_until), None, render.id
-    return effective_retain_until(settings), None, None  # tenant stream: rolling window only
+        return effective_retain_until(settings, render.retention_until), None, render.id, None
+    report = (
+        await session.execute(
+            text(
+                "SELECT r.id, m.retention_until FROM reports r"
+                " JOIN collection_jobs j ON j.tenant_id = r.tenant_id AND j.id = r.job_id"
+                " JOIN matters m ON m.tenant_id = j.tenant_id AND m.id = j.matter_id WHERE r.id = :s"
+            ),
+            {"s": stream_id},
+        )
+    ).first()
+    if report is not None:
+        return effective_retain_until(settings, report.retention_until), None, None, report.id
+    return effective_retain_until(settings), None, None, None  # tenant stream: rolling window only
 
 
 async def anchor_if_due(
@@ -313,7 +329,7 @@ async def _anchor_once(
                     {"s": stream_id, "q": seq},
                 )
             ).scalar_one()
-            retain_until, job_id, render_id = await _anchor_retain_until(
+            retain_until, job_id, render_id, report_id = await _anchor_retain_until(
                 session, settings, stream_id
             )
             key = anchor_key(str(tenant_id), str(stream_id), seq)
@@ -323,9 +339,9 @@ async def _anchor_once(
             # the anchor's hash is known before the object exists: persisted with the row (provenance)
             await session.execute(
                 text(
-                    "INSERT INTO evidence_objects (id, tenant_id, job_id, render_id, storage_key, kind,"
-                    " retain_until, source_sha256, source_hash_origin)"
-                    " VALUES (:id, :t, :j, :rid, :k, 'anchor', :r, :h, 'collection')"
+                    "INSERT INTO evidence_objects (id, tenant_id, job_id, render_id, report_id,"
+                    " storage_key, kind, retain_until, source_sha256, source_hash_origin)"
+                    " VALUES (:id, :t, :j, :rid, :rep, :k, 'anchor', :r, :h, 'collection')"
                     " ON CONFLICT (storage_key) DO NOTHING"
                 ),
                 {
@@ -333,6 +349,7 @@ async def _anchor_once(
                     "t": tenant_id,
                     "j": job_id,
                     "rid": render_id,
+                    "rep": report_id,
                     "k": key,
                     "r": retain_until,
                     "h": hashlib.sha256(body).hexdigest(),
@@ -512,7 +529,8 @@ async def verify_chain(
             await session.execute(
                 text(
                     "SELECT coalesce((SELECT finished_at IS NOT NULL FROM collection_jobs WHERE id = :s),"
-                    " (SELECT finished_at IS NOT NULL FROM renders WHERE id = :s))"
+                    " (SELECT finished_at IS NOT NULL FROM renders WHERE id = :s),"
+                    " (SELECT status IN ('completed', 'refused', 'failed') FROM reports WHERE id = :s))"
                 ),
                 {"s": stream_id},
             )

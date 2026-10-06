@@ -84,50 +84,39 @@ class _State:
     log_path: Path | None
     fail: bool
     lock: threading.Lock = field(default_factory=threading.Lock)
-    pending: list[loopguard.Block] = field(default_factory=list)
+    pending: dict[str, loopguard.Block] = field(default_factory=dict)  # by id: latest report
     seen: set[str] = field(default_factory=set)
     on_loop: list[str] = field(default_factory=list)  # OFF_LOOP functions called on a loop thread
 
+    def _log(self, where: str, blocks: list[loopguard.Block]) -> None:
+        if self.log_path is None or not blocks:
+            return
+        test = os.environ.get("PYTEST_CURRENT_TEST")
+        with self.lock, self.log_path.open("a") as fh:
+            for b in blocks:
+                fh.write(json.dumps({"where": where, "test": test, **asdict(b)}) + "\n")
+
     def record(self, block: loopguard.Block) -> None:
-        if self.log_path is not None and block.total_ms is not None:
-            with self.lock, self.log_path.open("a") as fh:
-                fh.write(
-                    json.dumps(
-                        {
-                            "where": "pytest",
-                            "test": os.environ.get("PYTEST_CURRENT_TEST"),
-                            **asdict(block),
-                        }
-                    )
-                    + "\n"
-                )
-        if block.total_ms is None and block.counts:
+        """Called at a stall's detection and again at its end (with its CPU time)."""
+        if block.total_ms is not None:
+            self._log("pytest", [block])
+        if block.origin in ("product", "unattributed"):
             with self.lock:
-                self.pending.append(block)
+                self.pending[block.id] = block
 
     def take_on_loop(self) -> list[str]:
         with self.lock:
             found, self.on_loop = self.on_loop, []
         return found
 
-    def take(self) -> list[loopguard.Block]:
+    def take(self, phase: str) -> list[loopguard.Block]:
+        """The blocks that count, decided at their end (a stall still open counts). Worker blocks
+        whose end is not known yet wait for a later phase, except at teardown (the worker is gone)."""
         with self.lock:
-            found, self.pending = self.pending, []
-        others = loopguard.read_blocks(self.directory, self.seen)
-        if self.log_path is not None and others:
-            with self.lock, self.log_path.open("a") as fh:
-                for b in others:
-                    fh.write(
-                        json.dumps(
-                            {
-                                "where": "worker",
-                                "test": os.environ.get("PYTEST_CURRENT_TEST"),
-                                **asdict(b),
-                            }
-                        )
-                        + "\n"
-                    )
-        return found + others
+            found, self.pending = list(self.pending.values()), {}
+        others = loopguard.read_blocks(self.directory, self.seen, unfinished=phase == "teardown")
+        self._log("worker", others)
+        return [b for b in (*found, *others) if b.counts]
 
 
 _KEY = pytest.StashKey[_State]()
@@ -187,7 +176,7 @@ async def _event_loop_guard(request: pytest.FixtureRequest) -> AsyncIterator[Non
 def _check(item: pytest.Item, phase: str) -> Generator[None, Any, None]:
     outcome = yield
     state = item.config.stash[_KEY]
-    blocks, on_loop = state.take(), state.take_on_loop()
+    blocks, on_loop = state.take(phase), state.take_on_loop()
     if not blocks and not on_loop:
         return
     text = "\n\n".join([*on_loop, *(b.describe() for b in blocks)])

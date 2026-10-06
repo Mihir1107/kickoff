@@ -191,7 +191,7 @@ async def _episodes(s: AsyncSession, render_ids: list[uuid.UUID]) -> dict[uuid.U
     rows = (
         await s.execute(
             text(
-                "SELECT render_id, kind, started_at, ended_at, end_reason, detail FROM render_episodes"
+                "SELECT render_id, kind, started_at, ended_at, end_reason, detail FROM production_episodes"
                 " WHERE render_id = ANY(:r) ORDER BY started_at, id"
             ),
             {"r": render_ids},

@@ -34,6 +34,7 @@ from edisc_custody.sweeper import sweep_anchors
 from edisc_db.connection_tokens import reconcile_token_refreshes
 from edisc_worker.contracts import MAINTENANCE_QUEUE
 from edisc_worker.render_routing import check_render_routing
+from edisc_worker.report_ops import ensure_job_reports
 from edisc_worker.workflows import MaintenanceWorkflow
 
 
@@ -50,6 +51,7 @@ SWEEPS = (
     Sweep("sweep-stale-uploads", "sweep_stale_uploads", timedelta(hours=1)),
     Sweep("extend-retention", "extend_retention", timedelta(hours=6)),
     Sweep("check-render-routing", "check_render_routing", timedelta(minutes=1)),
+    Sweep("ensure-job-reports", "ensure_job_reports", timedelta(minutes=5)),
 )
 
 
@@ -78,6 +80,18 @@ class MaintenanceActivities:
             "closed": result.closed,
             "queues_without_workers": result.queues_without_workers,
         }
+
+    @activity.defn(name="ensure_job_reports")
+    async def ensure_job_reports(self) -> dict[str, Any]:
+        if self.temporal is None:
+            raise RuntimeError("ensure-job-reports needs a Temporal client")
+        result = await ensure_job_reports(
+            self.sweeper_sessions, self.sessions, self.temporal, self.settings,
+            tenant_id=self.tenant_id,
+        )  # fmt: skip
+        return {"created": result.created, "missing_opened": result.missing_opened,
+                "unroutable_opened": result.unroutable_opened,
+                "unroutable_closed": result.unroutable_closed}  # fmt: skip
 
     @activity.defn(name="sweep_anchors")
     async def sweep_anchors(self) -> dict[str, Any]:
@@ -128,6 +142,7 @@ class MaintenanceActivities:
             self.sweep_stale_uploads,
             self.extend_retention,
             self.check_render_routing,
+            self.ensure_job_reports,
         ]
 
 

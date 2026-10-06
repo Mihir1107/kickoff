@@ -3,6 +3,7 @@ except the external identity provider's JWKS endpoint where a test needs an HTTP
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import ipaddress
 import secrets
@@ -16,6 +17,7 @@ from typing import Any
 import httpx
 import pytest
 import redis.asyncio as aioredis
+from fastapi import FastAPI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
@@ -23,7 +25,7 @@ from temporalio.worker import Worker
 from types_aiobotocore_s3 import S3Client
 
 from edisc_api.admin import onboard_tenant
-from edisc_api.app import Resources, create_app
+from edisc_api.app import Resources, create_app, warm_routes
 from edisc_api.auth import DEV_ISSUER, DEV_JWKS, Authenticator, JwksCache, dev_token
 from edisc_connector_dummy.connector import DummyConnector
 from edisc_connector_slack_export import file_links
@@ -94,10 +96,18 @@ class Api:
     resources: Resources
     http: httpx.AsyncClient  # used by the JWKS cache (tests may swap its transport)
 
+    # one app per (test, settings), its routes built ahead (warm_routes): ASGITransport runs no
+    # lifespan, and FastAPI would otherwise build them on the loop at the first requests
+    app: FastAPI | None = None
+    app_settings: Settings | None = None
+
     def client(self, subdomain: str, token: str | None = None) -> httpx.AsyncClient:
         headers = {"authorization": f"Bearer {token}"} if token else {}
+        if self.app is None or self.app_settings is not self.settings:
+            self.app, self.app_settings = create_app(self.settings, self.resources), self.settings
+            warm_routes(self.app)  # test setup, outside any request
         return httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=create_app(self.settings, self.resources)),
+            transport=httpx.ASGITransport(app=self.app),
             base_url=f"http://{subdomain}.{self.settings.api_base_domain}",
             headers=headers,
             event_hooks={"response": [_scan_response]},
@@ -126,7 +136,9 @@ async def api(
         {"dummy": DummyConnector(limiter)},
         redis,
     )
-    yield Api(api_settings, app_sessions, s3, temporal, resources, http)
+    app = create_app(api_settings, resources)
+    await asyncio.to_thread(warm_routes, app)
+    yield Api(api_settings, app_sessions, s3, temporal, resources, http, app, api_settings)
     await http.aclose()
     await redis.aclose()
 

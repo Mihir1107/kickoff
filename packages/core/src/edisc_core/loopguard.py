@@ -10,8 +10,12 @@ late by more than the threshold, samples the loop thread's stack while it is sti
 reports a `Block`. The block is attributed to the innermost COROUTINE frame on that stack (the async
 function that made the blocking synchronous call): product code (`packages/`, `apps/`, `workers/`
 sources) or anything unattributable counts; a test's own coroutine (test setup that builds data
-synchronously) and a loop sampled inside its selector (waiting for I/O on a host that did not
-schedule it) and asyncpg's SCRAM handshake for a new connection are recorded but do not count.
+synchronously), a loop sampled inside its selector (waiting for I/O on a host that did not
+schedule it) and asyncpg's SCRAM handshake for a new connection are recorded but do not count. A
+stall also counts only if the loop's thread was on the CPU for at least `BUSY_SHARE` of it (its
+`time.thread_time()` across the stall): CPU-bound work on the loop burns that time, a process the OS
+did not schedule does not. Blocking system calls on the loop burn none either: ruff's ASYNC rules
+find those statically, and the `OFF_LOOP` check in `tests/conftest.py` is not affected.
 
 Enabled only through `EDISC_TEST_LOOP_BLOCK_MS` (pytest sets it for the processes it spawns; a worker
 refuses it unless EDISC_ENV is test or ci). Reports go to `EDISC_TEST_LOOP_BLOCK_DIR` as one JSON file
@@ -42,6 +46,9 @@ ENV_MS = "EDISC_TEST_LOOP_BLOCK_MS"
 ENV_DIR = "EDISC_TEST_LOOP_BLOCK_DIR"
 
 Origin = Literal["product", "test", "unattributed", "idle", "library"]
+# a stall counts only if the loop's thread was on the CPU for at least this share of it: CPU-bound
+# work keeps it near 1 (still above 0.25 with every core contended), a descheduled process near 0
+BUSY_SHARE = 0.25
 
 _REPO = Path(__file__).resolve().parents[4]
 PRODUCT_ROOTS: tuple[str, ...] = tuple(
@@ -65,16 +72,29 @@ class Block:
     stack: str
     total_ms: float | None = None
     gc_ms: float = 0.0  # garbage collection inside the stall (excused, not counted in the lag)
+    cpu_ms: float | None = None  # CPU time of the loop's thread over the whole stall (at its end)
+
+    @property
+    def busy(self) -> bool:
+        """Did the loop's thread RUN for the stall? CPU-bound work on the loop burns its thread's
+        CPU time; a loop whose process the OS did not schedule (a loaded or swapping host) burns
+        none. Unknown while the stall lasts: then it is assumed busy."""
+        if self.total_ms is None or self.cpu_ms is None:
+            return True
+        return (self.cpu_ms - self.gc_ms) >= BUSY_SHARE * (self.total_ms - self.gc_ms)
 
     @property
     def counts(self) -> bool:
-        return self.origin in ("product", "unattributed")
+        return self.origin in ("product", "unattributed") and self.busy
 
     def describe(self) -> str:
         total = f"{self.total_ms:.0f} ms" if self.total_ms is not None else "still blocked"
+        cpu = (
+            f", {self.cpu_ms:.0f} ms of CPU on the loop's thread" if self.cpu_ms is not None else ""
+        )
         return (
             f"event loop blocked (pid {self.pid}, {self.origin}, lag {self.lag_ms:.0f} ms when "
-            f"sampled ({self.gc_ms:.0f} ms of it garbage collection), total {total}) in "
+            f"sampled ({self.gc_ms:.0f} ms of it garbage collection), total {total}{cpu}) in "
             f"{self.blamed}; task {self.task}\n{self.stack}"
         )
 
@@ -214,6 +234,7 @@ class LoopGuard:
     _thread_id: int | None = field(default=None, init=False)
     _handle: asyncio.TimerHandle | None = field(default=None, init=False)
     _watchdog: threading.Thread | None = field(default=None, init=False)
+    _cpu: float = field(default=0.0, init=False)  # the loop thread's CPU time at its last beat
 
     @property
     def tick(self) -> float:
@@ -224,6 +245,7 @@ class LoopGuard:
         global _GC
         _GC = _GC or _GcClock()
         self._thread_id = threading.get_ident()
+        self._cpu = time.thread_time()
         with self._lock:
             self._due = time.monotonic() + self.tick
         self._handle = self.loop.call_later(self.tick, self._beat)
@@ -238,13 +260,14 @@ class LoopGuard:
             self._watchdog.join(timeout=1)
 
     def _beat(self) -> None:
-        now = time.monotonic()
+        now, cpu = time.monotonic(), time.thread_time()  # on the loop's own thread
         with self._lock:
             ended, self._open = self._open, None
             late = now - self._due
             self._due = now + self.tick
+            used, self._cpu = cpu - self._cpu, cpu
         if ended is not None:
-            self.on_block(replace(ended, total_ms=late * 1000))
+            self.on_block(replace(ended, total_ms=late * 1000, cpu_ms=used * 1000))
         if not self._stop.is_set():
             self._handle = self.loop.call_later(self.tick, self._beat)
 
@@ -256,7 +279,7 @@ class LoopGuard:
                 with self._lock:
                     ended, self._open = self._open, None
                     late, self._due = now - self._due, now + self.tick
-                if ended is not None:  # it stopped right after the stall: ends here
+                if ended is not None:  # it stopped right after the stall: ends here (CPU unknown)
                     self.on_block(replace(ended, total_ms=late * 1000))
                 continue
             with self._lock:
@@ -292,14 +315,19 @@ def write_block(directory: Path, block: Block) -> None:
     tmp.replace(target)
 
 
-def read_blocks(directory: Path, seen: set[str]) -> list[Block]:
-    """Blocks reported by other processes since ``seen`` (updated)."""
+def read_blocks(directory: Path, seen: set[str], *, unfinished: bool = True) -> list[Block]:
+    """Blocks reported by other processes since ``seen`` (updated). A block whose stall has not
+    ended yet is returned (and marked seen) only if ``unfinished``; otherwise it is left for a later
+    read, when its end (and so whether the loop's thread was busy) is known."""
     found = []
     for path in sorted(directory.glob("*.json")):
         if path.name in seen:
             continue
+        block = Block(**json.loads(path.read_text()))
+        if block.total_ms is None and not unfinished:
+            continue
         seen.add(path.name)
-        found.append(Block(**json.loads(path.read_text())))
+        found.append(block)
     return found
 
 
@@ -318,8 +346,8 @@ def install_from_env(
     def report(block: Block) -> None:
         if block.total_ms is None:
             log(block.describe())
-        if directory is not None and block.counts:
-            write_block(directory, block)
+        if directory is not None and block.origin in ("product", "unattributed"):
+            write_block(directory, block)  # at detection, then again with its end
 
     guard = LoopGuard(loop, float(raw), report)
     guard.start()

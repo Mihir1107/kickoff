@@ -41,6 +41,8 @@ with workflow.unsafe.imports_passed_through():
         PauseRequest,
         RenderFailure,
         RenderRef,
+        ReportFailure,
+        ReportRef,
         RunConfig,
         StopRequest,
         UnitFailure,
@@ -447,6 +449,67 @@ class RenderWorkflow:
             kind, detail = error_text(err)
             failed: dict[str, Any] = await workflow.execute_activity(
                 "fail_render", RenderFailure(ref, kind, detail), result_type=dict[str, Any],
+                start_to_close_timeout=control, heartbeat_timeout=heartbeat,
+                retry_policy=RetryPolicy(
+                    initial_interval=timedelta(seconds=ref.retry_initial_seconds),
+                    maximum_interval=timedelta(seconds=ref.retry_max_seconds),
+                    maximum_attempts=0,  # the failure itself must be recorded and sealed
+                ),
+            )  # fmt: skip
+            return failed
+        return done
+
+
+@workflow.defn(name="ReportWorkflow")
+class ReportWorkflow:
+    """One collection report of a sealed job (ADR 0018 §9; id ``report-{report_id}``, queue of its
+    runtime identity). ``snapshot_report`` (inputs captured once, or ``report_refused``),
+    ``begin_report`` (verification, ``report_started``), ``report_files`` (every file stored and
+    recorded, then ``report_generated``), ``complete_report`` (the seal). Each activity is idempotent
+    and reads the report's status from the DB. Anything that fails for good leads to
+    ``fail_report``, retried without limit: a report never ends without a sealed record."""
+
+    @workflow.run
+    async def run(self, ref: ReportRef) -> dict[str, Any]:
+        retry = RetryPolicy(
+            initial_interval=timedelta(seconds=ref.retry_initial_seconds),
+            backoff_coefficient=2.0,
+            maximum_interval=timedelta(seconds=ref.retry_max_seconds),
+            maximum_attempts=ref.max_attempts,
+            non_retryable_error_types=[ErrorClass.REPORT_INTEGRITY.value],
+        )
+        heartbeat = timedelta(seconds=ref.heartbeat_timeout_seconds)
+        control = timedelta(seconds=ref.control_timeout_seconds)
+        try:
+            status: str = await workflow.execute_activity(
+                "snapshot_report", ref, result_type=str, start_to_close_timeout=control,
+                heartbeat_timeout=heartbeat, retry_policy=retry,
+            )  # fmt: skip
+            if status == "snapshotted":
+                status = await workflow.execute_activity(
+                    "begin_report", ref, result_type=str, start_to_close_timeout=control,
+                    heartbeat_timeout=heartbeat, retry_policy=retry,
+                )  # fmt: skip
+            if status == "generating":
+                await workflow.execute_activity(
+                    "report_files", ref, result_type=str,
+                    start_to_close_timeout=timedelta(seconds=ref.files_timeout_seconds),
+                    heartbeat_timeout=heartbeat, retry_policy=retry,
+                )  # fmt: skip
+            done: dict[str, Any] = await workflow.execute_activity(
+                "complete_report", ref, result_type=dict[str, Any],
+                start_to_close_timeout=control, heartbeat_timeout=heartbeat,
+                retry_policy=RetryPolicy(
+                    initial_interval=timedelta(seconds=ref.retry_initial_seconds),
+                    maximum_interval=timedelta(seconds=ref.retry_max_seconds),
+                    maximum_attempts=0,  # the seal of a generated report is retried without limit
+                    non_retryable_error_types=[ErrorClass.REPORT_INTEGRITY.value],
+                ),
+            )  # fmt: skip
+        except ActivityError as err:
+            kind, detail = error_text(err)
+            failed: dict[str, Any] = await workflow.execute_activity(
+                "fail_report", ReportFailure(ref, kind, detail), result_type=dict[str, Any],
                 start_to_close_timeout=control, heartbeat_timeout=heartbeat,
                 retry_policy=RetryPolicy(
                     initial_interval=timedelta(seconds=ref.retry_initial_seconds),

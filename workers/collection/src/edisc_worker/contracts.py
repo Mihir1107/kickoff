@@ -21,6 +21,7 @@ def task_queue(source: str) -> str:
 MAINTENANCE_QUEUE = "maintenance"
 EXPORTS_QUEUE = "exports"  # Slack export hash-lock-validate (ADR 0014)
 RENDERS_QUEUE = "renders"  # prefix: one queue per renderer/Unicode/tzdata triple (ADR 0015 §15)
+REPORTS_QUEUE = "reports"  # prefix: one queue per report runtime identity (ADR 0018 §6)
 
 
 def export_workflow_id(export_id: str) -> str:
@@ -38,6 +39,16 @@ def render_task_queue(renderer_version: str, unicode_version: str, tzdata_versio
     return f"{RENDERS_QUEUE}.r{renderer_version}.u{unicode_version}.tz{tzdata_version}"
 
 
+def report_workflow_id(report_id: str) -> str:
+    return f"report-{report_id}"
+
+
+def report_task_queue(renderer_version: str, toolchain_id: str, unicode_version: str) -> str:
+    """The queue of the report workers of exactly this runtime (ADR 0018 §6):
+    ``reports.r<renderer>.p<toolchain12>.u<unicode>``."""
+    return f"{REPORTS_QUEUE}.r{renderer_version}.p{toolchain_id[:12]}.u{unicode_version}"
+
+
 def unit_workflow_id(job_id: str, unit_key: str) -> str:
     return f"{job_id}/{unit_key}"
 
@@ -52,6 +63,7 @@ class ErrorClass(StrEnum):
     )
     JOB_CLOSED = "JobClosed"  # the job was sealed/terminal under us: stop, nothing to record
     RENDER_INTEGRITY = "RenderIntegrity"  # a render's inputs or outputs disagree: the render fails
+    REPORT_INTEGRITY = "ReportIntegrity"  # a report's recorded and rebuilt bytes disagree: it fails
     TRANSIENT = "Transient"  # retried with backoff; when exhausted the unit goes to retry_later
     UNCLASSIFIED = "Unclassified"  # retried a few times, then the unit fails with the type recorded
 
@@ -63,6 +75,7 @@ NON_RETRYABLE = frozenset(
         ErrorClass.AUTH_REQUIRED,
         ErrorClass.JOB_CLOSED,
         ErrorClass.RENDER_INTEGRITY,
+        ErrorClass.REPORT_INTEGRITY,
     }
 )
 
@@ -153,6 +166,40 @@ class RenderRef:
 @dataclass(frozen=True)
 class RenderFailure:
     render: RenderRef
+    error_type: str
+    error: str
+
+
+@dataclass(frozen=True)
+class ReportRef:
+    """One collection report (ADR 0018 §9). The report id is the workflow's whole identity: a retry
+    or a re-run rebuilds the same files from the same snapshot and dedups against what is stored."""
+
+    tenant_id: str
+    report_id: str
+    heartbeat_timeout_seconds: float = 60
+    retry_initial_seconds: float = 1
+    retry_max_seconds: float = 60
+    max_attempts: int = 25
+    control_timeout_seconds: float = 300
+    files_timeout_seconds: float = 43_200
+
+    @classmethod
+    def from_settings(cls, tenant_id: str, report_id: str, settings: Settings) -> ReportRef:
+        return cls(
+            tenant_id=tenant_id,
+            report_id=report_id,
+            heartbeat_timeout_seconds=settings.activity_heartbeat_timeout_seconds,
+            retry_initial_seconds=settings.activity_retry_initial_seconds,
+            retry_max_seconds=settings.activity_retry_max_seconds,
+            max_attempts=settings.activity_max_attempts,
+            files_timeout_seconds=settings.render_start_to_close_seconds,
+        )
+
+
+@dataclass(frozen=True)
+class ReportFailure:
+    report: ReportRef
     error_type: str
     error: str
 

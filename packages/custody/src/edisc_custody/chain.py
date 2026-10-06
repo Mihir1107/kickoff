@@ -56,6 +56,9 @@ LIFECYCLE_EVENTS = frozenset(
         "custodian_merged",
         "custodian_split",
         *RENDER_LIFECYCLE,
+        "report_started",  # report_generated (above) closes the report's files (ADR 0018 §9)
+        "report_refused",
+        "report_failed",
     }
 )
 BATCH_EVENT = "items_collected"

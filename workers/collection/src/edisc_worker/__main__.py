@@ -5,6 +5,7 @@ Redis limiter. At startup, journaled token refreshes are reconciled (ADR 0009) b
 ``--maintenance`` also runs the ``maintenance`` queue (sweepers) and creates/updates their schedules.
 ``--exports`` also runs the ``exports`` queue: hash, lock and validate uploaded Slack exports (ADR 0014).
 ``--renders`` also runs the ``renders`` queue: RSMF renders of sealed jobs (ADR 0015).
+``--reports`` also runs the report queue of this runtime: collection reports (ADR 0018).
 """
 
 from __future__ import annotations
@@ -41,12 +42,14 @@ from edisc_worker.contracts import EXPORTS_QUEUE, MAINTENANCE_QUEUE, task_queue
 from edisc_worker.exports import ExportActivities
 from edisc_worker.maintenance import MaintenanceActivities, ensure_schedules
 from edisc_worker.renders import RenderActivities, barrier_hooks
+from edisc_worker.reports import ReportActivities, report_barrier_hooks
 from edisc_worker.workflows import (
     CollectionJobWorkflow,
     CollectUnitWorkflow,
     ExportIngestWorkflow,
     MaintenanceWorkflow,
     RenderWorkflow,
+    ReportWorkflow,
     TenantRetentionWorkflow,
 )
 
@@ -114,8 +117,10 @@ async def run(
     maintenance: bool,
     exports: bool = False,
     renders: bool = False,
+    reports: bool = False,
     queue: str | None = None,
     renders_queue: str | None = None,
+    reports_queue: str | None = None,
 ) -> None:
     settings = Settings()
     client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
@@ -163,6 +168,19 @@ async def run(
                     activities=rendering.all(),
                 )
             )
+        if reports:  # this worker's report runtime decides its queue (ADR 0018 §6)
+            reporting = ReportActivities(
+                acts.sessions, acts.s3, settings, hooks=report_barrier_hooks(settings)
+            )
+            workers.append(
+                Worker(
+                    client,
+                    task_queue=reports_queue or reporting.task_queue,
+                    workflows=[ReportWorkflow],
+                    activities=reporting.all(),
+                    max_concurrent_activities=settings.report_activity_concurrency,
+                )
+            )
         log.info("worker started", task_queues=[w.task_queue for w in workers])
         # test-only (EDISC_TEST_LOOP_BLOCK_MS): the spawning test fails if anything blocks the loop
         loopguard.install_from_env(
@@ -177,8 +195,10 @@ def main() -> None:
     ap.add_argument("--maintenance", action="store_true", help="also run sweepers and schedules")
     ap.add_argument("--exports", action="store_true", help="also hash, lock and validate exports")
     ap.add_argument("--renders", action="store_true", help="also run RSMF renders")
+    ap.add_argument("--reports", action="store_true", help="also run collection reports")
     ap.add_argument("--queue", help="task queue override (one source only; tests and soak runs)")
     ap.add_argument("--renders-queue", help="renders queue override (tests; default: by versions)")
+    ap.add_argument("--reports-queue", help="reports queue override (tests; default: by runtime)")
     args = ap.parse_args()
     sources = args.sources or ["dummy"]
     if args.queue and len(sources) != 1:
@@ -190,8 +210,10 @@ def main() -> None:
             maintenance=args.maintenance,
             exports=args.exports,
             renders=args.renders,
+            reports=args.reports,
             queue=args.queue,
             renders_queue=args.renders_queue,
+            reports_queue=args.reports_queue,
         )
     )
 

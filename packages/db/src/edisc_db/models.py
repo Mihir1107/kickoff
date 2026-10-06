@@ -263,8 +263,10 @@ class EvidenceObject(Base):
             ["evidence_objects.tenant_id", "evidence_objects.id"],
         ),
         ForeignKeyConstraint(["tenant_id", "render_id"], ["renders.tenant_id", "renders.id"]),
+        ForeignKeyConstraint(["tenant_id", "report_id"], ["reports.tenant_id", "reports.id"]),
         Index(None, "job_id", "state"),
         Index(None, "render_id", postgresql_where=text("render_id IS NOT NULL")),
+        Index(None, "report_id", postgresql_where=text("report_id IS NOT NULL")),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
@@ -288,6 +290,7 @@ class EvidenceObject(Base):
     entry_crc32: Mapped[int | None] = mapped_column(BigInteger)
     entry_compressed_size: Mapped[int | None] = mapped_column(BigInteger)
     render_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    report_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
 
 
 class CustodyEvent(Base):
@@ -300,6 +303,7 @@ class CustodyEvent(Base):
             ["tenant_id", "job_id"], ["collection_jobs.tenant_id", "collection_jobs.id"]
         ),
         ForeignKeyConstraint(["tenant_id", "render_id"], ["renders.tenant_id", "renders.id"]),
+        ForeignKeyConstraint(["tenant_id", "report_id"], ["reports.tenant_id", "reports.id"]),
         Index(None, "job_id"),
     )
 
@@ -316,6 +320,7 @@ class CustodyEvent(Base):
     event_hash: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZ)
     render_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    report_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
 
 
 class CustodyChainHead(Base):
@@ -903,14 +908,23 @@ class RenderNative(Base):
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
 
 
-class RenderEpisode(Base):
-    __tablename__ = "render_episodes"
+class ProductionEpisode(Base):
+    """``render_episodes`` renamed and generalised (migration 0031): about a render, a report or a
+    job (exactly one of the three ids; ``subject_id`` is that id)."""
+
+    __tablename__ = "production_episodes"
     __table_args__ = (
         ForeignKeyConstraint(["tenant_id", "render_id"], ["renders.tenant_id", "renders.id"]),
+        ForeignKeyConstraint(["tenant_id", "report_id"], ["reports.tenant_id", "reports.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "job_id"], ["collection_jobs.tenant_id", "collection_jobs.id"]
+        ),
         Index(None, "render_id"),
+        Index(None, "report_id", postgresql_where=text("report_id IS NOT NULL")),
+        Index(None, "job_id", postgresql_where=text("job_id IS NOT NULL")),
         Index(
-            "uq_render_episodes_open",
-            "render_id",
+            "uq_production_episodes_open",
+            "subject_id",
             "kind",
             unique=True,
             postgresql_where=text("ended_at IS NULL"),
@@ -919,9 +933,99 @@ class RenderEpisode(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
-    render_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    render_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     kind: Mapped[str] = mapped_column(Text)
     started_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     ended_at: Mapped[datetime | None] = mapped_column(TZ)
     end_reason: Mapped[str | None] = mapped_column(Text)
     detail: Mapped[str | None] = mapped_column(Text)
+    report_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    subject_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+
+
+class Report(Base):
+    __tablename__ = "reports"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "job_id"], ["collection_jobs.tenant_id", "collection_jobs.id"]
+        ),
+        ForeignKeyConstraint(["tenant_id", "matter_id"], ["matters.tenant_id", "matters.id"]),
+        Index(None, "tenant_id", "job_id"),
+        Index(
+            "uq_reports_identity",
+            "tenant_id",
+            "job_id",
+            "snapshot_digest",
+            "renderer_version",
+            "toolchain_id",
+            "unicode_version",
+            "paper",
+            unique=True,
+            postgresql_where=text("status NOT IN ('requested', 'failed', 'refused')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    job_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    matter_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'requested'"))
+    reason: Mapped[str | None] = mapped_column(Text)
+    detail: Mapped[str | None] = mapped_column(Text)
+    renderer_version: Mapped[str] = mapped_column(Text)
+    unicode_version: Mapped[str] = mapped_column(Text)
+    toolchain_id: Mapped[str] = mapped_column(Text)
+    paper: Mapped[str] = mapped_column(Text)
+    requested_by: Mapped[str] = mapped_column(Text)
+    request_reason: Mapped[str | None] = mapped_column(Text)
+    request_id: Mapped[str | None] = mapped_column(Text)
+    snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    snapshot_digest: Mapped[str | None] = mapped_column(Text)
+    job_head_seq: Mapped[int | None] = mapped_column(BigInteger)
+    job_head_hash: Mapped[str | None] = mapped_column(Text)
+    job_seal_key: Mapped[str | None] = mapped_column(Text)
+    job_seal_version: Mapped[str | None] = mapped_column(Text)
+    image_digest: Mapped[str | None] = mapped_column(Text)
+    files_done: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    files_root: Mapped[str | None] = mapped_column(Text)
+    clean: Mapped[bool | None] = mapped_column(Boolean)
+    divergence_count: Mapped[int | None] = mapped_column(Integer)
+    head_seq: Mapped[int | None] = mapped_column(BigInteger)
+    head_hash: Mapped[str | None] = mapped_column(Text)
+    seal_storage_key: Mapped[str | None] = mapped_column(Text)
+    seal_version_id: Mapped[str | None] = mapped_column(Text)
+    seal_failures: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    last_seal_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    updated_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    snapshotted_at: Mapped[datetime | None] = mapped_column(TZ)
+    started_at: Mapped[datetime | None] = mapped_column(TZ)
+    finished_at: Mapped[datetime | None] = mapped_column(TZ)
+    sealed_at: Mapped[datetime | None] = mapped_column(TZ)
+
+
+class ReportFile(Base):
+    __tablename__ = "report_files"
+    __table_args__ = (
+        UniqueConstraint("report_id", "name"),
+        ForeignKeyConstraint(["tenant_id", "report_id"], ["reports.tenant_id", "reports.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "evidence_object_id"],
+            ["evidence_objects.tenant_id", "evidence_objects.id"],
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    report_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    ord: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(Text)
+    media_type: Mapped[str] = mapped_column(Text)
+    evidence_object_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    version_id: Mapped[str] = mapped_column(Text)
+    sha256: Mapped[str] = mapped_column(Text)
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    rows: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)

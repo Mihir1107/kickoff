@@ -26,8 +26,14 @@ def _guard(blocks: list[loopguard.Block], *, as_product: bool) -> loopguard.Loop
     return loopguard.LoopGuard(asyncio.get_running_loop(), 100, blocks.append, **roots)  # type: ignore[arg-type]
 
 
+def _spin(seconds: float) -> None:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        pass
+
+
 async def _blocking_coroutine(seconds: float) -> None:
-    time.sleep(seconds)  # noqa: ASYNC251  (blocking the loop is what the guard catches)
+    _spin(seconds)  # CPU-bound work on the loop: what the guard exists to catch
 
 
 async def test_a_blocked_loop_is_reported_with_the_coroutine_that_blocked_it() -> None:
@@ -44,8 +50,9 @@ async def test_a_blocked_loop_is_reported_with_the_coroutine_that_blocked_it() -
     assert len(detected) == 1 and len(ended) == 1, blocks
     (b,) = detected
     assert b.origin == "product" and b.counts
-    assert "_blocking_coroutine" in b.blamed and "time.sleep(seconds)" in b.stack
+    assert "_blocking_coroutine" in b.blamed and "_spin(seconds)" in b.stack
     assert b.lag_ms > 100 and ended[0].total_ms is not None and ended[0].total_ms >= 350
+    assert ended[0].cpu_ms is not None and ended[0].cpu_ms >= 300 and ended[0].counts
 
 
 async def test_a_test_coroutine_blocking_the_loop_is_recorded_but_does_not_count() -> None:
@@ -96,7 +103,8 @@ def test_a_worker_process_reports_to_the_directory_and_refuses_outside_test(
         "async def main():\n"
         "    loopguard.install_from_env(asyncio.get_running_loop(), permitted=True, log=print)\n"
         "    await asyncio.sleep(0.05)\n"
-        "    time.sleep(0.5)\n"  # unattributed: this coroutine is in neither tree
+        "    deadline = time.monotonic() + 0.5\n"
+        "    while time.monotonic() < deadline: pass\n"  # unattributed: in neither tree
         "    await asyncio.sleep(0.05)\n"
         "asyncio.run(main())\n"
     )
@@ -244,3 +252,24 @@ def test_a_new_connections_scram_handshake_is_library_time() -> None:
     leaf = frame(hmac.__file__, "_init_hmac", frame(hmac.__file__, "new", received))
     assert loopguard.classify(leaf)[0] == "library"  # type: ignore[arg-type]
     assert loopguard.classify(frame(hmac.__file__, "new", None))[0] == "unattributed"  # type: ignore[arg-type]
+
+
+async def test_a_stall_without_cpu_on_the_loops_thread_is_recorded_but_does_not_count() -> None:
+    """The process was not running (here: the thread sleeps, as a descheduled one would): late, but
+    no code of ours ran on the loop."""
+    blocks: list[loopguard.Block] = []
+    guard = _guard(blocks, as_product=True)
+    guard.start()
+    try:
+        await _sleeping_coroutine(0.4)
+        await asyncio.sleep(0.05)
+    finally:
+        guard.stop()
+    ended = [b for b in blocks if b.total_ms is not None]
+    assert len(ended) == 1 and ended[0].origin == "product"
+    assert ended[0].cpu_ms is not None and ended[0].cpu_ms < 100
+    assert not ended[0].counts and not ended[0].busy
+
+
+async def _sleeping_coroutine(seconds: float) -> None:
+    time.sleep(seconds)  # noqa: ASYNC251  (stands for a thread the OS did not schedule)

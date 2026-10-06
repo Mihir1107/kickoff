@@ -498,6 +498,9 @@ class ReportLoader:
         snap: dict[str, Any] = {
             "renders": renders,
             "retention_gaps": gaps,
+            # the job's own collected evidence as of now (retention moves on; productions and
+            # report files of the job are not its evidence)
+            "evidence": await self._evidence(),
             "audit_head": None if head is None else {"seq": head.last_seq, "hash": head.last_hash},
             "lock": await self._lock_settings(),
         }
@@ -524,7 +527,8 @@ class ReportLoader:
                     text(
                         "SELECT min(retain_until) AS lo, max(retain_until) AS hi, count(*) AS n,"
                         " count(*) FILTER (WHERE state <> 'complete') AS not_complete"
-                        " FROM evidence_objects WHERE job_id = :j"
+                        " FROM evidence_objects WHERE job_id = :j AND render_id IS NULL"
+                        " AND report_id IS NULL AND kind NOT IN ('production', 'report')"
                     ),
                     {"j": self._job_id},
                 )
@@ -658,7 +662,7 @@ class ReportLoader:
         obs_counts, by_reason, obs_capped = state["obs"]
         files = [state["units_digest"], state["obs_digest"], state["renders_digest"]]
 
-        evidence = await self._evidence()
+        evidence = dict(snap["evidence"])
         exceptions: dict[str, Any] = {
             "units": units.exceptions.record(state["units_digest"].record()),
             "observations_capped": obs_capped.record(state["obs_digest"].record()),

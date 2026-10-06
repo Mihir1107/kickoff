@@ -1,4 +1,4 @@
-# Handoff (2026-10-06, end of session: render heartbeat starvation found and fixed (ADR 0015 §23); M16 designed (ADR 0018); next: build M16)
+# Handoff (2026-10-07: stage 0 (nothing CPU-bound on the event loop, ADR 0015 §24) done; M16 steps 1 and 4 built (report model, loader, custody stream, ADR 0018 §19-§20); waiting for review before HTML and PDF)
 
 This file alone is enough to build M16. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (read it in full before any
@@ -8,9 +8,12 @@ and `docs/BACKLOG.md`. `docs/plans/m16.md` is the superseded proposal (history o
 ## Current state
 **Branch and CI:** `main`, green on GitHub CI (lint, typecheck, unit, integration including the 50k SIGKILL
 acceptance run). Repo: `github.com/Mihir1107/kickoff`. One commit per milestone or review round;
-`git log` is the history. Migrations at head: **0030**. Renderer **1.3.1**, dummy connector **0.4.0**,
-report renderer **1.0.0**. M16 **step 1 is built** (the pure report model, the loader, the access
-facts in `job_started`, oracle tests: ADR 0018 §19); steps 2-7 are not. The spike (`spikes/m16-pdf/`)
+`git log` is the history. Migrations at head: **0031**. Renderer **1.3.1**, dummy connector **0.4.0**,
+report renderer **1.0.0**. M16 **steps 1 and 4 are built**: the pure report model, the loader, the
+access facts in `job_started` (§19), and the report custody stream with `report.json` + the JSONL files
+stored and sealed, `ReportWorkflow`, `ensure-job-reports`, `production_episodes` (§20). Steps 2 (HTML),
+3 (PDF), 5 (API, package, verifier), 6 (preview), 7 (docs) are not; the user asked to review before
+HTML and PDF. The spike (`spikes/m16-pdf/`)
 and its manual-only CI workflow (`gh workflow run spike-m16-pdf`) remain the PDF evidence.
 
 **Phase 1 (M0-M13) is complete:** WORM evidence (S3 Object Lock COMPLIANCE on MinIO, rolling retention
@@ -23,9 +26,13 @@ the 1M-message soak (needs a cloud VM; `scripts/resume_soak.py --messages 100000
 **Phase 2:** M14 (Slack exports) done; M15 (RSMF renders) done; **M16 designed, next to build**; then
 M17 (UI, sessions: ADR 0016 and the M17 backend plan in `docs/plans/phase-2.md`).
 
-## Next: build M16
-ADR 0018 §16 is the order. Each step: implement → tests → mutation entries in
-`scripts/mutation/catalog.py` → run → commit → push.
+## Next: M16 steps 2, 3, 5, 6, 7 (after the user's review of steps 1 and 4)
+ADR 0018 §16 is the order (step 4 was moved before 2 and 3, §20). Each step: implement → tests →
+mutation entries in `scripts/mutation/catalog.py` → run → commit → push. Step 3 must also build the
+PDF child process with its own memory limit and the OOM crash point (ADR 0018 §6, §13, amendment 7),
+and give reports a real toolchain id (a new identity and queue; `none` today). Step 5 adds the API
+(manual regeneration returns the existing report on `duplicate_identity`), the report package and
+`edisc-verify` recomputation from `edisc_renderers.report.model`.
 
 What M16 is, in one paragraph: every sealed job gets a **collection report** (its own custody stream:
 snapshot → `report_started` → files → `report_generated` → seal) made of `report.json` + full JSONL

@@ -74,6 +74,7 @@ def test_every_sweep_has_a_sane_interval() -> None:
         "sweep_stale_uploads",
         "extend_retention",
         "check_render_routing",
+        "ensure_job_reports",
     }
     # retention extension works against a 60-day floor: every 6 hours is plenty
     assert all(timedelta(minutes=1) <= s.every <= timedelta(hours=6) for s in SWEEPS)

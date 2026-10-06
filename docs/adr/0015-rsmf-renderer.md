@@ -1034,6 +1034,7 @@ what was done and why.
    | RSMF envelope (`aenvelope`) | base64 of a stream whose chunks are ready without suspending | 1.9 s (unit test) | `await asyncio.sleep(0)` per chunk |
    | `edisc_custody.zipwriter.zip_stream` (render packages, the package download) | 65,535 in-memory members without suspending | 381 ms (CI only: sampled in test code locally) | `await asyncio.sleep(0)` per member |
    | `edisc_custody.archive.open_entry` (exports, render packages, natives) | inflating and hashing an entry whose source never suspends | 5.6 s for 4 GiB (unit test under CPU contention) | `await asyncio.sleep(0)` per chunk; the offline verifier's synchronous drivers (`package_source._run`, `rsmf_check._run`) now step over a bare cooperative turn and still refuse a real suspension |
+   | the API (`edisc_api.app`) | FastAPI 0.142 builds each router's dependency and validation models lazily, on the loop, at the first matching request | 360 ms (407 ms of CPU on the loop's thread) | `warm_routes` in a thread at startup (the lifespan); the API tests warm one app per test |
    Checked and left: schema validation, canonical JSON of the manifest and zip sizing all run inside
    `render_slice` (already in the thread); evidence hashing is chunk-bounded C code that releases
    the GIL; S3 listing parses (botocore, 1,000 versions per page, about 85 ms); one-time `s3_client` creation at startup. Found and recorded in BACKLOG instead: log redaction
@@ -1065,7 +1066,7 @@ what was done and why.
    product runs in a thread is listed in `OFF_LOOP` (`tests/conftest.py`) and wrapped for the
    session: called on a thread that is running an event loop, it fails the test however fast it
    was. It found a call the timing guard could not see (the pre-0014 fragment hash fallback, fast on
-   test pages). Mutation round `s24-loop` (35 breaks): each move undone, each guard mechanism broken, the
+   test pages). Mutation round `s24-loop` (37 breaks): each move undone, each guard mechanism broken, the
    render thread writing; the timing guard alone catches `render_slice` put back on the loop in
    `test_live_case[cap_10001]`.
 4. **Measured** (the whole integration suite on this laptop, report mode, threshold 50 ms):
@@ -1089,3 +1090,12 @@ what was done and why.
    with work in the tree (an unrelated migration file existed for about a minute, and heavy commands
    ran next to it), which is the likeliest cause but is NOT proven. Recorded so that the next
    failure of any of these tests is investigated with this in mind (CI now keeps the artifacts).
+7. **The CPU rule (2026-10-07).** Two later stalls in one test (`test_concurrent_writers_produce_one_
+   anchor_per_due_point`, 281-285 ms) were sampled in trivial code with nothing CPU-bound to blame,
+   and could not be reproduced (0 of 15 under CPU contention, 2 of 2 in the failing combination): the
+   process was not running. A stall now counts only if the loop's thread was on the CPU for at
+   least 25% of it (`time.thread_time()` of that thread across the stall; CPU-bound work keeps it
+   near 100%, still above 25% with every core contended). Blocking system calls burn no CPU either:
+   ruff's ASYNC rules catch those statically, and `OFF_LOOP` is unaffected. The FastAPI stall
+   above passed the rule (407 ms of CPU in 360 ms of stall) and was fixed.
+

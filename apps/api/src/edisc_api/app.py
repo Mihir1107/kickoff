@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import uuid
 from collections.abc import AsyncIterator, Mapping
@@ -83,9 +84,29 @@ async def build_resources(settings: Settings) -> AsyncIterator[Resources]:
         await engine.dispose()
 
 
+def warm_routes(app: FastAPI) -> int:
+    """Build every route's dependency and validation models now. FastAPI (0.142) builds them lazily,
+    under a thread lock, on the first request that matches a router: about 350 ms of CPU on the
+    event loop of the API process (found by the loop guard, ADR 0015 §24). Run it in a thread at
+    startup. Returns how many routes were built."""
+    from fastapi.routing import _IncludedRouter
+
+    built, todo = 0, list(app.router.routes)
+    while todo:
+        route = todo.pop()
+        if isinstance(route, _IncludedRouter):
+            for child in (*route.effective_candidates(), *route.effective_low_priority_routes()):
+                if isinstance(child, _IncludedRouter):
+                    todo.append(child)
+                else:
+                    built += 1
+    return built
+
+
 def create_app(settings: Settings, resources: Resources | None = None) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        await asyncio.to_thread(warm_routes, app)  # never on the loop at the first requests
         if resources is not None:
             app.state.resources = resources
             yield

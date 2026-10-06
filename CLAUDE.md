@@ -156,10 +156,19 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Every manifest is validated against the vendored `rsmf_schema_2_0_0.json` (SHA-256 pinned, format
   checks on). The Relativity validator is not used until the licence is confirmed.
 
-## Collection report and preview (M16, ADR 0018; designed and spiked, NOT built)
-- Read ADR 0018 in full before writing M16 code; `docs/HANDOFF.md` has the build order. The report
-  has its own custody stream (a sealed job chain is never appended to); facts come from the verified
-  job chain first, database disagreements are reported as divergences, never resolved silently.
+## Collection report and preview (M16, ADR 0018; steps 1 and 4 built: model, loader, stream)
+- Read ADR 0018 in full (and its §19/§20 implementation notes) before changing M16 code;
+  `docs/HANDOFF.md` has what is next. The report has its own custody stream (a sealed job chain is
+  never appended to); facts come from the verified job chain first, database disagreements are
+  reported as divergences, never resolved silently.
+- The pure model is `edisc_renderers.report.model` (no DB/S3/clock: the purity test covers it; the
+  offline verifier will import it). The loader `edisc_worker.report_loader` streams every file;
+  everything a report states that can change after the request goes into the write-once snapshot
+  (renders, retention gaps, lock settings, the audit head, the job's own evidence statistics).
+- Lifecycle in `edisc_worker.reports` (status fences in the same transaction as each event, like
+  renders); files via `EvidenceWriter.write_report_file`; `report_generated` root via
+  `edisc_custody.report_files`. Episodes (render and report) live in `production_episodes`.
+  `ensure-job-reports` creates a report for every sealed job once and flags missing ones.
 - PDF bytes are promised only inside the pinned linux/amd64 report image (`spikes/m16-pdf/` is the
   prototype: vendored fonts by SHA-256, fontconfig isolated, Debian snapshot, TrueType CJK fonts).
   PDF goldens are authoritative only in CI on amd64; locally they run in the image or skip with a

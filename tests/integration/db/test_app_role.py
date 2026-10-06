@@ -144,9 +144,12 @@ async def test_security_definer_functions_are_hardened(connect: Connect) -> None
     assert {r["fn"].split("(")[0] for r in rows} == {
         "create_tenant",
         "due_anchor_streams",
+        "jobs_missing_report",
         "pending_token_refreshes",
+        "sealed_jobs_without_report",
         "stale_pending_evidence",
         "stale_requested_renders",
+        "stale_requested_reports",
         "tenant_id_for_subdomain",
     }
     for r in rows:

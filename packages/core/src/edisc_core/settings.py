@@ -253,6 +253,22 @@ class Settings(BaseSettings):
     render_start_to_close_seconds: float = Field(
         default=43_200, gt=0, description="the longest one render_files activity may run"
     )
+    report_missing_seconds: float = Field(
+        default=3_600,
+        ge=0,
+        description="a sealed job without a completed collection report after this long opens a"
+        " report_missing episode, with one alert (ADR 0018 §9)",
+    )
+    report_activity_concurrency: int = Field(
+        default=2,
+        ge=1,
+        description="report activities per report worker process (ADR 0018 §6)",
+    )
+    test_report_barrier: str | None = Field(
+        default=None,
+        description="TEST ONLY (EDISC_ENV test/ci): '<point>:<directory>', like"
+        " EDISC_TEST_RENDER_BARRIER, for a report worker",
+    )
     unclassified_max_attempts: int = Field(
         default=3, ge=1, description="attempts for errors no class recognises, then the unit fails"
     )
@@ -321,6 +337,10 @@ class Settings(BaseSettings):
         if self.test_render_barrier is not None and not self.env.is_ephemeral_test:
             raise ValueError(
                 "EDISC_TEST_RENDER_BARRIER is only permitted when EDISC_ENV is test or ci"
+            )
+        if self.test_report_barrier is not None and not self.env.is_ephemeral_test:
+            raise ValueError(
+                "EDISC_TEST_REPORT_BARRIER is only permitted when EDISC_ENV is test or ci"
             )
         if self.evidence_retention_override_seconds is not None and not self.env.is_ephemeral_test:
             raise ValueError(
