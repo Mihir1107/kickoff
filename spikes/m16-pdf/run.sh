@@ -16,9 +16,10 @@ D=(docker run --rm --platform linux/amd64 -v "$OUT":/work)
 } | tee "$OUT/host.txt"
 
 "${D[@]}" $IMG html letter /work/report.html | tee "$OUT/html.json"
-"${D[@]}" $IMG runs 20 /work/runs plain,pdfa2u,compressed | tee "$OUT/runs.json"
+"${D[@]}" $IMG runs 20 /work/runs plain,pdfa2u,compressed,pdfa2u-z | tee "$OUT/runs.json"
 "${D[@]}" $IMG inspect /work/runs/plain-00.pdf > "$OUT/inspect-plain.json"
 "${D[@]}" $IMG inspect /work/runs/pdfa2u-00.pdf > "$OUT/inspect-pdfa2u.json"
+"${D[@]}" $IMG inspect /work/runs/pdfa2u-z-00.pdf > "$OUT/inspect-pdfa2u-z.json"
 "${D[@]}" $IMG html a4 /work/report-a4.html > "$OUT/html-a4.json"
 "${D[@]}" $IMG render plain /work/a4.pdf /work/report-a4.html > "$OUT/a4.json"
 "${D[@]}" $IMG toolchain > "$OUT/toolchain.json"
@@ -31,8 +32,8 @@ fi
 # PDF/A-2u conformance (recorded; the byte-identity criteria above do not depend on it)
 VERAPDF=verapdf/cli:v1.30.2@sha256:d5ee329657cf9bc4b2400392dd54c7d0a0ce9980ff6fa2da5590eebeec007cdb
 docker run --rm --platform linux/amd64 -v "$OUT/runs":/data $VERAPDF --flavour 2u --format text \
-  /data/pdfa2u-00.pdf > "$OUT/verapdf.txt" 2>/dev/null || true
+  /data/pdfa2u-00.pdf /data/pdfa2u-z-00.pdf > "$OUT/verapdf.txt" 2>/dev/null || true
 docker run --rm --platform linux/amd64 -v "$OUT/runs":/data $VERAPDF --flavour 2u --format json \
-  /data/pdfa2u-00.pdf > "$OUT/verapdf.json" 2>/dev/null || true
+  /data/pdfa2u-00.pdf /data/pdfa2u-z-00.pdf > "$OUT/verapdf.json" 2>/dev/null || true
 cat "$OUT/verapdf.txt"
 echo "S1 checks passed on $(hostname)"

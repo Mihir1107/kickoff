@@ -1,4 +1,4 @@
-# Handoff (2026-10-06, end of session: M16 designed (ADR 0018 accepted, PDF spike S1 passed); next: build M16)
+# Handoff (2026-10-06, end of session: M16 designed (ADR 0018 accepted and amended, PDF spike S1 passed); next: build M16)
 
 This file alone is enough to build M16. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (read it in full before any
@@ -9,8 +9,9 @@ and `docs/BACKLOG.md`. `docs/plans/m16.md` is the superseded proposal (history o
 **Branch and CI:** `main`, green on GitHub CI (lint, typecheck, unit, integration including the 50k SIGKILL
 acceptance run). Repo: `github.com/Mihir1107/kickoff`. One commit per milestone or review round;
 `git log` is the history. Migrations at head: **0029**. Renderer **1.3.1**, dummy connector **0.4.0**.
-Nothing of M16 is built: only the ADR, the spike (`spikes/m16-pdf/`) and its manual CI workflow
-(`.github/workflows/spike-m16-pdf.yml`, runs on pushes to `spike/m16-pdf` and by hand).
+Nothing of M16 is built: only the ADR, the spike (`spikes/m16-pdf/`, the evidence for byte identity)
+and its manual-only CI workflow (`.github/workflows/spike-m16-pdf.yml`, `gh workflow run
+spike-m16-pdf`).
 
 **Phase 1 (M0-M13) is complete:** WORM evidence (S3 Object Lock COMPLIANCE on MinIO, rolling retention
 plus extension floor); hash-chained custody with WORM anchors, seals and the offline verifier
@@ -29,7 +30,8 @@ ADR 0018 §16 is the order. Each step: implement → tests → mutation entries 
 What M16 is, in one paragraph: every sealed job gets a **collection report** (its own custody stream:
 snapshot → `report_started` → files → `report_generated` → seal) made of `report.json` + full JSONL
 lists (`units`, `observations`, `renders`, `conversations`) + `report.html` + `report.pdf` (PDF/A-2u,
-rendered by WeasyPrint from the STORED HTML, byte-reproducible inside a pinned linux/amd64 image), and
+with compressed streams, rendered by WeasyPrint from the STORED HTML, byte-reproducible inside a
+pinned linux/amd64 image), and
 reviewers get an on-demand **HTML preview** of conversation-days (not stored, audited and anchored
 before the first byte, CSP `default-src 'none'`). Facts come from the verified job chain first; the
 database is a cross-check whose disagreements are reported as divergences, never silently resolved.
@@ -39,7 +41,12 @@ ADR 0017 generalised to runtime identities per output kind with a report queue
 `reports.r<renderer>.p<toolchain12>.u<unicode>`; amd64 only, PDF goldens authoritative only in CI on
 amd64 (locally: emulation in the image, or a skip with a visible reason, never silent); paper size in
 the report identity (default pending mentor, `letter` until then); PDF dates = job `sealed_at`, the
-generation time lives only in the custody stream; vendored sRGB2014 ICC; uncompressed streams;
+generation time lives only in the custody stream; vendored sRGB2014 ICC with its licence recorded
+(verification against color.org is a BACKLOG item required before production); COMPRESSED streams
+(zlib pinned by the Debian snapshot and in the toolchain id; amendment 1); no Japanese font (Han
+unification is a documented limitation: Japanese renders with SC glyph forms); report workers: PDF
+concurrency 1 per worker, 3 GiB container limit, CPU 1, OOM kill in the crash matrix; image admission
+requires the PDF goldens to match byte for byte inside the image; installers not in the toolchain id;
 capped HTML/PDF lists (1,000, worst status first then a stable key, exact totals, remainder named by
 file + SHA-256); automatic report per sealed job + `report_missing` episode after
 `EDISC_REPORT_MISSING_SECONDS` with one alert; manual regeneration records who and why and never
@@ -48,7 +55,7 @@ replaces earlier reports; blind spots, plan tier, granted scopes and `unit_day_z
 still produce a report that leads with them; `report.read` for every role including collector,
 `report.create` for tenant_admin + matter_manager, preview under `evidence.read`; UTC only, each unit
 showing its day label and zone as recorded (no tzdata); `edisc-verify --job-package` recomputes the
-chain-derived report content; Noto font set subset on embed with OFL licences in the repo; one forced
+chain-derived report content; Noto font set (no JP) subset on embed with OFL licences in the repo; one forced
 anchor per preview page view (fallback if too costly: group commit, never skipping the anchor).
 
 Steps (details in ADR 0018 §16 and the sections it points to):
@@ -61,15 +68,20 @@ Steps (details in ADR 0018 §16 and the sections it points to):
    controls REPLACED by `[U+XXXX]`, other Cf/Cc/Zl/Zp kept + marker), banners on every page (§4),
    severity-ordered caps; goldens (`EDISC_RECORD_REPORT=1`).
 3. **PDF**: turn `spikes/m16-pdf/` into the report worker image (fonts via `fonts.lock` +
-   `fetch_fonts.py`, `fonts.conf`, Debian snapshot apt, ICC vendored with `SOURCE.md`, OFL licences
-   under `edisc_renderers/report/fonts/LICENSES/`); the toolchain id in `edisc_worker.versions`
-   (prototype: `spike.py toolchain`); the glyph-coverage pass (prototype: `spike.py visible()`); a CI
-   job on amd64 inside the image with veraPDF (`verapdf/cli` 1.30.2, digest in `run.sh`), the leak
-   test (prototype: `spike.py leak`) and PDF goldens.
+   `fetch_fonts.py`, `fonts.conf`, Debian snapshot apt, ICC vendored with `SOURCE.md` and the licence
+   text from `spikes/m16-pdf/ICC-LICENSE.txt`, OFL licences under
+   `edisc_renderers/report/fonts/LICENSES/`); the toolchain id in `edisc_worker.versions` (prototype:
+   `spike.py toolchain`, installers excluded); compressed PDF/A-2u (spike variant `pdfa2u-z`); the
+   glyph-coverage pass (prototype: `spike.py visible()`); worker limits (ADR 0018 §6: PDF concurrency
+   1, 3 GiB, CPU 1, `EDISC_REPORT_MAX_HTML_BYTES`); a CI job on amd64 inside the image with veraPDF
+   (`verapdf/cli` 1.30.2, digest in `run.sh`), the leak test (prototype: `spike.py leak`), PDF goldens
+   and the admission check (PDF goldens byte for byte inside the image).
 4. **Migration 0030** (`reports`, `report_files`, `evidence_objects.report_id`, `production_episodes`
    generalising `render_episodes`, index `work_units (job_id, conversation_id, day, unit_key)`,
    permissions), `ReportWorkflow` + report custody stream + `ensure-job-reports` schedule +
-   `report_missing` episodes; crash matrix with real SIGKILLs (`EDISC_TEST_REPORT_BARRIER`).
+   `report_missing` episodes; crash matrix with real SIGKILLs (`EDISC_TEST_REPORT_BARRIER`) and an
+   OOM kill during PDF rendering (a worker container with a low memory limit; S1 showed 512 MiB is
+   killed with exit 137 and leaves no file, 3 GiB completes).
 5. **API** (`/v1/jobs/{id}/reports` POST/GET, `/v1/reports/{id}`, files content, package) with
    `first_byte.py` tests; `edisc-report-package/1` and `edisc-verify` recomputation.
 6. **Preview**: `RenderLoader.day_slice(...)` (day-bounded; `_index` loads a whole conversation
@@ -96,18 +108,21 @@ Where the data is (verified 2026-10-05/06):
   `clean_basis` / `caveat` in `apps/api/src/edisc_api/routes/jobs.py`.
 - Permissions: `apps/api/src/edisc_api/authz.py` (`Permission`, `ROLE_PERMISSIONS`).
 
-## Spike S1 (done 2026-10-06; results in ADR 0018 §5.10)
+## Spike S1 (done 2026-10-06; results in ADR 0018 §5.10, amendments and re-check in §18)
 - `spikes/m16-pdf/`: `Dockerfile` (python 3.12.13-slim-bookworm by digest, Debian snapshot
   `20261001T000000Z`, WeasyPrint 70.0, pypdf 6.19.0), `fonts.lock` (URL + SHA-256 per font),
-  `fetch_fonts.py`, `fonts.conf`, `spike.py` (`html`, `render`, `runs`, `toolchain`, `inspect`,
+  `fetch_fonts.py`, `fonts.conf`, `ICC-LICENSE.txt`, `spike.py` (`html`, `render` with variants
+  `plain`, `pdfa2u`, `compressed`, `pdfa2u-z` (production form), `runs`, `toolchain`, `inspect`,
   `leak`), `run.sh OUTDIR [HOST_FONT_DIR]` (all checks + veraPDF on one host).
 - Local run: `docker buildx build --platform linux/amd64 --load -t edisc-pdf-spike:s1 spikes/m16-pdf`
   then `bash spikes/m16-pdf/run.sh <outdir> <a copy of host fonts>` (Docker Desktop cannot mount
   `/System/Library/Fonts`; copy it into a shared dir first). About 30-60 s per 234-page render under
   Rosetta, about 1.2 GB RSS per render.
-- Cross-host: push to the `spike/m16-pdf` branch (it exists on origin with the S1 runs 37366348776 and
-  37369595037; artifacts expire after 7 days, the results are copied into ADR 0018 §5.10); job `host-a` builds, runs and saves the image as an
-  artifact; `host-b` (another runner) LOADS that image and runs again; compare `pdf-sha256.txt`.
+- Cross-host: `gh workflow run spike-m16-pdf --ref main` (manual only). Job `host-a` builds, runs and
+  saves the image as an artifact; `host-b` (another runner) LOADS that image and runs again; compare
+  the two `pdf-sha256.txt`. The S1 runs were 37366348776 and 37369595037 (artifacts expire after 7
+  days; the results are in ADR 0018 §5.10). The amended image (no JP, no pip in the id) was re-checked
+  locally only (§18); re-run the workflow once if you want the four-host check on it.
 
 ## Open decisions / waiting on the user
 1. **Mentor (ADR 0018 §17, not blocking):** (a) default paper size (Letter likely for the US market;
@@ -252,10 +267,10 @@ Where the data is (verified 2026-10-05/06):
 - **Bidi controls must be replaced, not annotated:** a marker placed after U+202E is itself reversed.
 - WeasyPrint names subset fonts with a 6-letter tag from an MD5 of the font description (stable);
   embedded font names have hyphens (`Noto-Sans-Linear-B`), so search font names, not raw bytes.
-- With fallback order SC before JP, Japanese kana/kanji render with the SC font (JP unused in S1):
-  Han unification, names have no language tag. Acceptable for a report; revisit only if asked.
-- A 6,000-row, 234-page report takes about 30-40 s and about 1.2 GB RSS per render (also native on
-  GitHub runners): run report PDFs with low concurrency per worker.
+- Japanese kana/kanji render with the SC font (the JP font was unused, so it was removed): Han
+  unification, names carry no language tag. A documented limitation (ADR 0018 §5.4).
+- A 6,000-row, 234-page report takes about 30 s alone (47-84 s with four concurrent) and about
+  1.2 GB RSS per render: hence PDF concurrency 1 and a 3 GiB container per report worker.
 
 **Postgres:**
 - **Health check:** it must use TCP (`pg_isready -h 127.0.0.1`); the socket check passes during first-boot

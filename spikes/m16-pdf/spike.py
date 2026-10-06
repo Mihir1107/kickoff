@@ -33,14 +33,14 @@ SEALED_AT = "2026-10-05T12:34:56Z"  # recorded job seal time: the PDF's only dat
 CAP = 1000
 FAMILIES = (
     '"Noto Sans", "Noto Sans Arabic", "Noto Sans Hebrew", "Noto Sans Devanagari", "Noto Sans Thai",'
-    ' "Noto Sans SC", "Noto Sans JP", "Noto Sans KR", "Noto Emoji"'
+    ' "Noto Sans SC", "Noto Sans KR", "Noto Emoji"'
 )
 PAPER = {"letter": "Letter", "a4": "A4"}
 
 # Every hard case the acceptance criteria name, as user strings (names, error texts).
 HARD = [
     "张伟（销售部）",  # CJK SC
-    "山田太郎・営業",  # JP
+    "山田太郎・営業",  # Japanese: rendered with the SC font (Han unification, no language tag)
     "김민준 팀장",  # KR
     "محمد عبد الله",  # Arabic (RTL, shaping)
     "שרה כהן",  # Hebrew (RTL)
@@ -211,6 +211,9 @@ def render(html: bytes, variant: str) -> bytes:
     opts: dict[str, object] = {"pdf_identifier": ident, "uncompressed_pdf": True}
     if variant == "pdfa2u":
         opts["pdf_variant"] = "pdf/a-2u"
+    elif variant == "pdfa2u-z":  # the production form: PDF/A-2u with compressed streams
+        opts["pdf_variant"] = "pdf/a-2u"
+        opts["uncompressed_pdf"] = False
     elif variant == "compressed":
         opts["uncompressed_pdf"] = False
     elif variant != "plain":
@@ -260,7 +263,9 @@ ENVS = [
 
 def cmd_runs(args: list[str]) -> None:
     n, outdir = int(args[0]), Path(args[1])
-    variants = args[2].split(",") if len(args) > 2 else ["plain", "pdfa2u", "compressed"]
+    variants = (
+        args[2].split(",") if len(args) > 2 else ["plain", "pdfa2u", "compressed", "pdfa2u-z"]
+    )
     outdir.mkdir(parents=True, exist_ok=True)
     results: dict[str, list[dict[str, object]]] = {v: [] for v in variants}
     jobs = []
@@ -301,6 +306,9 @@ def cmd_runs(args: list[str]) -> None:
     if not all(s["identical"] for s in summary.values()):
         raise SystemExit("NOT IDENTICAL")
 
+
+# installers take no part in rendering: never part of the toolchain id
+INSTALLERS = frozenset({"pip", "setuptools", "wheel"})
 
 LAYOUT_PACKAGES = [
     "libpango-1.0-0",
@@ -381,7 +389,9 @@ def cmd_toolchain(_: list[str]) -> None:
         "python": platform.python_version(),
         "unicode": unicodedata.unidata_version,
         "python_packages": {
-            d.metadata["Name"].lower(): d.version for d in metadata.distributions()
+            d.metadata["Name"].lower(): d.version
+            for d in metadata.distributions()
+            if d.metadata["Name"].lower() not in INSTALLERS
         },
         "runtime_libraries": runtime_versions(),
         "debian_packages": dpkg_versions(),

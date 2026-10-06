@@ -2,7 +2,8 @@
 
 Status: **Accepted** (2026-10-06), not implemented. Built from `docs/plans/m16.md` (the proposal,
 kept as history) with the review decisions D1-D14 of 2026-10-06 folded in, and the PDF spike S1
-(§5.9) passed. Two points wait for the mentor (§17); neither blocks the build.
+(§5.10) passed. **Amended 2026-10-06** (§18): compressed streams, no Japanese font, report worker
+limits and an OOM crash point, admission by PDF goldens, the ICC licence, the spike as evidence. Two points wait for the mentor (§17); neither blocks the build.
 Builds on ADR 0005 (units, statuses), 0014 §4 (archive caveat), 0015 (render custody stream, loader,
 determinism, packages, first-byte rule), 0017 (worker images per runtime identity, generalised here).
 
@@ -160,12 +161,14 @@ gains `unit_day_zone: "UTC"` (§7.2). For jobs started before that, the zone col
    `toolchain` command is the prototype): SHA-256 over the canonical JSON of
    - platform, Python version, Unicode version;
    - every installed Python distribution and version (weasyprint, pydyf, fonttools, tinycss2,
-     cssselect2, Pillow, cffi, ...);
+     cssselect2, Pillow, cffi, ...), except installers (`pip`, `setuptools`, `wheel`), which take no
+     part in rendering;
    - the runtime versions the native libraries report: Pango, HarfBuzz, FreeType, fontconfig,
      FriBidi;
    - the Debian package versions (with Debian revision) of everything on the layout path: Pango,
      PangoFT2, HarfBuzz and HarfBuzz-subset, FreeType, fontconfig and its config, FriBidi, GLib,
-     libthai, libdatrie, graphite2, libpng, brotli, zlib, expat, libffi. (WeasyPrint has no cairo
+     libthai, libdatrie, graphite2, libpng, brotli, **zlib** (it makes the compressed streams, §5.6),
+     expat, libffi. (WeasyPrint has no cairo
      since v53; its PDF writer is pydyf, covered as a Python package; font subsetting is
      HarfBuzz-subset, recorded as `harfbuzz_subset_used`.)
    - SHA-256 of every vendored font file, of `fonts.conf`, of the print stylesheet, of the sRGB ICC
@@ -179,15 +182,21 @@ gains `unit_day_zone: "UTC"` (§7.2). For jobs started before that, the zone col
    vendored fonts), one fixed `<cachedir>`, no `<include>` (no conf.d, no system dirs, no `~/.fonts`,
    no XDG dirs), cache built at image build, both directories read-only. Vendored: Noto Sans
    (Regular, Bold), Noto Sans Mono, Arabic, Hebrew, Devanagari, Thai (static hinted TTF from
-   `notofonts`), Noto Sans SC, JP, KR and Noto Emoji (monochrome) as **TrueType variable fonts from
+   `notofonts`), Noto Sans SC, KR and Noto Emoji (monochrome) as **TrueType variable fonts from
    `google/fonts` instanced to a static Regular (wght 400) at image build** with timestamps not
    recalculated. All pinned by commit URL and SHA-256 (`fonts.lock`). The CID-keyed CFF CJK files
    (`noto-cjk` SubsetOTF) are NOT used: subset by HarfBuzz they failed veraPDF (glyphs missing from
    the embedded program, `.notdef` references, width mismatches: rules 6.2.11.4.1, 6.2.11.5,
    6.2.11.8) although poppler drew them, i.e. a stricter viewer may not. Fonts are subset on embed (WeasyPrint's
-   HarfBuzz subsetter; never `full_fonts`). The OFL licences (and the Noto CJK licence) are
-   committed under `packages/renderers/src/edisc_renderers/report/fonts/LICENSES/` with a
-   `SOURCE.md`.
+   HarfBuzz subsetter; never `full_fonts`). The OFL licences are committed under
+   `packages/renderers/src/edisc_renderers/report/fonts/LICENSES/` with a `SOURCE.md`.
+   **No Japanese font (amendment 2).** S1 showed Noto Sans JP was never used: Noto Sans SC, earlier
+   in the fallback order, covers kana and kanji, so the JP font is not in the image or the toolchain
+   id. **Known limitation (Han unification):** Japanese text renders with Chinese (SC) glyph forms,
+   because the source text carries no language tag from which to pick a regional form (Slack
+   messages and names have none). The characters are correct and extract correctly; only some glyph
+   shapes differ from Japanese conventions. Choosing a font per string by guessing its language is
+   not done (a guess could be wrong and would make bytes depend on a heuristic).
 5. **No missing glyphs.** Before HTML for the PDF is built, a pure pass replaces every character the
    vendored fonts' cmaps do not cover with `[U+XXXX]` (the coverage set is computed from the fonts at
    build and is part of the toolchain id through their hashes); `Cf`/control characters keep a marker
@@ -196,18 +205,34 @@ gains `unit_day_zone: "UTC"` (§7.2). For jobs started before that, the zone col
    generation time lives only in the report's custody stream (`report_started.created_at`, and the
    snapshot's S3 observation time), never in the PDF. `/ID` first half = the first 16 bytes of
    SHA-256(`report.html`), second half pydyf's digest of the content (deterministic, S1). `/Producer`
-   `WeasyPrint <version>` (pinned). Uncompressed streams (`uncompressed_pdf=True`): deflate bytes
-   depend on the zlib build (the ADR 0015 §6 reason for STORED zips).
+   `WeasyPrint <version>` (pinned). **Compressed streams** (WeasyPrint's default deflate; amendment 1,
+   replacing "uncompressed"). Why this is safe for byte identity here, unlike RSMF zips (ADR 0015 §6
+   chose STORED because deflate bytes depend on the zlib build of whatever machine renders): zlib is
+   pinned by the Debian snapshot and is part of the toolchain id (§5.3); S1 produced identical
+   compressed bytes on all four hosts (§5.10); and PDF byte identity is only ever promised within a
+   pinned, admitted image (ADR 0017, §6), whose admission requires the PDF goldens to match (§6). A
+   zlib change, e.g. in a security rebuild, changes the toolchain id or fails admission; it can never
+   silently change a report's bytes. Size: 1.7 MB instead of 18.7 MB at the cap (§5.10).
    **PDF/A-2u** with the sRGB IEC61966-2.1 (sRGB2014) ICC profile as output intent. The profile is
    vendored in the repo (`report/icc/sRGB2014.icc`, SHA-256
    `384b832de3412066743b52a75ee906b6fb9fb8d9e09e936fc2c43223815c6e0a`, 3,024 bytes, ICC v2, embedded
    profile id `3d0eb2deae9397be9b6726ce8c0a43ce` equal to the MD5 recomputed over the profile, i.e.
-   self-consistent; this is the copy WeasyPrint 70.0 bundles). When vendoring (step 3), compare it
-   byte for byte with the file from color.org's sRGB profiles page, downloaded by hand in a browser
-   (its bot protection served HTML to scripted downloads in S1), and record both in `SOURCE.md`.
+   self-consistent; this is the copy WeasyPrint 70.0 bundles). It has NOT yet been compared with the
+   official color.org file (color.org served HTML to scripted downloads in S1): that comparison is a
+   BACKLOG item required before production (below); `SOURCE.md` records the result when done.
    WeasyPrint embeds its own bundled copy, so the worker refuses to start unless that copy is
    byte-equal to the vendored one. veraPDF (`verapdf/cli` 1.30.2, pinned by digest) validates the
    output in CI (§15).
+   **ICC profile licence (amendment 5).** The profile's copyright tag reads "Copyright International
+   Color Consortium, 2015". color.org states that sRGB2014.icc "is subject to the general licensing
+   terms for ICC profiles", which for profiles whose copyright owner is ICC are: "This profile is
+   made available by the International Color Consortium, and may be copied, distributed, embedded,
+   made, used, and sold without restriction. Altered versions of this profile shall have the
+   original identification and copyright information removed and shall not be misrepresented as the
+   original profile." (color.org, "Profiles" page, Licensing, read 2026-10-06). Embedding it unaltered
+   in our PDFs is permitted; the text goes in `report/icc/LICENSE` with the profile. **Required before
+   production (BACKLOG):** verify the vendored profile byte for byte against the official color.org
+   file.
 7. **Paper size is part of the report's identity (D4)**: (job, snapshot digest, report renderer,
    toolchain id, Unicode, paper). Allowed `letter`, `a4`. **Default pending mentor (§17.1)**; until
    answered the build uses `letter` and the default is one constant, so a change of default creates
@@ -225,6 +250,12 @@ per-status table and a table of hard strings: CJK (SC, JP, KR), Arabic, Hebrew, 
 (skin tone, flag, a ZWJ family), combining marks (stacked accents, Zalgo), Devanagari conjuncts,
 Thai, zero-width characters (U+200B, U+200C, U+FEFF), a bidi override (U+202E), and U+10000 /
 U+13000 (covered by no vendored font). Letter, 234 pages; one A4 render as well.
+
+**Evidence:** the harness is on main in `spikes/m16-pdf/` (`Dockerfile`, `fonts.lock`,
+`fetch_fonts.py`, `fonts.conf`, `spike.py`, `run.sh`) with the manual-only workflow
+`.github/workflows/spike-m16-pdf.yml`; anyone can re-run it (README in `run.sh`'s header, HANDOFF).
+The numbers below are from the S1 image (with Noto Sans JP and `pip` in the id); §18 records the
+re-check after the amendments.
 
 **Byte identity: PASS.** 20 runs per variant, each a separate process, with varied `TZ`, `LANG` /
 `LC_ALL`, `PYTHONHASHSEED` and `HOME`, four at a time:
@@ -261,17 +292,15 @@ override; bidi controls are now replaced (§3.2), checked on the rendered page.
 seal time; `/ID` first half = first 16 bytes of SHA-256(HTML); no `/JavaScript`, `/OpenAction`,
 `/AA`, `/Launch`, `/URI`, `/EmbeddedFile`; banner text on the first and last page, "page 234 of 234";
 the `[U+10000]` marker present; 10 embedded fonts, all subset, all vendored (`Noto-Sans-JP` unused:
-the SC font, earlier in the fallback order, covers kana and kanji).
+the SC font, earlier in the fallback order, covers kana and kanji; hence amendment 2).
 
 **Sizes at the cap (Letter, 234 pages):** `report.html` 1,507,124 bytes; PDF uncompressed
 18,707,132 bytes (plain) and 18,711,434 (PDF/A-2u); the same with deflate 1,735,554 (10.8x
 smaller); A4 18,694,611. Render time about 30 s for one render on a runner, 47 s (EPYC 9V45/9V74)
 to 84 s (EPYC 7763) with four concurrent, 50-60 s under Rosetta; peak RSS about 1.16-1.18 GB per
 render.
-- Consequence: uncompressed (D4 recommendation) costs about 17 MB per capped report. Deflate output
-  was byte-identical everywhere in S1 too, because zlib is pinned by the Debian snapshot; the
-  remaining risk is a zlib change in a security rebuild, which the admission goldens would catch
-  (the image would not be admitted). Kept: uncompressed, as decided; revisit only with the mentor.
+- Deflate output was byte-identical on all four hosts, as the uncompressed variants were. This is
+  the evidence for amendment 1 (compressed streams, §5.6): 1,735,554 bytes instead of 18.7 MB.
 
 **Toolchain id** (S1 image): `c6c9d1d65532920f381975235716f9f6d07a5827202158150850bea9c93f650f`,
 equal on every host, over:
@@ -285,8 +314,8 @@ equal on every host, over:
   libbrotli1 1.0.9-2+b6, zlib1g 1:1.2.13.dfsg-1, libexpat1 2.5.0-1+deb12u3, libffi8 3.4.4-1;
 - Python distributions: weasyprint 70.0, pydyf 0.12.1, fonttools 4.66.1, tinycss2 1.5.1, cssselect2
   0.10.1, tinyhtml5 2.1.0, pillow 12.3.0, cffi 2.1.1, pycparser 3.0, pyphen 0.18.1, brotli 1.2.0,
-  zopfli 0.4.3, webencodings 0.6.1, pypdf 6.19.0 (test only), pip 25.0.1 (to drop from the id in the
-  real build);
+  zopfli 0.4.3, webencodings 0.6.1, pypdf 6.19.0 (test only), pip 25.0.1 (dropped from the id by
+  amendment 6);
 - `harfbuzz_subset_used: true`; the 11 font files' SHA-256 (in `toolchain.json`); `fonts.conf`
   `3cdb56b7…f98`; sRGB2014 ICC `384b832d…c0a`.
 - Informative: 77 mapped shared libraries with their SHA-256 (not part of the id).
@@ -299,8 +328,24 @@ equal on every host, over:
 - Report queue: `reports.r<renderer>.p<toolchain12>.u<unicode>`; workers poll the queues of their
   own runtime; the routing check and `unroutable` episodes apply as for renders (render episodes are
   generalised to `production_episodes` keyed by (kind, id), migration in step 6).
-- Admission (ADR 0017 §1): inside the image, the report oracle cases pass and the report golden
-  generation matches byte for byte; the image digest goes in `report_started`.
+- **Admission (ADR 0017 §1; amendment 4):** an image is admitted to serve a report identity only if,
+  INSIDE that image, (a) the report oracle cases pass, (b) the JSON and HTML goldens of that
+  identity match byte for byte, and (c) **the PDF goldens of that identity (plain report, PDF/A-2u,
+  Letter and A4, the S1 hard-string corpus at the cap) match byte for byte**, plus veraPDF passes.
+  A PDF golden mismatch refuses admission; no tolerance, no re-recording to make an image pass. The
+  image digest goes in `report_started`.
+- **Report worker limits (amendment 3)**, sized from S1 (one 234-page capped render: about 1.2 GB
+  peak RSS, about 30 s; four concurrent on one runner: 47-84 s each):
+  - activity concurrency for PDF rendering: `EDISC_REPORT_PDF_CONCURRENCY` = **1** per worker process
+    (`max_concurrent_activities` on the report queue's worker); JSON/HTML/JSONL activities of a report
+    run on the same queue with `EDISC_REPORT_ACTIVITY_CONCURRENCY` = 2, the PDF one holds a
+    process-wide semaphore of 1;
+  - container memory limit **3 GiB** per report worker container (1.2 GB render + streaming JSONL
+    writers + Python/Temporal baseline, with headroom; a hard limit, no swap), CPU 1;
+  - scale out by adding report workers, never by raising concurrency inside one container;
+  - a PDF render whose HTML exceeds the D5 cap cannot occur (the cap bounds pages); the worker still
+    checks the HTML size against `EDISC_REPORT_MAX_HTML_BYTES` (4 MiB, about 2.6x the S1 cap size)
+    before rendering and fails the report as an integrity error above it.
 - Image retention counts report productions too (ADR 0017 §2). Report reproductions
   (ADR 0017 §4 for reports) are backlog.
 
@@ -424,7 +469,11 @@ report anchors carry the report id.
 Status fences moved in the same transaction as the event; each point at the 1st and 2nd occurrence
 where it repeats: the snapshot tx; after verification and inside / after `report_started`; mid-upload
 of each `.jsonl`, after the object before its row, after the row; after `report.json`, after
-`report.html`, mid-PDF, after the PDF object before its row; inside / after `report_generated`; the
+`report.html`, mid-PDF, **an OOM kill during PDF rendering (amendment 3: a real report worker
+container started with a memory limit below one render's peak, e.g. 512 MiB, is killed by the
+kernel (exit 137) while WeasyPrint lays out; a worker with the normal limit then resumes the report
+to the oracle's bytes, with no partial PDF object or row left behind)**, after the PDF object before
+its row; inside / after `report_generated`; the
 seal sub-steps with REAL SIGKILLs (`EDISC_TEST_REPORT_BARRIER`, test/ci only); the failure and
 refused paths; `ensure-job-reports` racing a manual request; two identical requests racing; the
 anchor sweeper racing a recovering report. Expected: the oracle's bytes, every event and audit once,
@@ -456,6 +505,7 @@ recorded digests only, and the output says so.
   glyph used; the hard strings extract as the glyph or the marker; veraPDF PDF/A-2u passes; the
   font-isolation leak test of S1 (probe font installed in every default location and host fonts
   mounted → identical bytes, no probe font; a control config that scans those dirs does embed it).
+  The spike harness `spikes/m16-pdf/` is the reference for these checks (§5.10).
 - **Sanitiser** (both renderers; hypothesis over every user-string field): html5lib parse shows only
   allowed elements and attributes, no handlers, no URL except
   `/v1/evidence/{uuid}/content?purpose=preview`, one `<style>` whose hash is the CSP's, every
@@ -478,8 +528,9 @@ recorded digests only, and the output says so.
   (a `work_units` row → divergence shown, alert, not clean; a stored report version → read aborts
   with alert; a dropped `units.jsonl` line → verifier fails).
 - **Mutation checks:** one catalog entry per protection (clean function, banners, caveat, zero rows,
-  UNKNOWN, severity order, escaping, `<bdi>`, reveal, CSP, glyph coverage, `/ID`, uncompressed
-  streams, font isolation, ICC check, toolchain refusal, digest cross-check, divergence, audit and
+  UNKNOWN, severity order, escaping, `<bdi>`, reveal, CSP, glyph coverage, `/ID`, zlib in the
+  toolchain id, font isolation, ICC check, toolchain refusal, PDF-golden admission, PDF concurrency
+  limit, digest cross-check, divergence, audit and
   anchor before the first byte (three routes), stream re-hash, PDF-from-stored-HTML, status fences,
   verifier recomputation and strictness, the missing-report episode).
 
@@ -487,11 +538,12 @@ recorded digests only, and the output says so.
 1. Report model, pure (`edisc_renderers.report.model`): records in, `report.json` + JSONL out; the
    `job_started` additions (§7.2); worker loader; oracle tests.
 2. HTML builder, sanitiser, banners, severity-ordered caps; goldens.
-3. PDF: the report image (from `spikes/m16-pdf`: fonts, `fonts.conf`, ICC, snapshot apt), the
-   toolchain id in `edisc_worker.versions`, CI job on amd64 in the image, veraPDF, goldens.
+3. PDF: the report image (from `spikes/m16-pdf`: fonts, `fonts.conf`, ICC + its licence, snapshot
+   apt), the toolchain id in `edisc_worker.versions`, compressed streams, the worker limits (§6), CI
+   job on amd64 in the image, veraPDF, PDF goldens, the admission check (§6).
 4. Migration 0030 (`reports`, `report_files`, `evidence_objects.report_id`, `production_episodes`,
    the `work_units` index, permissions), `ReportWorkflow`, custody stream, `ensure-job-reports`,
-   `report_missing` episodes, crash matrix.
+   `report_missing` episodes, crash matrix (with the OOM kill, §13).
 5. API routes with first-byte tests, report package, `edisc-verify` (with recomputation).
 6. Preview: day-bounded loader entry, pure renderer, route, CSP and no-fetch test, audit-burst
    measurement (D14).
@@ -504,11 +556,39 @@ recorded digests only, and the output says so.
 2. **Name visibility:** may reviewers and client admins see conversation and custodian names in the
    report and the preview? If not: a redaction mode in the report identity.
 
+### 18. Amendments (2026-10-06, after S1)
+1. **Compressed streams** (§5.6), replacing "uncompressed": zlib is pinned by the Debian snapshot
+   and is in the toolchain id; S1 produced identical compressed bytes on all four hosts; PDF byte
+   identity is only promised within a pinned, admitted image (ADR 0017, §6).
+2. **No Japanese font** in the image or the toolchain id (it was never used); Han unification is a
+   known limitation (§5.4).
+3. **Report worker limits** (§6: PDF concurrency 1 per worker, 3 GiB container limit, CPU 1) and an
+   **OOM kill during rendering** in the crash matrix (§13).
+4. **Admission requires the PDF goldens** to match byte for byte inside the image (§6).
+5. **ICC licence recorded** (§5.6, `spikes/m16-pdf/ICC-LICENSE.txt`); verification against the
+   official color.org file is a BACKLOG item required before production.
+6. **The spike is on main** (`spikes/m16-pdf/`, manual-only workflow `spike-m16-pdf.yml`) as the
+   evidence for byte identity (§5.10); installers (`pip`, `setuptools`, `wheel`) are excluded from
+   the toolchain id.
+
+Re-check of the amended spike image (2026-10-06, the Mac under Rosetta, 2 runs per variant; the full
+four-host S1 above was on the S1 image): fonts 10 files (no JP), installers gone from the id,
+**toolchain id `10d2cf1b9688bd1ececc77ca48c9727bc249c90164630874b61ffe85084d7217`**. The HTML
+changed (the font-family list lost "Noto Sans JP": 1,507,108 bytes), so the PDF hashes are new and
+stable across runs: **PDF/A-2u with compressed streams (the production form, new spike variant
+`pdfa2u-z`) `50f3b4f22997276af2f5c16493b0bc915d78c6838b6b7b39654980338aa7476a` (1,738,855 bytes),
+veraPDF PDF/A-2u PASS**; plain compressed `5dea5f07…b46b7` (1,735,554 bytes); uncompressed PDF/A-2u
+`dcc85baa…72a7` and plain `9f0fb619…c484` (also PASS). Memory: the same render in a container limited to 512 MiB was killed by the
+kernel (exit 137) and left no output file; with 3 GiB it completed with the expected hash. The
+four-host cross-check of the amended image is re-run by hand (`gh workflow run spike-m16-pdf`) and,
+for the real image, by admission (§6).
+
 ## Consequences
 - Plus: every statement in the report traces to the verified chain or a recorded snapshot, and an
   expert can recompute the chain-derived part offline.
 - Plus: a non-clean job cannot produce a page that looks clean, even an excerpted PDF page.
 - Plus: PDF bytes are reproducible for as long as the image is kept (ADR 0017 retention).
 - Minus: an amd64 image with about 20 MB of fonts per report runtime; PDF tests need Docker locally.
-- Minus: uncompressed PDFs are larger (§5.10); bounded by the cap.
+- Minus: a zlib change needs a new toolchain id and admitted image (compressed streams, §5.6).
+- Minus: Japanese text shows Chinese glyph forms (§5.4).
 - Minus: one forced anchor per preview page view until measured otherwise.
