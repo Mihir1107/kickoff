@@ -1,4 +1,4 @@
-# Handoff (2026-10-06, end of session: M16 designed (ADR 0018 accepted and amended, PDF spike S1 passed); next: build M16)
+# Handoff (2026-10-06, end of session: render heartbeat starvation found and fixed (ADR 0015 §23); M16 designed (ADR 0018); next: build M16)
 
 This file alone is enough to build M16. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (read it in full before any
@@ -153,6 +153,30 @@ Where the data is (verified 2026-10-05/06):
   2026-10-05 review decisions; §22 the review of the natives build).
 - ADR 0018 (accepted 2026-10-06): M16, with D1-D14 folded in and the S1 results (§5.10).
 
+## Done: CI run 37412915073 diagnosed and fixed (2026-10-06, ADR 0015 §23)
+- `test_sigkill_of_the_render_worker_during_planning` failed once in CI (render `failed`). Root
+  cause, a product bug: `render_slice` ran on the event loop, so a heavy slice (10,001 events: about
+  1.5 s per call here, more under load) starved the heartbeat ticker; Temporal timed out LIVE
+  attempts and every retry starved the same way until the attempts ran out. Reproduced locally
+  (4 of 10 runs under CPU contention fail exactly like CI). Fix: `render_store._render_slice` runs
+  the renderer in a worker thread. The test also had a nondeterministic kill point (it killed on
+  "status rendering", which often landed in `begin_render`): it now kills at the `planning` barrier,
+  on the small crash-matrix job (the 10,001-event job made its duration depend on host load).
+- New: `test_slice_rendering_longer_than_the_heartbeat_timeout_keeps_heartbeating` (a releasable
+  synchronous barrier `render_slice`, `CrashHooks.block`, spinning in pure Python like the
+  renderer, holds the render in the thread for more
+  than twice the heartbeat timeout with one attempt allowed); mutation `slice_render_on_event_loop`
+  (round `ci-heartbeat`) is caught.
+- Rule in CLAUDE.md: never re-run CI to green without a diagnosis; intermittent = bug. CPU-bound work
+  in activities runs off the event loop (applies to the M16 PDF render: ADR 0018 §6).
+- Reproduction tooling (not committed, easy to rebuild): a loop that runs one test N times with
+  `--basetemp` per iteration and optional busy-loop processes for CPU contention (on macOS never
+  `seq 1 $N` for a count that can be 0: it counts down and starts 2), and a script that
+  lists every activity's recorded attempt and previous failure from the Temporal histories
+  (`client.list_workflows("WorkflowType = 'RenderWorkflow' ...")` + `fetch_history`). Note: Temporal
+  records only the START of the attempt that ended an activity; earlier attempts show up as its
+  `last_failure` (and as "Activity cancelled" in the worker log).
+
 ## Done: M16 design (2026-10-05/06)
 - `docs/plans/m16.md` (proposal), the review decisions D1-D14, spike S1 (PDF byte identity across 20
   runs and two amd64 hosts with the same image; font isolation proven with a probe font and host
@@ -305,6 +329,11 @@ Where the data is (verified 2026-10-05/06):
 - **Anchoring:** never write an anchor without winning the claim. One anchor per due point.
 
 **Testing:**
+- **Heartbeats come from the event loop:** anything CPU-bound in an activity must run in a thread;
+  otherwise a live attempt is timed out and retried until it fails (ADR 0015 §23). The real
+  SIGKILL tests use `heartbeat_timeout_seconds=3`, which makes such starvation show up in tests.
+- **CI keeps no worker logs or Temporal history:** a failing integration test that spawns workers
+  must be diagnosed by reproducing it locally in a loop (with CPU contention); never re-run to green.
 - **Mutation checks:** after writing a test, break the code it protects and confirm the test fails, through
   `scripts/mutation/` (it isolates the bytecode cache per run: two same-sized edits of one file within a
   second once loaded a stale `.pyc` and made a break look harmless). Several tests were vacuous until this

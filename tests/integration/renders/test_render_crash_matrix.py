@@ -9,8 +9,9 @@ ends with:
 - an exported render package that ``edisc-verify`` accepts.
 
 The failure path and the refused path are crashed at their own boundaries. Also: a real SIGKILL of
-the worker process during planning, the anchor sweeper racing a recovering render on the same tail,
-and two identical render requests racing on the deduplication key.
+the worker process at the ``planning`` barrier, a slice rendering held longer than the heartbeat
+timeout (heartbeats must keep flowing), the anchor sweeper racing a recovering render on the same
+tail, and two identical render requests racing on the deduplication key.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import text
+from temporalio.api.enums.v1 import EventType
 from temporalio.client import Client
 from temporalio.worker import Worker
 from types_aiobotocore_s3 import S3Client
@@ -340,31 +342,53 @@ async def test_two_identical_requests_racing_make_one_render_and_one_set_of_even
 
 
 # ------------------------------------------------------------------ a real SIGKILL during planning
+async def _activity_attempts(handle: Any) -> tuple[list[tuple[str, int, str]], list[str]]:
+    """(activity type, attempt, the previous attempt's failure) of every activity's recorded start
+    (Temporal records only the start of the attempt that ended it, earlier attempts appear as its
+    last failure), and the activities whose final attempt timed out."""
+    started: list[tuple[str, int, str]] = []
+    names: dict[int, str] = {}
+    timed_out: list[str] = []
+    for e in (await handle.fetch_history()).events:
+        if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED:
+            names[e.event_id] = e.activity_task_scheduled_event_attributes.activity_type.name
+        elif e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_STARTED:
+            a = e.activity_task_started_event_attributes
+            started.append((names[a.scheduled_event_id], a.attempt, a.last_failure.message))
+        elif e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT:
+            timed_out.append(names[e.activity_task_timed_out_event_attributes.scheduled_event_id])
+    return started, timed_out
+
+
+async def _wait_for(path: Path) -> None:
+    async with asyncio.timeout(90):
+        while not path.exists():  # noqa: ASYNC110, ASYNC240 - a file written by another process
+            await asyncio.sleep(0.02)
+
+
 async def test_sigkill_of_the_render_worker_during_planning(
     app_sessions: Sessions, s3: S3Client, settings: Settings, temporal: Client, tmp_path: Path
 ) -> None:
-    """One slice of 10,001 events makes planning long enough to kill the worker PROCESS inside it
-    (status rendering, nothing stored yet); a new worker process finishes with the oracle's bytes."""
-    from ..corpus.cases import CASES
-    from ..corpus.test_corpus import collect
+    """The worker PROCESS is SIGKILLed while it waits at the test-only barrier ``planning`` (after
+    pass 1 rendered a slice: status rendering, nothing stored yet); a new worker process finishes
+    with the oracle's bytes, in exactly one more ``render_files`` attempt.
 
-    case = CASES["cap_10001"]
+    Until 2026-10-06 this test rendered a 10,001-event slice and killed the worker as soon as the
+    status read ``rendering``, which landed anywhere between ``begin_render``'s commit and planning;
+    the new worker's attempts could then time out on heartbeats while the slice rendered on the
+    event loop (CI run 37412915073: retries exhausted, render failed; ADR 0015 §23). The kill now
+    lands at one named point, and a small job keeps the test far inside its time budget: the heavy
+    slice's CPU no longer has to make the planning window long, and starving heartbeats is covered
+    exactly by the next test."""
     t = await new_tenant(app_sessions)
-    job_id = await collect(app_sessions, s3, settings, t, case)
+    job_id = await _job(app_sessions, s3, settings, t, epoch=0)
     render_id = await new_render(app_sessions, t.tenant_id, job_id)
     queue = f"{render_task_queue(**runtime_versions())}.kill-{uuid.uuid4().hex[:6]}"
-
-    async def spawn(n: int) -> asyncio.subprocess.Process:
-        log = (tmp_path / f"worker-{n}.log").open("wb")
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "edisc_worker", "--source", "dummy", "--renders",
-            "--queue", f"collect-unused-{uuid.uuid4().hex[:8]}", "--renders-queue", queue,
-            cwd=ROOT, env=dict(os.environ), stdout=log, stderr=asyncio.subprocess.STDOUT,
-        )  # fmt: skip
-        log.close()
-        return proc
-
-    worker = await spawn(1)
+    barrier = tmp_path / "barrier"
+    barrier.mkdir()
+    worker = await _spawn(
+        tmp_path, 1, queue, {**os.environ, "EDISC_TEST_RENDER_BARRIER": f"planning:{barrier}"}
+    )
     try:
         handle = await temporal.start_workflow(
             RenderWorkflow.run,
@@ -372,19 +396,14 @@ async def test_sigkill_of_the_render_worker_during_planning(
                       retry_initial_seconds=0.1, retry_max_seconds=0.5, max_attempts=4),
             id=render_workflow_id(str(render_id)), task_queue=queue,
         )  # fmt: skip
-        async with asyncio.timeout(90):
-            while True:
-                row = (await render_state(app_sessions, t.tenant_id, render_id))["row"]
-                if row.status == "rendering":
-                    break
-                await asyncio.sleep(0.02)
+        await _wait_for(barrier / "planning.reached")
         worker.send_signal(signal.SIGKILL)
         await worker.wait()
         mid = await render_state(app_sessions, t.tenant_id, render_id)
         assert mid["row"].status == "rendering" and mid["productions"] == {}, (
             "not killed in planning"
         )
-        worker = await spawn(2)
+        worker = await _spawn(tmp_path, 2, queue, dict(os.environ))
         async with asyncio.timeout(110):
             result = await handle.result()
     finally:
@@ -392,12 +411,87 @@ async def test_sigkill_of_the_render_worker_during_planning(
             worker.send_signal(signal.SIGKILL)
             await worker.wait()
     assert result["status"] == "completed"
+    started, timed_out = await _activity_attempts(handle)
+    # the killed attempt timed out on its heartbeat; the new worker's first attempt finished it
+    assert [a for a in started if a[0] == "render_files"] == [
+        ("render_files", 2, "activity Heartbeat timeout")
+    ], started
+    assert timed_out == []
     want = await expected_files(app_sessions, s3, settings, t.tenant_id, job_id)
     st = await assert_final(
         app_sessions, s3, settings, t, render_id, "completed",
-        Counter({"render_started": 1, "render_files_batch": 1, "render_completed": 1}), tmp_path,
+        Counter({"render_started": 1,
+                 "render_files_batch": -(-len(want) // settings.render_files_batch_size),
+                 "render_completed": 1}),
+        tmp_path,
     )  # fmt: skip
-    assert st["files"] == want and len(want) == 2
+    assert st["files"] == want
+
+
+async def test_slice_rendering_longer_than_the_heartbeat_timeout_keeps_heartbeating(
+    app_sessions: Sessions, s3: S3Client, settings: Settings, temporal: Client, tmp_path: Path
+) -> None:
+    """Rendering a slice is CPU-bound; it must not starve the activity's heartbeats. The worker is
+    held INSIDE the synchronous slice rendering (barrier ``render_slice``, which spins in pure Python
+    like the renderer, holding the GIL as much as Python lets a thread) for more than twice the
+    heartbeat timeout, measured by the server's own record of heartbeats, with one attempt allowed:
+    the attempt keeps heartbeating, nothing times out, and the render completes once released.
+    If the rendering ran on the event loop, the server would time the attempt out and the render
+    would fail (the CI failure of run 37412915073, at an exact point instead of by chance)."""
+    t = await new_tenant(app_sessions)
+    job_id = await _job(app_sessions, s3, settings, t, epoch=0)
+    render_id = await new_render(app_sessions, t.tenant_id, job_id)
+    queue = f"{render_task_queue(**runtime_versions())}.slow-{uuid.uuid4().hex[:6]}"
+    barrier = tmp_path / "barrier"
+    barrier.mkdir()
+    heartbeat = 3.0
+    worker = await _spawn(
+        tmp_path, 1, queue, {**os.environ, "EDISC_TEST_RENDER_BARRIER": f"render_slice:{barrier}"}
+    )
+    try:
+        handle = await temporal.start_workflow(
+            RenderWorkflow.run,
+            RenderRef(str(t.tenant_id), str(render_id), heartbeat_timeout_seconds=heartbeat,
+                      retry_initial_seconds=0.1, retry_max_seconds=0.5, max_attempts=1),
+            id=render_workflow_id(str(render_id)), task_queue=queue,
+        )  # fmt: skip
+        await _wait_for(barrier / "render_slice.reached")
+        first = None
+        async with asyncio.timeout(60):
+            while True:  # until the server has seen heartbeats spanning 2x the timeout
+                desc = await handle.describe()
+                pending = [
+                    a for a in desc.raw_description.pending_activities
+                    if a.activity_type.name == "render_files"
+                ]  # fmt: skip
+                _, timed_out = await _activity_attempts(handle)
+                assert not timed_out, f"heartbeats starved: {timed_out} timed out"
+                assert len(pending) == 1 and pending[0].attempt == 1, pending
+                if pending[0].HasField("last_heartbeat_time"):
+                    beat = pending[0].last_heartbeat_time.ToDatetime()
+                    first = first or beat
+                    if (beat - first).total_seconds() >= 2 * heartbeat:
+                        break
+                await asyncio.sleep(0.2)
+        (barrier / "render_slice.release").write_text("")
+        async with asyncio.timeout(90):
+            result = await handle.result()
+    finally:
+        if worker.returncode is None:
+            worker.send_signal(signal.SIGKILL)
+            await worker.wait()
+    assert result["status"] == "completed"
+    started, timed_out = await _activity_attempts(handle)
+    assert timed_out == [] and all(attempt == 1 for _, attempt, _ in started), started
+    want = await expected_files(app_sessions, s3, settings, t.tenant_id, job_id)
+    st = await assert_final(
+        app_sessions, s3, settings, t, render_id, "completed",
+        Counter({"render_started": 1,
+                 "render_files_batch": -(-len(want) // settings.render_files_batch_size),
+                 "render_completed": 1}),
+        tmp_path,
+    )  # fmt: skip
+    assert st["files"] == want
 
 
 # ------------------------------------------------------------------ real SIGKILLs inside the seal

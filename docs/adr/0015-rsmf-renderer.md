@@ -938,3 +938,70 @@ what was done and why.
    (`test_golden_digest_is_stable_across_code_changes`). Golden generations are now keyed
    `1.3.1_unicode-15.0.0_tzdata-2026e_dummy-0.4.0`.
 
+
+## 23. CI run 37412915073: heartbeats starved by slice rendering (2026-10-06, fixed)
+1. **What failed.** `test_sigkill_of_the_render_worker_during_planning` ended `failed` instead of
+   `completed` (attempt 1 of the run; the re-run passed, which proved nothing). The CI stack was gone,
+   and the test kept no history or worker log in the CI output, so the diagnosis is from local
+   reproduction (item 3).
+2. **Root cause (product bug).** `render_and_store` called the pure renderer `render_slice`
+   synchronously on the event loop, twice per slice (plan and write). For the 10,001-event slice of
+   `cap_10001` one call blocks the loop about 1.5 s on this laptop (measured with a loop-lag probe
+   that sampled the blocked stack: canonical JSON of the manifest and its jsonschema validation),
+   several times longer on a loaded host. The activity's heartbeats come from a task on that loop
+   (`_ticking`), so while the slice renders, no heartbeat is sent. With the test's 3 s heartbeat
+   timeout the server timed out LIVE attempts; every retry re-rendered the same slice and starved
+   again, so the attempts (4 in the test) ran out and the render went to `fail_render`. A recoverable
+   render ended `failed`. The same holds in production with the 60 s default for any slice whose
+   rendering blocks the loop longer than about the timeout (larger messages, slower or busier hosts):
+   such a job could never be rendered. The kill itself was not the cause; it only made the test
+   depend on a fresh worker rendering the heavy slice under the CI load.
+3. **Evidence.**
+   - Under 8 busy CPU processes, one iteration of the old test: `render_files` attempts 1-3 were
+     cancelled by the server with "activity Heartbeat timeout" about 6 s apart while the worker was
+     working, and attempt 4 (the last allowed) happened to finish (Temporal history of
+     `render-01a10fbf-…`; worker log "Activity cancelled" inside the render).
+   - The same history showed the kill landing in `begin_render` (after its commit set `rendering`,
+     before the activity completed), not in planning: the old test's kill point was not
+     deterministic either (a test bug, item 5).
+   - Pre-fix loops (old code and old test restored from `HEAD` in the tree, then the fix put back).
+     The "idle" loop turned out to run with 2 busy CPU processes (the loop script's `seq 1 0`
+     counts down on macOS), so it is reported as such: 50 iterations with 2 busy processes: 47
+     passed, 3 exceeded the 120 s test timeout (one with a heartbeat-cancelled `render_files`
+     attempt). 10 iterations with 4 busy processes: 0 passed; **4 reproduced the CI failure
+     exactly** (`render_files` attempts 1-4 all ended by "activity Heartbeat timeout", render
+     `failed`, `assert 'failed' == 'completed'`), 6 exceeded the 120 s timeout (2 of them before the
+     kill, in the 10,001-message collection). A first run of the FIXED test with that heavy job and
+     2 busy processes also exceeded 120 s once in 6 (worker 1 needed 74 s to reach planning): the
+     heavy job made the test's duration itself load-dependent, a second test bug (item 5).
+4. **Fix.** `render_store._render_slice` runs `render_slice` in a worker thread
+   (`asyncio.to_thread`); the loop keeps heartbeating while a slice renders (the GIL switches every
+   5 ms, so pure-Python work in the thread does not starve the loop). `RenderOptions` and
+   `SliceInput` are immutable inputs and the renderer is pure, so this is safe; the Reconciler and
+   everything that touches the database stay on the loop.
+5. **Tests.**
+   - `test_slice_rendering_longer_than_the_heartbeat_timeout_keeps_heartbeating` (new): a real
+     worker process is held INSIDE the synchronous slice rendering by a releasable test-only barrier
+     (`EDISC_TEST_RENDER_BARRIER=render_slice:<dir>`, `CrashHooks.block`, run in the thread). The
+     barrier SPINS in pure Python, like the renderer, so it also proves the GIL leaves the loop
+     enough time to heartbeat. It holds until the server's own `last_heartbeat_time` for the pending
+     attempt has advanced by more than twice the heartbeat timeout, with ONE attempt allowed; then it
+     is released and the render must complete with no timed-out activity. On the old code the server
+     times the attempt out within seconds (the mutation `slice_render_on_event_loop` in
+     `scripts/mutation/catalog.py`, round `ci-heartbeat`, is caught exactly that way).
+   - `test_sigkill_of_the_render_worker_during_planning` (rewritten): the kill lands at the existing
+     async barrier `planning` (after pass 1 rendered a slice, nothing stored) instead of "as soon as
+     the status reads rendering", and the job is the small crash-matrix job instead of the
+     10,001-event slice (the planning window no longer has to be long, and the heavy job made the
+     test's duration depend on host load); the new worker must finish in exactly one more attempt
+     (`render_files` recorded as attempt 2, its last failure the heartbeat timeout of the killed
+     attempt) with nothing timed out. No sleeps or loosened timeouts were added; both tests take
+     10-17 s.
+   - After the fix (both tests per iteration, each iteration a fresh pytest process): **100 of 100
+     passed on an idle laptop** (29-41 s per iteration) and **20 of 20 with 4 busy CPU
+     processes** (44-72 s); every planning iteration asserted `render_files` finished in attempt 2
+     with nothing timed out, and every heartbeat iteration that the server recorded heartbeats over
+     more than 6 s with one attempt. Mutation `slice_render_on_event_loop` caught.
+6. **Rule (CLAUDE.md):** a test that fails intermittently is a bug until proven otherwise; CI is
+   never re-run to green without a diagnosis. CPU-bound work in an activity runs off the event loop.
+   ADR 0018 §6 applies the same rule to the report's PDF rendering.

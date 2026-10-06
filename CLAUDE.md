@@ -250,6 +250,14 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   connection and waiters poll with `pg_try_advisory_lock` (see `EvidenceWriter._content_lock`).
 - Tests have a 120 s timeout (pytest-timeout): a hang is a failure. Only the acceptance runs
   (`tests/integration/acceptance`) carry an explicit, larger `@pytest.mark.timeout`.
+- **A test that fails intermittently is a bug until proven otherwise.** Never re-run CI (or a test)
+  to green without diagnosing the failure first: get the logs and histories, reproduce it in a loop
+  (with CPU contention), classify it (product bug or test bug) and fix the cause. A test bug is fixed
+  with barriers or conditions, never with sleeps or loosened timeouts. Record the finding in the ADR.
+- Activities heartbeat from the event loop (`_ticking`): CPU-bound work inside an activity (rendering
+  a slice, layout, schema validation of a large document) runs in a worker thread
+  (`asyncio.to_thread`), never on the loop. A loop blocked longer than the heartbeat timeout makes
+  Temporal time out a LIVE attempt, and every retry repeats it (ADR 0015 §23).
 
 ## Measurements (re-run before and after performance changes; results go in docs/runs/)
 - `scripts/measure_breakdown.py` (storage per component + per-stage throughput), `scripts/bench_pipeline.py`,

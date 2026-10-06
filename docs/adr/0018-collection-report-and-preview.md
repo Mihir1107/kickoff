@@ -343,6 +343,11 @@ equal on every host, over:
   - container memory limit **3 GiB** per report worker container (1.2 GB render + streaming JSONL
     writers + Python/Temporal baseline, with headroom; a hard limit, no swap), CPU 1;
   - scale out by adding report workers, never by raising concurrency inside one container;
+  - the WeasyPrint render (about 30 s of CPU, more under load) and every other CPU-bound step
+    (canonical JSON of large documents, HTML building, glyph coverage) run off the event loop
+    (`asyncio.to_thread`, or a subprocess if the GIL starves the loop), so the activity's
+    heartbeats keep flowing; a test holds the render at a synchronous barrier for more than twice
+    the heartbeat timeout and requires one attempt and no timeout (the pattern of ADR 0015 §23);
   - a PDF render whose HTML exceeds the D5 cap cannot occur (the cap bounds pages); the worker still
     checks the HTML size against `EDISC_REPORT_MAX_HTML_BYTES` (4 MiB, about 2.6x the S1 cap size)
     before rendering and fails the report as an integrity error above it.

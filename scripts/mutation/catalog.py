@@ -7,6 +7,8 @@ Rounds (ADR 0015):
 - ``s20-natives``: oversized attachments as natives (§20/§21, 45; the retention break that round
   checked by hand is now one break per route, each caught by its own test).
 - ``s21-review``: the review of §21 (name encoding, concurrent writers, the dummy pin).
+- ``ci-heartbeat``: slice rendering off the event loop, so heartbeats keep flowing (CI run
+  37412915073; ADR 0015 §23).
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ UZ = "tests/unit/custody/test_zipwriter.py"
 UR = "tests/unit/custody/test_rsmf_check.py"
 UD = "tests/unit/dummy/test_oracle_and_determinism.py"
 IN = "tests/integration/renders/test_render_natives.py"
+CM = "tests/integration/renders/test_render_crash_matrix.py"
 AN = "tests/integration/api/test_render_natives.py"
 AP = "tests/integration/api/test_render_packages.py"
 AC = "tests/integration/api/test_content_reads_anchored.py"
@@ -309,4 +312,8 @@ CATALOG: list[Mutation] = [
     m("dummy_default_unpinned", "s21-review", DUMMY,
       "file_size_min: int = Field(default=200, ge=0)", "file_size_min: int = Field(default=201, ge=0)",
       UD, "golden_digest"),
+    # ------------------------------------------------------------------ CI run 37412915073 (§23)
+    m("slice_render_on_event_loop", "ci-heartbeat", W + "render_store.py",
+      "    return await asyncio.to_thread(_render_slice_blocking, inp, options, hooks)",
+      "    return _render_slice_blocking(inp, options, hooks)", CM, "keeps_heartbeating"),
 ]  # fmt: skip

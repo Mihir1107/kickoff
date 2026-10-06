@@ -40,6 +40,7 @@ broken next to a `<name>.mutation-backup` copy: the runner refuses to start unti
 | `s19-review` | first-byte anchoring, Content-Length, strict verifier, anchor divergences (§19.11-14) | 11 |
 | `s20-natives` | oversized attachments as natives (§20, §21) | 45 |
 | `s21-review` | placeholder name encoding, concurrent writers, the dummy connector pin (§21 review) | 8 |
+| `ci-heartbeat` | slice rendering off the event loop: heartbeats never starved (CI run 37412915073, ADR 0015 §23) | 1 |
 
 The `s19-*` rounds were run by hand when they were built and only their categories were written
 down; the entries here re-create them against the current code.

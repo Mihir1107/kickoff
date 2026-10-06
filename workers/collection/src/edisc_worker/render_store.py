@@ -20,10 +20,17 @@ Pages verified in pass 1 are not read again in pass 2 (the loader remembers them
 The render's custody stream and workflow (step 4) are in `edisc_worker.renders`: it passes `on_stored`,
 which receives every stored file in render order, so files are committed in bounded batches and never
 all held in memory.
+
+Rendering a slice is CPU-bound (manifest, canonical JSON, schema validation: about 1.5 s for a
+10,001-event slice on a laptop, several times that on a loaded host). It runs in a worker thread
+(`_render_slice`), never on the event loop: the activity's heartbeats are sent from the loop, and a
+loop blocked longer than the heartbeat timeout made Temporal time out a live attempt; every retry
+re-rendered the same slice and timed out again, until the render failed (CI run 37412915073).
 """
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
@@ -41,6 +48,7 @@ from edisc_renderers.rsmf import (
     ReconciliationError,
     RenderedFile,
     RenderOptions,
+    SliceInput,
     render_slice,
 )
 from edisc_worker.pipeline import CrashHooks
@@ -106,6 +114,20 @@ async def _hooked(chunks: AsyncIterator[bytes], hooks: CrashHooks) -> AsyncItera
             await hooks.hit("mid_upload")
 
 
+def _render_slice_blocking(
+    inp: SliceInput, options: RenderOptions, hooks: CrashHooks
+) -> list[RenderedFile]:
+    hooks.block("render_slice")  # test-only seam, synchronous like the rendering it stands for
+    return render_slice(inp, options)
+
+
+async def _render_slice(
+    inp: SliceInput, options: RenderOptions, hooks: CrashHooks
+) -> list[RenderedFile]:
+    """`render_slice` off the event loop, so heartbeats keep flowing while it runs (module doc)."""
+    return await asyncio.to_thread(_render_slice_blocking, inp, options, hooks)
+
+
 def _plan_key(f: RenderedFile) -> dict[str, Any]:
     return f.record()
 
@@ -138,7 +160,7 @@ async def render_and_store(
     planned: list[dict[str, Any]] = []
     referenced: dict[str, list[int]] = {}  # native SHA-256 -> ords of the files that reference it
     async for inp in loader.slices():
-        files = render_slice(inp, options)
+        files = await _render_slice(inp, options, hooks)
         reconciler.add_slice(inp, files)
         for f in files:
             for digest in sorted({a.sha256 for a in f.externals}):
@@ -170,7 +192,7 @@ async def render_and_store(
         )  # fmt: skip
 
     async for inp in loader.slices():
-        for f in render_slice(inp, options):
+        for f in await _render_slice(inp, options, hooks):
             index = count
             if index >= len(planned) or _plan_key(f) != planned[index]:
                 raise ReconciliationError(f"{f.name}: the second pass differs from the plan")

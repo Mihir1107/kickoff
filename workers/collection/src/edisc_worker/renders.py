@@ -34,6 +34,7 @@ import asyncio
 import hashlib
 import json
 import os
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -923,19 +924,34 @@ class RenderRun:
 class BarrierHooks(CrashHooks):
     """TEST ONLY (``EDISC_TEST_RENDER_BARRIER``, refused outside test/ci by Settings): at one crash
     point, announce it (``<dir>/<point>.reached``) and block, so a test can SIGKILL the worker
-    process exactly there. Never released: the process is meant to die waiting."""
+    process exactly there. An async point (``hit``) is never released: the process is meant to die
+    waiting. A synchronous point (``block``, inside CPU-bound work that runs in a worker thread)
+    spins in that thread, like the work it stands for, until the test writes
+    ``<dir>/<point>.release``, once; later passes go through."""
 
     def __init__(self, spec: str) -> None:
         point, _, directory = spec.partition(":")
         if not point or not directory:
             raise ValueError(f"EDISC_TEST_RENDER_BARRIER must be '<point>:<dir>', got {spec!r}")
         self.point, self.directory = point, Path(directory)
+        self._released = False
 
     async def hit(self, point: str) -> None:
         if point != self.point:
             return
         (self.directory / f"{point}.reached").write_text(str(os.getpid()))
         await asyncio.Event().wait()  # never set: blocks until the process is killed
+
+    def block(self, point: str) -> None:
+        if point != self.point or self._released:
+            return
+        (self.directory / f"{point}.reached").write_text(str(os.getpid()))
+        release = self.directory / f"{point}.release"
+        while not release.exists():  # spin like CPU-bound rendering (pure Python, holds the GIL)
+            deadline = time.monotonic() + 0.05
+            while time.monotonic() < deadline:
+                pass
+        self._released = True
 
 
 def barrier_hooks(settings: Settings) -> CrashHooks:

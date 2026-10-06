@@ -194,6 +194,10 @@ class CrashHooks:
     async def hit(self, point: str) -> None:
         return None
 
+    def block(self, point: str) -> None:
+        """Synchronous seam inside CPU-bound work that runs off the event loop (a worker thread)."""
+        return None
+
 
 @dataclass
 class Pipeline:
