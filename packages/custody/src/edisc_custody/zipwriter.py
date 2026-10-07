@@ -88,6 +88,7 @@ async def zip_stream(members: AsyncIterable[ZipMember]) -> AsyncIterator[bytes]:
                 raise ZipSizeError(f"zip entry {m.name!r}: more than the declared {m.size} bytes")
             crc = zlib.crc32(chunk, crc)
             yield chunk
+            await asyncio.sleep(0)  # a huge member from a ready source must not block the loop
         if size != m.size:
             raise ZipSizeError(f"zip entry {m.name!r}: {size} bytes, declared {m.size}")
         descriptor = (
@@ -99,7 +100,7 @@ async def zip_stream(members: AsyncIterable[ZipMember]) -> AsyncIterator[bytes]:
         central.append(_central_record(name, crc, size, offset))
         offset += len(header) + size + len(descriptor)
         count += 1
-        # many small members whose bytes are ready without suspending must not keep the event
+        # and a flood of tiny or EMPTY members (no chunk to yield after) must not keep the event
         # loop for the whole archive (ADR 0015 §24)
         await asyncio.sleep(0)
     directory = b"".join(central)

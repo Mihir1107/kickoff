@@ -1141,4 +1141,18 @@ what was done and why.
    coroutine driven synchronously by a test. Mutation round `s24-loop`: four breaks
    (`block_socket_not_detected`, `block_time_sleep_not_detected`, `block_raw_io_threshold_ignored`,
    `block_file_read_not_detected`), each caught by `tests/unit/core/test_loopblock.py`.
+9. **A huge single zip member blocked the writer's loop (fix 1's CI exposed it, 2026-10-07).** Fix 1's
+   CI run failed one UNIT test, `test_zipwriter.py::test_more_than_4_gib_through_a_hashing_sink`, with a
+   TIMING block (5.8 s) in `zipwriter.zip_stream`. `zip_stream` yielded to the loop once per MEMBER
+   (item 2's row, for the many-tiny-members case) but NOT per chunk, so one member whose chunks are
+   ready without suspending -- here 4 GiB, and in principle a multi-GiB native -- ran its whole chunk
+   loop without a turn. The timing guard counts a block only when the watchdog samples a product
+   frame, so the block landed in `zip_stream` on some runs (CI) and in the test's own frames on others
+   (local): a latent flaky that had passed by luck. The fix mirrors the archive READER, which already
+   gives a turn per chunk from a ready source (`test_a_large_entry_from_a_ready_source...`): `zip_stream`
+   now `await asyncio.sleep(0)` after each `yield chunk`, keeping the per-member yield for empty
+   members. Deterministic tests: `test_a_single_large_member_from_a_ready_source_gives_the_loop_a_turn_
+   per_chunk` (per chunk) and `test_many_ready_members_...` rewritten to empty members (per member);
+   mutations `zipwriter_no_chunk_yield` and `zipwriter_no_yield`. The yield changes no output byte, so
+   goldens and the byte-identity guarantees are unaffected.
 

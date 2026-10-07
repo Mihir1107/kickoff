@@ -391,9 +391,20 @@ async def test_needs_zip64_agrees_with_what_the_writer_writes() -> None:
 
 
 async def test_many_ready_members_still_give_the_loop_a_turn() -> None:
-    """Members whose bytes are ready without suspending (in memory, buffered): the writer yields to
-    the event loop per member, so a large package never blocks heartbeats (ADR 0015 §24)."""
-    items = [member(f"{i:06d}", b"x" * 64, pieces=1) for i in range(5_000)]
+    """A flood of EMPTY members (no chunk to yield after): the writer still yields to the event loop
+    per member, so a large package of tiny entries never blocks heartbeats (ADR 0015 §24)."""
+    items = [member(f"{i:06d}", b"") for i in range(5_000)]
     turns, archive = await turns_during(build(items))
     assert archive
     assert turns >= 5_000
+
+
+async def test_a_single_large_member_from_a_ready_source_gives_the_loop_a_turn_per_chunk() -> None:
+    """One huge member whose bytes are ready without suspending (as the 4 GiB test does) must not
+    block the loop for the whole member: the writer yields per chunk, like the archive reader
+    (ADR 0015 §24)."""
+    pieces = 50
+    items = [member("big.bin", b"y" * (pieces * 4096), pieces=pieces)]
+    turns, archive = await turns_during(build(items))
+    assert archive
+    assert turns >= pieces
