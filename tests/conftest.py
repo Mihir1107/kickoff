@@ -17,6 +17,12 @@ product runs in a worker thread (`asyncio.to_thread`) is also listed in `OFF_LOO
 session it is wrapped, and a call made on a thread that is running an event loop fails the test,
 however fast it was (deterministic; ADR 0015 §24). A new `to_thread` site adds its function here and
 a mutation entry (`scripts/mutation/catalog.py`, round `s24-loop`).
+
+Timing is also blind to BLOCKING I/O on the loop: it burns no CPU, so the CPU-share rule (§24.7) drops
+it. `edisc_core.loopblock` closes that: installed for the session (and in any worker a test spawns), it
+fails a test when product code on the loop thread makes a blocking socket call, a `time.sleep`, a
+synchronous database driver call (a blocking socket) or a synchronous file read/write at or above its
+threshold. Its breaks are in the `s24-loop` mutation round.
 """
 
 from __future__ import annotations
@@ -37,7 +43,7 @@ from typing import Any
 
 import pytest
 
-from edisc_core import loopguard
+from edisc_core import loopblock, loopguard
 
 DEFAULT_BLOCK_MS = 250
 
@@ -86,7 +92,10 @@ class _State:
     lock: threading.Lock = field(default_factory=threading.Lock)
     pending: dict[str, loopguard.Block] = field(default_factory=dict)  # by id: latest report
     seen: set[str] = field(default_factory=set)
+    viol_seen: set[str] = field(default_factory=set)  # worker violation files already read
     on_loop: list[str] = field(default_factory=list)  # OFF_LOOP functions called on a loop thread
+    violations: list[str] = field(default_factory=list)  # blocking I/O on a loop thread (loopblock)
+    loopblock: loopblock._Config | None = None  # the installed blocking-I/O guard, to uninstall
 
     def _log(self, where: str, blocks: list[loopguard.Block]) -> None:
         if self.log_path is None or not blocks:
@@ -104,9 +113,21 @@ class _State:
             with self.lock:
                 self.pending[block.id] = block
 
+    def record_violation(self, v: loopblock.Violation) -> None:
+        """Called from a wrapper on the loop thread (in this process)."""
+        with self.lock:
+            self.violations.append(v.describe())
+
     def take_on_loop(self) -> list[str]:
         with self.lock:
             found, self.on_loop = self.on_loop, []
+        return found
+
+    def take_violations(self) -> list[str]:
+        """Blocking-I/O violations in this process and in any worker a test spawned."""
+        with self.lock:
+            found, self.violations = self.violations, []
+        found += [v.describe() for v in loopblock.read_violations(self.directory, self.viol_seen)]
         return found
 
     def take(self, phase: str) -> list[loopguard.Block]:
@@ -133,7 +154,9 @@ def pytest_configure(config: pytest.Config) -> None:
         owns_directory=owns, log_path=Path(log) if log else None,
         fail=os.environ.get("EDISC_TEST_LOOP_BLOCK_MODE", "fail") != "report",
     )  # fmt: skip
-    _wrap_off_loop(config.stash[_KEY])
+    state = config.stash[_KEY]
+    _wrap_off_loop(state)
+    state.loopblock = loopblock.install(state.record_violation)
 
 
 def _off_loop(name: str, fn: Callable[..., Any], state: _State) -> Callable[..., Any]:
@@ -160,7 +183,11 @@ def _wrap_off_loop(state: _State) -> None:
 
 def pytest_unconfigure(config: pytest.Config) -> None:
     state = config.stash.get(_KEY, None)
-    if state is not None and state.owns_directory:
+    if state is None:
+        return
+    if state.loopblock is not None:
+        loopblock.uninstall(state.loopblock)
+    if state.owns_directory:
         shutil.rmtree(state.directory, ignore_errors=True)
 
 
@@ -176,15 +203,16 @@ async def _event_loop_guard(request: pytest.FixtureRequest) -> AsyncIterator[Non
 def _check(item: pytest.Item, phase: str) -> Generator[None, Any, None]:
     outcome = yield
     state = item.config.stash[_KEY]
-    blocks, on_loop = state.take(phase), state.take_on_loop()
-    if not blocks and not on_loop:
+    blocks, on_loop, violations = state.take(phase), state.take_on_loop(), state.take_violations()
+    if not blocks and not on_loop and not violations:
         return
-    text = "\n\n".join([*on_loop, *(b.describe() for b in blocks)])
+    text = "\n\n".join([*on_loop, *violations, *(b.describe() for b in blocks)])
     msg = (
-        f"{len(on_loop)} call(s) of thread-only functions on the event loop, {len(blocks)} event "
-        f"loop block(s) longer than {loopguard.ENV_MS}={state.threshold_ms:.0f} during {phase}: "
-        f"synchronous CPU-bound or blocking work ran on the event loop; move it to a thread "
-        f"(CLAUDE.md, ADR 0015 §23, §24)\n\n{text}"
+        f"{len(on_loop)} call(s) of thread-only functions on the event loop, {len(violations)} "
+        f"blocking I/O call(s) on the event loop, {len(blocks)} event loop block(s) longer than "
+        f"{loopguard.ENV_MS}={state.threshold_ms:.0f} during {phase}: synchronous CPU-bound or "
+        f"blocking work ran on the event loop; move it to a thread (CLAUDE.md, ADR 0015 §23, §24)"
+        f"\n\n{text}"
     )
     if state.fail and outcome.excinfo is None:
         outcome.force_exception(LoopBlockedError(msg))

@@ -12,8 +12,9 @@ Rounds (ADR 0015):
 - ``m16-stream``: the report's lifecycle, custody stream, storage, retention and episodes (ADR 0018
   §9, §11, §13; M16 step 4).
 - ``m16-model``: the collection report model and loader (ADR 0018 §4, §7, §8, §12; M16 step 1).
-- ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``),
-  every CPU step moved off the loop, the render thread writing nothing (ADR 0015 §24).
+- ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
+  and the blocking-I/O guard ``edisc_core.loopblock``, §24.8), every CPU step moved off the loop, the
+  render thread writing nothing (ADR 0015 §24).
 """
 
 from __future__ import annotations
@@ -44,6 +45,8 @@ CP = "tests/integration/custody/test_render_package.py"
 LG = "packages/core/src/edisc_core/loopguard.py"
 DC = "packages/connectors/dummy/src/edisc_connector_dummy/connector.py"
 ULG = "tests/unit/core/test_loopguard.py"
+LB = "packages/core/src/edisc_core/loopblock.py"
+ULB = "tests/unit/core/test_loopblock.py"
 UJ = "tests/unit/core/test_jsonstream.py"
 UE = "tests/unit/renderers/test_eml.py"
 UT = "tests/unit/renderers/test_render_thread_writes_nothing.py"
@@ -451,6 +454,19 @@ CATALOG: list[Mutation] = [
     m("reconcile_on_loop", "s24-loop", W + "render_store.py",
       "await asyncio.to_thread(reconciler.add_slice, inp, files)",
       "reconciler.add_slice(inp, files)", RS, "locked_productions"),
+    # the blocking-I/O guard (§24.8): each category undetected is caught by its own loopblock test
+    m("block_socket_not_detected", "s24-loop", LB,
+      "        return bool(sock.gettimeout() != 0)  # type: ignore[attr-defined]",
+      "        return False  # type: ignore[attr-defined]", ULB, "blocking_socket_call"),
+    m("block_time_sleep_not_detected", "s24-loop", LB,
+      "if cfg is not None and seconds and seconds > 0 and _on_loop():",
+      "if cfg is not None and False and _on_loop():", ULB, "time_sleep"),
+    m("block_raw_io_threshold_ignored", "s24-loop", LB,
+      "if cfg is not None and _on_loop() and n >= cfg.threshold_bytes and blocks(args):",
+      "if cfg is not None and _on_loop() and n >= (1 << 60) and blocks(args):", ULB, "raw_read_or_write"),
+    m("block_file_read_not_detected", "s24-loop", LB,
+      "if nbytes >= cfg.threshold_bytes and _on_loop() and _current() is not None:",
+      "if False and _on_loop() and _current() is not None:", ULB, "buffered_file_read"),
     # ------------------------------------------------------------------ M16 step 1: the report model
     m("clean_ignores_custody", "m16-model", RM, "is_clean and custody_ok and divergences == 0",
       "is_clean and divergences == 0", UM, "clean"),

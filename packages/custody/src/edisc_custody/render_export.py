@@ -544,5 +544,5 @@ async def export_render_package(
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("wb") as fh:
             async for chunk in member.chunks():
-                fh.write(chunk)
+                await asyncio.to_thread(fh.write, chunk)  # a member can be a multi-GiB native
     return dest

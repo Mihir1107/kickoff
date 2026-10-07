@@ -223,7 +223,7 @@ async def export_package(
         ],
         "files": {name: w.close() for name, w in writers.items()},
     }
-    (dest / "manifest.json").write_bytes(canonical_json(manifest))
+    await asyncio.to_thread((dest / "manifest.json").write_bytes, canonical_json(manifest))
     return dest
 
 
@@ -244,7 +244,7 @@ async def _download(s3: S3Client, bucket: str, key: str, version_id: str, target
     with partial.open("wb") as fh:
         async with resp["Body"] as body:
             async for chunk in body.iter_chunks(1 << 20):
-                fh.write(chunk)
+                await asyncio.to_thread(fh.write, chunk)  # a zip can be very large
     partial.replace(target)
 
 

@@ -1098,4 +1098,47 @@ what was done and why.
    near 100%, still above 25% with every core contended). Blocking system calls burn no CPU either:
    ruff's ASYNC rules catch those statically, and `OFF_LOOP` is unaffected. The FastAPI stall
    above passed the rule (407 ms of CPU in 360 ms of stall) and was fixed.
+8. **The blocking-I/O blind spot closed (2026-10-07, fix 1 before M16 step 2).** The CPU rule (item 7)
+   drops any stall where the loop's thread was off the CPU -- which is exactly how BLOCKING I/O looks:
+   a blocking socket read, a `time.sleep`, a synchronous database driver call, or a synchronous file
+   read/write parks the thread in a system call and burns no CPU, so the timing guard never counts it,
+   even though it stops the heartbeats as surely as a CPU stall. `OFF_LOOP` names only the pure
+   thread-functions we already move, not arbitrary I/O. So a deterministic counterpart,
+   **`edisc_core.loopblock`**, wraps four stdlib entry points for the whole test process (and every
+   worker a test spawns, reported through the same file drop as the timing guard):
+   - a method of `socket.socket` / `ssl.SSLSocket` on a socket NOT in non-blocking mode
+     (`gettimeout() != 0`). asyncio and every async driver we use (asyncpg, aiobotocore/aiohttp,
+     redis.asyncio) keep their sockets non-blocking (`gettimeout() == 0`) and never fire; a
+     synchronous driver -- including a **synchronous database driver**, which is how that category is
+     caught, since the whole DB layer is asyncpg -- blocks on its socket and does;
+   - `time.sleep` with a positive duration;
+   - `os.read`/`write`/`pread`/`pwrite`/`readv`/`writev` moving at least the threshold on a BLOCKING
+     descriptor (a regular file; asyncio reads its non-blocking subprocess and self-pipe fds with
+     `os.read` on the loop and those are excluded), and a buffered read/write of at least the
+     threshold through a handle PRODUCT code opened while on the loop (`builtins.open`/`io.open`).
+   **Threshold 64 KiB:** CPython's buffered-IO block is 8 KiB and `shutil` copies in 64 KiB (the usual
+   pipe/socket buffer), so a single synchronous transfer of 64 KiB or more is a deliberate bulk move
+   of payload bytes, not the few-KiB reads the product does at import (the RSMF schema, the dev-IdP
+   PEM, a local-KMS key file) or asyncio's one-byte self-pipe wakeups; it is independent of host speed
+   (deterministic where the timing guard is not) and sits below the 1 MiB chunk the package/verifier
+   readers stream in, so a bulk read that ever landed on the loop is caught on its first chunk. A call
+   is attributed to the innermost frame of ours on the live stack: product counts, a test's own
+   blocking call (the loopguard tests' `time.sleep` standing in for a descheduled thread) is dropped,
+   like the timing guard. An `open` is proxied only when the code that called `open` is ours (stdlib
+   trampolines such as `pathlib.Path.open` are skipped, but a library opening its OWN resource file --
+   botocore's gzipped service data -- is not, so it is never proxied).
+   **Offenders found and fixed (the whole suite under the guard):** the directory/package export
+   (`edisc_custody.export.export_package`, its `_download` and manifest write, and
+   `edisc_custody.render_export.export_render_package`) streamed package members -- up to multi-GiB
+   natives -- to local disk with synchronous `fh.write(chunk)` while on the loop under `scripts/demo.py`'s
+   `asyncio.run`; the author had already threaded the `mkdir` and the small whole-object writes, so this
+   was precisely the missed case. Each streaming write now goes through `asyncio.to_thread`. Nothing
+   else in an activity or a spawned worker blocked. The one other thing the guard sampled was the
+   SYNCHRONOUS offline verifier (`package_source.DirectorySource.chunks`, `rsmf_check.FileRange.read`,
+   1 MiB reads) which many render/corpus tests drive IN-PROCESS inside an async test: that is the
+   test's work, not a product bug (in production the verifier is an `edisc-verify` subprocess, off any
+   loop), so it is attributed to the test coroutine and dropped, exactly as the timing guard treats a
+   coroutine driven synchronously by a test. Mutation round `s24-loop`: four breaks
+   (`block_socket_not_detected`, `block_time_sleep_not_detected`, `block_raw_io_threshold_ignored`,
+   `block_file_read_not_detected`), each caught by `tests/unit/core/test_loopblock.py`.
 

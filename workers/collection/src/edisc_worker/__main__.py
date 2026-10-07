@@ -31,7 +31,7 @@ from edisc_connector_dummy.guard import (
 from edisc_connector_slack_export.connector import SlackExportConnector
 from edisc_connectors_base.protocol import Connector
 from edisc_connectors_base.ratelimit import RateLimiter
-from edisc_core import loopguard
+from edisc_core import loopblock, loopguard
 from edisc_core.logs import configure_logging, get_logger
 from edisc_core.settings import Settings
 from edisc_db.connection_tokens import reconcile_token_refreshes
@@ -186,6 +186,7 @@ async def run(
         loopguard.install_from_env(
             asyncio.get_running_loop(), permitted=settings.env.is_ephemeral_test, log=log.error
         )
+        loopblock.install_from_env(permitted=settings.env.is_ephemeral_test, log=log.error)
         await asyncio.gather(*(w.run() for w in workers))
 
 
