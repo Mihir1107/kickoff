@@ -1,4 +1,4 @@
-# Handoff (2026-10-07: stage 0 (nothing CPU-bound on the event loop, ADR 0015 §24) done; M16 steps 1 and 4 built (report model, loader, custody stream, ADR 0018 §19-§20); waiting for review before HTML and PDF)
+# Handoff (2026-10-07: stage 0 done (ADR 0015 §24); M16 steps 1 and 4 built (ADR 0018 §19-§20); next: three fixes, then M16 step 2 (HTML))
 
 This file alone is enough to build M16. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (read it in full before any
@@ -12,8 +12,9 @@ acceptance run). Repo: `github.com/Mihir1107/kickoff`. One commit per milestone 
 report renderer **1.0.0**. M16 **steps 1 and 4 are built**: the pure report model, the loader, the
 access facts in `job_started` (§19), and the report custody stream with `report.json` + the JSONL files
 stored and sealed, `ReportWorkflow`, `ensure-job-reports`, `production_episodes` (§20). Steps 2 (HTML),
-3 (PDF), 5 (API, package, verifier), 6 (preview), 7 (docs) are not; the user asked to review before
-HTML and PDF. The spike (`spikes/m16-pdf/`)
+3 (PDF), 5 (API, package, verifier), 6 (preview), 7 (docs) are not. Last commits: `fcd3f82` +
+`d704ae0` (stage 0), `6639325` (step 1), `b18050a` (step 4, CI run 37528751985 green; the full
+integration suite passed on a fresh stack, 1068 tests). The spike (`spikes/m16-pdf/`)
 and its manual-only CI workflow (`gh workflow run spike-m16-pdf`) remain the PDF evidence.
 
 **Phase 1 (M0-M13) is complete:** WORM evidence (S3 Object Lock COMPLIANCE on MinIO, rolling retention
@@ -23,16 +24,82 @@ connector, the Slack normalizer and an exactly-once batch pipeline with reconcil
 workflows; the API (tenant from Host + IdP + principal, scoped roles, audited evidence reads). Not done:
 the 1M-message soak (needs a cloud VM; `scripts/resume_soak.py --messages 1000000 --kills 10`).
 
-**Phase 2:** M14 (Slack exports) done; M15 (RSMF renders) done; **M16 designed, next to build**; then
+**Phase 2:** M14 (Slack exports) done; M15 (RSMF renders) done; **M16 in progress** (steps 1 and 4); then
 M17 (UI, sessions: ADR 0016 and the M17 backend plan in `docs/plans/phase-2.md`).
 
-## Next: M16 steps 2, 3, 5, 6, 7 (after the user's review of steps 1 and 4)
-ADR 0018 §16 is the order (step 4 was moved before 2 and 3, §20). Each step: implement → tests →
-mutation entries in `scripts/mutation/catalog.py` → run → commit → push. Step 3 must also build the
+## Next: three fixes, in this order, then M16 step 2 (decided by the user, 2026-10-07)
+Do them in order; each: implement → tests → mutation entries → `make check` + the integration suite on
+a fresh stack → commit → push → watch CI to the end.
+1. **Loop guard blind spot.** Stalls with the loop's thread off the CPU are excluded (ADR 0015 §24.7),
+   which also hides BLOCKING I/O on the loop. Add a deterministic check like `OFF_LOOP` (in
+   `tests/conftest.py`) that fails a test when the event-loop thread enters a blocking socket call,
+   `time.sleep`, a synchronous database driver call, or a synchronous file read or write above a size
+   threshold. Fix every offender it finds. Break it once and add the break to the mutation catalog.
+2. **Test stack lock.** `make test-integration` (and the other targets that use the `edisc-test`
+   stack) takes an exclusive lock so two runs can never share a stack; a second run fails fast with
+   a clear message. Then loop the three tests of the undiagnosed failure (ADR 0015 §24.6:
+   `tests/integration/api/test_jobs.py::test_posts_without_a_key_are_separate_jobs`,
+   `tests/integration/api/test_reopen.py::test_reopen_relocks_what_lapsed_and_records_every_gap`,
+   `tests/integration/corpus/test_corpus.py::test_live_case[cap_10000]`) under CPU contention, at
+   least 30 iterations. If not reproduced, record them BY NAME as OPEN in `docs/BACKLOG.md` (not
+   closed).
+3. **CI sharding.** Split the integration job into parallel jobs balanced by measured duration, wall
+   time well under 20 minutes, each shard keeping the failure-artifact upload; prove that all shards
+   together run every test exactly once.
+
+Then **M16 step 2 (HTML)**, and stop to report to the user before step 3 (PDF).
+
+After that, the rest of ADR 0018 §16 (step 4 was moved before 2 and 3, §20). Step 3 must also build the
 PDF child process with its own memory limit and the OOM crash point (ADR 0018 §6, §13, amendment 7),
 and give reports a real toolchain id (a new identity and queue; `none` today). Step 5 adds the API
 (manual regeneration returns the existing report on `duplicate_identity`), the report package and
 `edisc-verify` recomputation from `edisc_renderers.report.model`.
+
+## Done: stage 0 before M16 (2026-10-06/07, ADR 0015 §24; commits fcd3f82, d704ae0)
+- `render_store._render_slice`'s thread is pure compute and writes nothing; enforced by an audit-hook
+  test in a subprocess (no write-mode open, filesystem change, socket or process from that thread).
+- Sweep of every activity (reading + the whole suite under the guard at 50 ms, report mode). Moved off
+  the loop: dummy connector page building and plan, page parsing / normalizer / absence detection /
+  file refs, item persistence (keys, ids, rows, derivation hashes), batch keys, `verify_chain` page
+  folding, render-loader verification / index / messages, the render reconciler, FastAPI's lazy route
+  building (`warm_routes` in a thread at startup). Per-chunk yields: `jsonstream`, the RSMF envelope,
+  `zipwriter`, `archive.open_entry` (the offline verifier's sync drivers step over a bare cooperative
+  turn). Table in §24. To BACKLOG: log redaction recompiles one regex per new secret; asyncpg's SCRAM
+  handshake of new connections runs on the loop (pre-warm pools); the render loader's `_index` decodes
+  a whole conversation's links in one query.
+- Loop guard (`edisc_core.loopguard`, `tests/conftest.py`): a test fails if its loop or a spawned
+  worker's was blocked > 250 ms (`EDISC_TEST_LOOP_BLOCK_MS`; why 250: §24.3), with the blocked stack.
+  Not counted: garbage collection, a loop in its selector or a non-blocking socket call, asyncpg SCRAM
+  handshakes, and stalls where the loop's thread used < 25% CPU (the blind spot fix 1 closes).
+  `OFF_LOOP` fails a test whenever a thread-only function runs on a loop thread (found a call timing
+  missed). Mutation round `s24-loop`: 37 breaks, all caught.
+- CI uploads `integration-failure-<run>-<attempt>` (per failed test: worker logs, Temporal histories,
+  custody streams; `tests/integration/artifacts.py`). Proven on the deleted branch `ci/artifact-proof`.
+  The integration job limit is 45 min (the suite takes 27-29 min on hosted runners; 30 cut a passing
+  run off during teardown).
+- ADR 0018 amendment 7: the report PDF renders in a child process with its own memory limit; the OOM
+  crash point tests exactly that (design only, built in step 3).
+- **Undiagnosed (ADR 0015 §24.6):** one run on the reused test stack had three failures (the three
+  tests named in fix 2) and then stalled; its output was lost (killed at the 60-minute limit, `-q`).
+  They passed in every later run. Likeliest cause: my own work overlapping that run (a migration file
+  in the tree for a minute, heavy commands alongside); NOT proven. Fix 2 addresses it.
+
+## Done: M16 steps 1 and 4 (2026-10-06/07, ADR 0018 §19, §20; commits 6639325, b18050a)
+- Step 1: pure model `edisc_renderers.report.model`, loader `edisc_worker.report_loader`, access facts
+  in `job_started` (migration 0030 `connections.blind_spots` + the units order index), oracle tests
+  for every model case of §15, `scripts/measure_report.py` (memory flat 10k → 100k units, 6.1 → 5.6
+  MiB; linear time with the index: docs/runs/2026-10-06-report-scale.md). Round `m16-model`: 21 breaks.
+- Step 4 (built BEFORE steps 2 and 3, on the user's order to stop after the custody stream): migration
+  0031 (`reports`, `report_files`, `report_id` on custody events and evidence, `render_episodes`
+  renamed `production_episodes`), `edisc_worker.reports` (snapshot → `report_started` → files stored
+  as locked evidence → `report_generated` → seal), `ReportWorkflow`, `--reports` workers,
+  `ensure-job-reports` (a report per sealed job once; `report_missing`, `unroutable`, `sealing_stuck`
+  episodes, one alert each). Crash matrix at every boundary, real SIGKILLs at nine barriers, racing
+  executors and snapshots. Round `m16-stream`: 13 breaks.
+- Known choices: the PDF toolchain id is `none` until step 3 (then a new identity and queue);
+  `ensure-job-reports` never retries a job whose report failed or was refused (its `report_missing`
+  alert asks a person to regenerate by hand, step 5's API); not built yet by plan: the OOM crash point
+  (step 3), API / report package / `edisc-verify` recomputation (step 5).
 
 What M16 is, in one paragraph: every sealed job gets a **collection report** (its own custody stream:
 snapshot → `report_started` → files → `report_generated` → seal) made of `report.json` + full JSONL
