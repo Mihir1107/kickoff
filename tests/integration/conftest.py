@@ -47,10 +47,23 @@ def env() -> Mapping[str, str]:
     return _load_env()
 
 
-def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     for item in items:
         if "tests/integration" in str(item.path):
             item.add_marker(pytest.mark.integration)
+    # CI sharding (ADR 0015 §24): keep only this job's balanced shard, deselect the rest. Every
+    # collected test lands in exactly one shard (scripts/ci_shard.assign), so the shards together
+    # run the whole suite once. Off (EDISC_CI_SHARDS unset or <= 1) outside the sharded CI job.
+    shards = int(os.environ.get("EDISC_CI_SHARDS") or "0")
+    if shards <= 1:
+        return
+    from scripts.ci_shard import assign, load_durations
+
+    shard = int(os.environ["EDISC_CI_SHARD"])
+    where = assign([i.nodeid for i in items], shards, load_durations())
+    keep = [i for i in items if where[i.nodeid] == shard]
+    config.hook.pytest_deselected(items=[i for i in items if where[i.nodeid] != shard])
+    items[:] = keep
 
 
 # ------------------------------------------------------------------ failure artifacts (CI)
