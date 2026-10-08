@@ -235,8 +235,10 @@ def test_a_loop_inside_a_non_blocking_socket_call_is_idle() -> None:
 
     origin, _ = loopguard.classify(Frame())  # type: ignore[arg-type]
     assert origin == "idle"
-    Frame.f_lineno = 1
-    assert loopguard.classify(Frame())[0] == "unattributed"  # type: ignore[arg-type]
+    Frame.f_lineno = (
+        1  # off the recv line: now a driver read callback, not waiting (ADR 0015 §24.6)
+    )
+    assert loopguard.classify(Frame())[0] == "library"  # type: ignore[arg-type]
 
 
 def test_a_new_connections_scram_handshake_is_library_time() -> None:
@@ -251,6 +253,11 @@ def test_a_new_connections_scram_handshake_is_library_time() -> None:
     received = frame(se.__file__, "_read_ready__data_received", None)
     leaf = frame(hmac.__file__, "_init_hmac", frame(hmac.__file__, "new", received))
     assert loopguard.classify(leaf)[0] == "library"  # type: ignore[arg-type]
+    # §24.6: a sample landing in the handshake's own send (no hmac frame), driven from data_received
+    send = frame(se.__file__, "write", frame(se.__file__, "_read_ready__data_received", None))
+    assert loopguard.classify(send)[0] == "library"  # type: ignore[arg-type]
+    # a driver send NOT inside a read callback is not excused
+    assert loopguard.classify(frame(se.__file__, "write", None))[0] == "unattributed"  # type: ignore[arg-type]
     assert loopguard.classify(frame(hmac.__file__, "new", None))[0] == "unattributed"  # type: ignore[arg-type]
 
 

@@ -1111,6 +1111,19 @@ what was done and why.
    near 100%, still above 25% with every core contended). Blocking system calls burn no CPU either:
    ruff's ASYNC rules catch those statically, and `OFF_LOOP` is unaffected. The FastAPI stall
    above passed the rule (407 ms of CPU in 360 ms of stall) and was fixed.
+   **Correction (2026-10-08, fix 2's CI).** The same test failed CI once more, now genuinely CPU-bound
+   (~300 ms, 98% CPU) and attributed "unattributed" -- so the CPU rule did NOT exclude it. Its
+   `asyncio.gather` of many concurrent `tenant_tx` opens a BURST of new asyncpg connections, whose
+   SCRAM handshakes (PBKDF2) run on the loop; §24.3 already excuses that as "library" (BACKLOG:
+   pre-warm pools), but only when the watchdog sampled SCRAM's `hmac` frame. asyncpg's protocol is
+   Cython, so the handshake's own `transport.write` (driven synchronously from `data_received`) has no
+   frame of ours and no `hmac`, and a sample landing there counted. Fix: `classify` now treats ANY
+   stall the loop runs inside a transport READ callback (`_read_ready__data_received`), with no
+   coroutine of ours responsible, as "library" -- the loop running a driver's wire protocol between
+   tasks, which our coroutine code cannot move off the loop (the general form of §24.3; test-only
+   guard change, no product effect). `_connection_auth` becomes `_driver_read_callback`; mutation
+   `guard_scram_counted` and `test_a_new_connections_scram_handshake_is_library_time` cover the send
+   case. The lasting mitigation of the burst itself stays BACKLOG (pre-warm pools).
 8. **The blocking-I/O blind spot closed (2026-10-07, fix 1 before M16 step 2).** The CPU rule (item 7)
    drops any stall where the loop's thread was off the CPU -- which is exactly how BLOCKING I/O looks:
    a blocking socket read, a `time.sleep`, a synchronous database driver call, or a synchronous file

@@ -176,18 +176,22 @@ def classify(
             found = _ours(f, product_roots, test_roots)
             if found is not None:
                 return found
-    if _connection_auth(stack):
-        return "library", "asyncpg SCRAM-SHA-256 authentication of a new connection (PBKDF2)"
+    if _driver_read_callback(stack):
+        return "library", "a driver's wire protocol in a transport read callback (ADR 0015 §24.6)"
     return "unattributed", "no coroutine frame of ours on the stack"
 
 
-def _connection_auth(stack: Sequence[FrameType]) -> bool:
-    """A transport callback (`data_received`) computing HMACs: asyncpg's SCRAM handshake, 4,096
-    PBKDF2 iterations per NEW connection, run by the driver on the loop. A cost of opening a pooled
-    connection, not code of ours (ADR 0015 §24; BACKLOG: pre-warm pools)."""
-    names = [(f.f_code.co_filename, f.f_code.co_name) for f in stack]
-    received = any(n == "_read_ready__data_received" for _, n in names)
-    return received and any(p.endswith(f"{os.sep}hmac.py") for p, _ in names[-6:])
+def _driver_read_callback(stack: Sequence[FrameType]) -> bool:
+    """The loop running a driver's wire protocol synchronously inside a transport read callback
+    (`data_received`), between tasks and with no coroutine of ours responsible: asyncpg's SCRAM
+    handshake (4,096 PBKDF2 iterations per NEW connection) and the sends it makes from
+    data_received, driver result parsing. A cost of the driver on the loop, not code of ours
+    (ADR 0015 §24; BACKLOG: pre-warm pools). The earlier check matched only SCRAM's PBKDF2 frame
+    (`hmac.py`), so a sample landing in the handshake's own send counted as unattributed and failed
+    a test flakily (a burst of new connections stalled ~300 ms there, ADR 0015 §24.6). asyncpg's
+    protocol is Cython, so no frame of ours sits between `data_received` and that send: the read
+    callback itself is the reliable signal."""
+    return any(f.f_code.co_name == "_read_ready__data_received" for f in stack)
 
 
 class _GcClock:
