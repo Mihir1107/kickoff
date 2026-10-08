@@ -79,7 +79,11 @@ FINAL = ("completed", "refused", "failed")
 DEFAULT_PAPER = "letter"  # pending mentor (ADR 0018 §17.1): one constant, part of the identity
 NO_TOOLCHAIN = "none"  # the PDF toolchain id until the PDF exists (M16 step 3)
 
-MEDIA_TYPES = {".json": "application/json", ".jsonl": "application/x-ndjson"}
+MEDIA_TYPES = {
+    ".json": "application/json",
+    ".jsonl": "application/x-ndjson",
+    ".html": "text/html; charset=utf-8",
+}
 
 
 class ReportIntegrityError(RuntimeError):

@@ -12,6 +12,7 @@ Rounds (ADR 0015):
 - ``m16-stream``: the report's lifecycle, custody stream, storage, retention and episodes (ADR 0018
   §9, §11, §13; M16 step 4).
 - ``m16-model``: the collection report model and loader (ADR 0018 §4, §7, §8, §12; M16 step 1).
+- ``m16-html``: the report HTML builder and its sanitiser (ADR 0018 §3.2, §4; M16 step 2).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
   and the blocking-I/O guard ``edisc_core.loopblock``, §24.8), every CPU step moved off the loop, the
   render thread writing nothing (ADR 0015 §24).
@@ -57,6 +58,8 @@ CL = "tests/integration/custody/test_custody_log.py"
 RS = "tests/integration/renders/test_render_store.py"
 NS = "packages/normalizer/src/edisc_normalizer/store.py"
 RM = "packages/renderers/src/edisc_renderers/report/model.py"
+RH = "packages/renderers/src/edisc_renderers/report/html.py"
+UH = "tests/unit/renderers/test_report_html.py"
 RL = "workers/collection/src/edisc_worker/report_loader.py"
 UM = "tests/unit/renderers/test_report_model.py"
 RT = "tests/integration/report/test_report_model.py"
@@ -562,4 +565,30 @@ CATALOG: list[Mutation] = [
       '"   JOIN collection_jobs j ON j.matter_id = m.id JOIN reports rp ON rp.job_id = j.id"',
       '"   JOIN collection_jobs j ON j.matter_id = m.id JOIN reports rp ON false"', ROP,
       "files_and_anchors"),
+    # ------------------------------------------------------------------ M16 step 2: the report HTML
+    m("html_no_escape", "m16-html", RH, '        .replace("<", "&lt;")\n', '        .replace("<", "<")\n',
+      UH, "escaping"),
+    m("html_no_bdi", "m16-html", RH,
+      "    return f\"<bdi>{escape(reveal('' if value is None else str(value)))}</bdi>\"",
+      "    return escape(reveal('' if value is None else str(value)))", UH, "escaping"),
+    m("html_bidi_not_replaced", "m16-html", RH,
+      "            out.append(marker(cp))  # replaced: a marker after it would itself be reordered",
+      "            out.append(ch + marker(cp))  # replaced: a marker after it would itself be reordered",
+      UH, "bidi_controls_are_replaced"),
+    m("html_invisible_not_marked", "m16-html", RH,
+      "            out.append(ch + marker(cp))  # kept, with the marker after it",
+      "            out.append(ch)  # kept, with the marker after it", UH, "bidi_controls_are_replaced"),
+    m("html_banner_always_clean", "m16-html", RH,
+      '    cls = "banner clean" if clean else "banner notclean"', '    cls = "banner clean"',
+      UH, "clean_banner_and_the_not_clean"),
+    m("html_cap_no_remainder", "m16-html", RH, "    if more and more_in:\n", "    if False and more_in:\n",
+      UH, "capped_list_names_the_remainder"),
+    m("html_counts_hide_zeros", "m16-html", RH,
+      'return table(["value", "count"], [[user(r["value"]), num(r["count"])] for r in rows])',
+      'return table(["value", "count"], [[user(r["value"]), num(r["count"])] for r in rows if r["count"]])',
+      UH, "every_enum_value"),
+    m("html_csp_without_style_hash", "m16-html", RH,
+      "    f\"default-src 'none'; style-src '{STYLE_CSP_HASH}'; img-src 'none'; base-uri 'none'; \"",
+      "    f\"default-src 'none'; style-src 'self'; img-src 'none'; base-uri 'none'; \"",
+      UH, "only_allowed_elements"),
 ]  # fmt: skip

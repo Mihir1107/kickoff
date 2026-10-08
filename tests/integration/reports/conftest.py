@@ -139,7 +139,13 @@ async def assert_completed(
     assert st["audits"] == ["audit.report_completed"]
     assert st["evidence"] == {"complete": len(st["files"])}
     names = [f.name for f in st["files"]]
-    assert names == ["units.jsonl", "observations.jsonl", "renders.jsonl", "report.json"]
+    assert names == [
+        "units.jsonl",
+        "observations.jsonl",
+        "renders.jsonl",
+        "report.json",
+        "report.html",
+    ]
     generated = st["events"][-1].payload
     records = [{k: getattr(f, k) for k in ("ord", "name", "media_type", "sha256", "size", "rows",
                                            "version_id")} for f in st["files"]]  # fmt: skip

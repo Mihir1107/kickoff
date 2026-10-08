@@ -41,12 +41,13 @@ def test_no_clock_randomness_or_environment_in_the_source() -> None:
     assert offenders == []
 
 
-def test_the_report_model_is_pure_too() -> None:
-    """`edisc_renderers.report` is imported by the offline verifier (ADR 0018 §14)."""
+def test_the_report_model_and_html_are_pure_too() -> None:
+    """`edisc_renderers.report` (model and the HTML builder) is imported by the offline verifier
+    (ADR 0018 §14) and must stay DB/S3/clock-free (§3.2)."""
     import edisc_renderers.report.model as report_model
 
     code = (
-        "import sys, edisc_renderers.report.model; "
+        "import sys, edisc_renderers.report.model, edisc_renderers.report.html; "
         f"bad = [m for m in sys.modules if m.split('.')[0] in {FORBIDDEN_MODULES!r}]; "
         "print(bad); sys.exit(1 if bad else 0)"
     )

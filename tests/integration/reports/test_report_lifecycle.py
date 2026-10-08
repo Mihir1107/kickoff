@@ -34,7 +34,8 @@ SINGLE = [
     "begin_committed", "generated_tx", "generated_committed", "seal_start", "after_seal_anchor",
     "seal_tx", "sealed",
 ]  # fmt: skip
-PER_FILE = ["file:units.jsonl", "file:observations.jsonl", "file:renders.jsonl", "file:report.json"]
+PER_FILE = ["file:units.jsonl", "file:observations.jsonl", "file:renders.jsonl", "file:report.json",
+            "file:report.html"]  # fmt: skip
 REPEATED = ["mid_upload", "file_stored", "file_tx", "file_recorded"]
 POINTS = [(p, 1) for p in SINGLE + PER_FILE] + [(p, n) for p in REPEATED for n in (1, 2)]
 
@@ -294,12 +295,12 @@ async def test_a_recorded_file_list_unlike_the_build_never_becomes_generated(
         await conn.execute(
             "INSERT INTO edisc.report_files (tenant_id, report_id, ord, name, media_type,"
             " evidence_object_id, version_id, sha256, size_bytes, rows)"
-            " SELECT tenant_id, report_id, 4, 'extra.json', media_type, evidence_object_id,"
+            " SELECT tenant_id, report_id, 5, 'extra.json', media_type, evidence_object_id,"
             " version_id, sha256, size_bytes, rows FROM edisc.report_files"
-            " WHERE report_id = $1 AND ord = 3",
+            " WHERE report_id = $1 AND ord = 4",
             report_id,
         )
-        await conn.execute("UPDATE edisc.reports SET files_done = 5 WHERE id = $1", report_id)
+        await conn.execute("UPDATE edisc.reports SET files_done = 6 WHERE id = $1", report_id)
     finally:
         await conn.close()
     out = await drive(ReportRun(app_sessions, s3, settings), t.tenant_id, report_id)

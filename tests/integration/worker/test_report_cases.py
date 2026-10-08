@@ -37,7 +37,11 @@ async def _report(
     built = await ReportLoader(
         h.sessions, h.s3, h.settings, tenant_id=tenant_id, job_id=job_id
     ).build(sink)
-    return built, {k: [json.loads(x) for x in v.splitlines()] for k, v in files.items()}
+    return built, {
+        k: [json.loads(x) for x in v.splitlines()]
+        for k, v in files.items()
+        if not k.endswith(".html")  # report.html is not JSON; these cases inspect the JSON/JSONL
+    }
 
 
 async def test_failed_units_are_exceptions_with_their_error(harness: Harness) -> None:

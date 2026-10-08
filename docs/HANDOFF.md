@@ -1,4 +1,4 @@
-# Handoff (2026-10-07: stage 0 done (ADR 0015 §24); M16 steps 1 and 4 built (ADR 0018 §19-§20); next: three fixes, then M16 step 2 (HTML))
+# Handoff (2026-10-08: three fixes before M16 done (ADR 0015 §24.6-§24.9); M16 steps 1, 2 and 4 built (ADR 0018 §19-§20, §3.2-§4); next: M16 step 3 (PDF))
 
 This file alone is enough to build M16. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (read it in full before any
@@ -9,13 +9,16 @@ and `docs/BACKLOG.md`. `docs/plans/m16.md` is the superseded proposal (history o
 **Branch and CI:** `main`, green on GitHub CI (lint, typecheck, unit, integration including the 50k SIGKILL
 acceptance run). Repo: `github.com/Mihir1107/kickoff`. One commit per milestone or review round;
 `git log` is the history. Migrations at head: **0031**. Renderer **1.3.1**, dummy connector **0.4.0**,
-report renderer **1.0.0**. M16 **steps 1 and 4 are built**: the pure report model, the loader, the
-access facts in `job_started` (§19), and the report custody stream with `report.json` + the JSONL files
-stored and sealed, `ReportWorkflow`, `ensure-job-reports`, `production_episodes` (§20). Steps 2 (HTML),
-3 (PDF), 5 (API, package, verifier), 6 (preview), 7 (docs) are not. Last commits: `fcd3f82` +
-`d704ae0` (stage 0), `6639325` (step 1), `b18050a` (step 4, CI run 37528751985 green; the full
-integration suite passed on a fresh stack, 1068 tests). The spike (`spikes/m16-pdf/`)
-and its manual-only CI workflow (`gh workflow run spike-m16-pdf`) remain the PDF evidence.
+report renderer **1.0.0** (now also builds `report.html`). M16 **steps 1, 2 and 4 are built**: the
+pure report model and HTML builder, the loader, the access facts in `job_started` (§19); the report
+custody stream with `report.json`, the JSONL files AND `report.html` stored and sealed,
+`ReportWorkflow`, `ensure-job-reports`, `production_episodes` (§20). Steps 3 (PDF), 5 (API, package,
+verifier), 6 (preview), 7 (docs) are not; `conversations.jsonl` (the above-cap per-conversation
+aggregate, §1) is also not built yet (it only appears above 1,000 conversations; no test or production
+hits it). Last commits: the three pre-M16 fixes `ef453ee` + `4d9d52d` (fix 1), `3bd3c1f` + `e7fc73e`
+(fix 2), `1574e16` (fix 3, CI now SHARDED 4 ways and green); then M16 step 2 (HTML). The spike
+(`spikes/m16-pdf/`) and its manual-only CI workflow (`gh workflow run spike-m16-pdf`) remain the PDF
+evidence.
 
 **Phase 1 (M0-M13) is complete:** WORM evidence (S3 Object Lock COMPLIANCE on MinIO, rolling retention
 plus extension floor); hash-chained custody with WORM anchors, seals and the offline verifier
@@ -24,32 +27,41 @@ connector, the Slack normalizer and an exactly-once batch pipeline with reconcil
 workflows; the API (tenant from Host + IdP + principal, scoped roles, audited evidence reads). Not done:
 the 1M-message soak (needs a cloud VM; `scripts/resume_soak.py --messages 1000000 --kills 10`).
 
-**Phase 2:** M14 (Slack exports) done; M15 (RSMF renders) done; **M16 in progress** (steps 1 and 4); then
+**Phase 2:** M14 (Slack exports) done; M15 (RSMF renders) done; **M16 in progress** (steps 1, 2, 4); then
 M17 (UI, sessions: ADR 0016 and the M17 backend plan in `docs/plans/phase-2.md`).
 
-## Next: three fixes, in this order, then M16 step 2 (decided by the user, 2026-10-07)
-Do them in order; each: implement → tests → mutation entries → `make check` + the integration suite on
-a fresh stack → commit → push → watch CI to the end.
-1. **Loop guard blind spot.** Stalls with the loop's thread off the CPU are excluded (ADR 0015 §24.7),
-   which also hides BLOCKING I/O on the loop. Add a deterministic check like `OFF_LOOP` (in
-   `tests/conftest.py`) that fails a test when the event-loop thread enters a blocking socket call,
-   `time.sleep`, a synchronous database driver call, or a synchronous file read or write above a size
-   threshold. Fix every offender it finds. Break it once and add the break to the mutation catalog.
-2. **Test stack lock.** `make test-integration` (and the other targets that use the `edisc-test`
-   stack) takes an exclusive lock so two runs can never share a stack; a second run fails fast with
-   a clear message. Then loop the three tests of the undiagnosed failure (ADR 0015 §24.6:
-   `tests/integration/api/test_jobs.py::test_posts_without_a_key_are_separate_jobs`,
-   `tests/integration/api/test_reopen.py::test_reopen_relocks_what_lapsed_and_records_every_gap`,
-   `tests/integration/corpus/test_corpus.py::test_live_case[cap_10000]`) under CPU contention, at
-   least 30 iterations. If not reproduced, record them BY NAME as OPEN in `docs/BACKLOG.md` (not
-   closed).
-3. **CI sharding.** Split the integration job into parallel jobs balanced by measured duration, wall
-   time well under 20 minutes, each shard keeping the failure-artifact upload; prove that all shards
-   together run every test exactly once.
+## Done: the three fixes before M16, then M16 step 2 (2026-10-08)
+1. **Loop guard blind spot (fix 1, `ef453ee`; follow-up `4d9d52d`).** `edisc_core.loopblock` is the
+   deterministic counterpart of `OFF_LOOP`: on a loop thread it fails a test for a blocking socket
+   call, `time.sleep(>0)`, a sync DB-driver call (a blocking socket), or a sync file read/write
+   >= 64 KiB (ADR 0015 §24.8). Offender fixed: the directory/package export's streaming disk writes
+   (now `asyncio.to_thread`). `4d9d52d`: a latent `zip_stream` loop-block the CI exposed (§24.9, now
+   yields per chunk).
+2. **Test stack lock (fix 2, `3bd3c1f`; follow-up `e7fc73e`).** `scripts/stack_lock.py` + the Makefile:
+   a second `test-env-up`/`test-integration` fails fast and leaves the owner's stack intact;
+   `test-integration-only` requires an up stack. The §24.6 flaky REPRODUCED under CPU contention and
+   is DIAGNOSED + FIXED: `rsmf.eml.aenvelope` base64-encoded a whole chunk in one burst; it now bounds
+   the work per loop turn. `e7fc73e`: the loop guard counts a driver's wire protocol in a transport
+   read callback as "library" (the SCRAM burst, §24.7), not unattributed.
+3. **CI sharding (fix 3, `1574e16`).** The integration job is a 4-way matrix balanced by measured
+   duration (`scripts/ci_shard.py`, `tests/integration/durations.json`); `tests/integration/conftest.py`
+   deselects the tests not in this shard, and the `unit` job proves the shards are a disjoint cover
+   (`ci_shard.py --verify`). Each shard ~10-12 min wall.
 
-Then **M16 step 2 (HTML)**, and stop to report to the user before step 3 (PDF).
+**M16 step 2 (HTML):** `edisc_renderers.report.html` renders `report.json` to `report.html` (§3.2, §4):
+pure (purity test extended), no template engine, the only text path is `escape`; the sanitiser replaces
+bidi controls by `[U+XXXX]`, keeps other Cf/Cc/Zl/Zp + marker, escapes and `<bdi>`-wraps; banner clean
+vs not-clean; severity-ordered capped lists naming the remainder by file + SHA-256; every enum value a
+row; UNKNOWN where nothing is recorded; one constant `<style>` whose SHA-256 is in the page CSP;
+byte-identical per renderer version. Wired into the loader and storage (stored + sealed like the other
+files). Tests: `tests/unit/renderers/test_report_html.py` (structural via stdlib `html.parser`, every
+hard-string class from S1, hypothesis sanitiser fuzz, determinism) and the integration oracle in
+`tests/integration/report/test_report_model.py`. Mutation round `m16-html` (8 breaks, all caught).
+**Not done in step 2 (by plan):** `conversations.jsonl` (above-cap only); report goldens via
+`EDISC_RECORD_REPORT` (step 1 used oracle + determinism; byte-stability is covered the same way here).
 
-After that, the rest of ADR 0018 §16 (step 4 was moved before 2 and 3, §20). Step 3 must also build the
+## Next: M16 step 3 (PDF). Stop and report before it (done).
+The rest of ADR 0018 §16 (step 4 was moved before 2 and 3, §20). Step 3 must also build the
 PDF child process with its own memory limit and the OOM crash point (ADR 0018 §6, §13, amendment 7),
 and give reports a real toolchain id (a new identity and queue; `none` today). Step 5 adds the API
 (manual regeneration returns the existing report on `duplicate_identity`), the report package and

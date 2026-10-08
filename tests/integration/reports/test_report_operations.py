@@ -61,7 +61,7 @@ async def test_a_reports_files_and_anchors_are_extended_with_the_matter(
     report_id = await new_report(app_sessions, t, job_id)
     await drive(ReportRun(app_sessions, s3, settings), t.tenant_id, report_id)
     owned = await _owned(app_sessions, t, report_id)
-    assert Counter(o.kind for o in owned) == Counter({"report": 4, "anchor": len(owned) - 4})
+    assert Counter(o.kind for o in owned) == Counter({"report": 5, "anchor": len(owned) - 5})
     assert any(o.kind == "anchor" for o in owned)
     before = {o.id: ensure_utc(o.retain_until) for o in owned}
     now = utc_now()

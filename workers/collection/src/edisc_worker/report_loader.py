@@ -38,6 +38,7 @@ from edisc_custody.log import verify_chain
 from edisc_db.session import tenant_tx
 from edisc_evidence.worm import get_bytes, list_versions
 from edisc_renderers.report import model as m
+from edisc_renderers.report.html import report_html
 from edisc_renderers.report.version import REPORT_RENDERER_VERSION
 
 PAGE = 2_000
@@ -696,11 +697,13 @@ class ReportLoader:
         )  # fmt: skip
         document = await asyncio.to_thread(m.report_document, inputs)
         body = await asyncio.to_thread(canonical_json, document)
+        page = await asyncio.to_thread(report_html, document)
 
         async def one(data: bytes) -> AsyncIterator[bytes]:
             yield data
 
         await sink("report.json", lambda: one(body), lambda: None)
+        await sink("report.html", lambda: one(page), lambda: None)
         return BuiltReport(body, document, files, divergences, bool(document["job"]["clean"]))
 
     @staticmethod

@@ -88,6 +88,43 @@ async def test_the_report_states_the_oracle(
     assert access["source"] == "job_chain" and access["connector"] == "dummy"
 
 
+@pytest.mark.parametrize("case", ["clean", "gaps"])
+async def test_report_html_is_stored_well_formed_and_matches_the_verdict(
+    app_sessions: Sessions, s3: S3Client, settings: Settings, case: str
+) -> None:
+    from html.parser import HTMLParser
+
+    from edisc_renderers.report.html import report_html
+
+    sp = spec(dialect="slack_history", **CASES[case])
+    t = await new_tenant(app_sessions)
+    run = await run_job(app_sessions, s3, settings, t, sp, 0)
+    built, files = await build(app_sessions, s3, settings, t, run.job_id)
+
+    page = files.data["report.html"]
+    assert page == report_html(built.document)  # the stored HTML is exactly the builder's output
+    assert page == (await build(app_sessions, s3, settings, t, run.job_id))[1].data["report.html"]
+
+    tags: set[str] = set()
+    attrs: list[tuple[str, str | None]] = []
+
+    class P(HTMLParser):
+        def handle_starttag(self, tag: str, a: list[tuple[str, str | None]]) -> None:
+            tags.add(tag)
+            attrs.extend(a)
+
+    p = P()
+    p.feed(page.decode("utf-8"))
+    assert tags <= {"html", "head", "meta", "title", "style", "body", "h1", "h2", "div", "span",
+                    "p", "table", "tr", "th", "td", "bdi", "br"}  # fmt: skip
+    assert not any(k.startswith("on") or k in ("href", "src") for k, _ in attrs)
+    clean = built.document["job"]["clean"]
+    assert (b'class="banner clean"' in page) is clean
+    assert (b'class="banner notclean"' in page) is (not clean)
+    for line in built.document["banner"]:
+        assert line.encode("utf-8") in page
+
+
 async def test_no_longer_observed_across_a_rerun_is_listed_and_counted(
     app_sessions: Sessions, s3: S3Client, settings: Settings
 ) -> None:
