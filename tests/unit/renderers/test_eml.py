@@ -91,3 +91,21 @@ async def test_the_envelope_gives_the_loop_a_turn_per_chunk() -> None:
     turns, total = await turns_during(consume())
     assert total > 1_000 * len(chunk)
     assert turns >= 1_000
+
+
+async def test_the_envelope_bounds_a_single_large_chunk() -> None:
+    """One huge chunk whose bytes are ready must not block the loop while it is base64-encoded: the
+    envelope yields every `_B64_FEED` bytes, not only between chunks (ADR 0015 §24.6)."""
+    from edisc_renderers.rsmf.eml import _B64_FEED
+
+    feeds = 20
+    chunk = b"z" * (feeds * _B64_FEED)
+
+    async def ready() -> AsyncIterator[bytes]:
+        yield chunk  # a single chunk
+
+    async def consume() -> int:
+        return sum([len(o) async for o in aenvelope([("Subject", "s")], "b", "summary", ready())])
+
+    turns, total = await turns_during(consume())
+    assert turns >= feeds

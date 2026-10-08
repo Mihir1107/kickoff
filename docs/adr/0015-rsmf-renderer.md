@@ -1082,14 +1082,27 @@ what was done and why.
    (`tests/integration/artifacts.py`, `EDISC_TEST_ARTIFACTS_DIR`), uploaded with the stack logs as
    `integration-failure-<run>-<attempt>` (14 days). §23's diagnosis had to be rebuilt locally
    because CI kept none of this.
-6. **Not diagnosed.** One failing-mode run on the reused test stack had three failures (most likely
-   `test_posts_without_a_key_are_separate_jobs`, `test_reopen_relocks_what_lapsed_and_records_every_gap`,
-   `test_live_case[cap_10000]`, from their positions) and then made no progress; its output was lost
-   (stopped at the 60-minute limit; `-q` prints failures only at the end). The same tests passed in
-   the four later runs, including the full suite on a fresh stack (973 passed). That run overlapped
-   with work in the tree (an unrelated migration file existed for about a minute, and heavy commands
-   ran next to it), which is the likeliest cause but is NOT proven. Recorded so that the next
-   failure of any of these tests is investigated with this in mind (CI now keeps the artifacts).
+6. **Diagnosed and fixed (2026-10-07, fix 2 before M16 step 2).** One earlier failing-mode run on the
+   REUSED test stack had three failures (`test_posts_without_a_key_are_separate_jobs`,
+   `test_reopen_relocks_what_lapsed_and_records_every_gap`, `test_live_case[cap_10000]`, by position)
+   and then stalled; its output was lost (60-minute limit, `-q`). Looping the three named tests under
+   CPU contention (8 busy cores) reproduced it: `test_live_case[cap_10000]` failed about 2 in 19 with
+   a `LoopBlockedError` of ~300 ms (73% CPU) in `edisc_renderers.rsmf.eml.aenvelope`, the RSMF
+   envelope's base64; the other two never failed (they were collateral of the stall and the suspected
+   overlap). **Cause:** `aenvelope` yielded to the loop BETWEEN zip chunks but base64-encoded each
+   whole chunk in one Python loop (`b2a` per 57 bytes), so a single large chunk -- a big native in the
+   render zip -- was an unbounded CPU burst, the §23 heartbeat-starvation shape under load (the
+   per-chunk yield of §24's table was necessary but not sufficient). **Fix:** `aenvelope` now bounds
+   the base64 to `_B64_FEED` (~228 KiB) per loop turn; output is byte-identical (the encoder buffers
+   across feeds, split-invariance is property-tested). Mutations `envelope_no_yield` and
+   `envelope_unbounded_feed`; `test_the_envelope_bounds_a_single_large_chunk`. **Confirmed:** after the
+   fix the loop-block did not recur in 24 iterations under the same 8-core contention (the only
+   failures then were the 120 s per-test timeout, from the saturation making the test too slow, not
+   the block), and `cap_10000` ran 14/14 clean at moderate (3-core) contention. The suspected original
+   TRIGGER -- two runs sharing the one `edisc-test` stack -- is now impossible: `make test-integration`
+   and the other stack targets take an exclusive lock (`scripts/stack_lock.py`, fix 2; a second run
+   fails fast). The remaining per-chunk-yield sites whose single chunk could likewise be large
+   (`jsonstream`'s coalesced window, `archive.open_entry`) are in BACKLOG for the same bound.
 7. **The CPU rule (2026-10-07).** Two later stalls in one test (`test_concurrent_writers_produce_one_
    anchor_per_due_point`, 281-285 ms) were sampled in trivial code with nothing CPU-bound to blame,
    and could not be reproduced (0 of 15 under CPU contention, 2 of 2 in the failing combination): the

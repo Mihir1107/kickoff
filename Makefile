@@ -16,6 +16,9 @@ TEST_TMP := $(or $(TMPDIR),/tmp)/edisc-tests
 TEST_RUN := EDISC_ENV_FILE=$(TEST_ENV) EDISC_COMPOSE_PROJECT=edisc-test uv run
 TEST_LOGS := test-stack-logs.txt
 TESTS ?= tests/integration
+# Exclusive lock on the one edisc-test stack: a second run fails fast instead of sharing it (ADR 0015 §24.6)
+TEST_LOCK := $(or $(EDISC_TEST_STACK_LOCK),$(or $(TMPDIR),/tmp)/edisc-test-stack.lock)
+STACK_LOCK := uv run python scripts/stack_lock.py
 
 .DEFAULT_GOAL := help
 .PHONY: help hooks sync disk-guard test-env-up test-env-down up up-search up-ci down nuke ps logs migrate lint fmt typecheck test test-integration test-all worker api check
@@ -44,6 +47,7 @@ $(TEST_ENV): .env.example scripts/make_test_env.py
 	uv run python scripts/make_test_env.py > $(TEST_ENV)
 
 test-env-up: disk-guard $(TEST_ENV) ## Start the ephemeral test stack (project edisc-test) and migrate it
+	$(STACK_LOCK) acquire $(TEST_LOCK) --label "$(or $(LOCK_LABEL),test-env-up)"
 	$(TEST_COMPOSE) up -d --wait $(CI_SERVICES)
 	@for job in $(INIT_JOBS); do $(TEST_COMPOSE) run --rm --no-deps $$job || exit 1; done
 	$(TEST_RUN) python -m edisc_db.bootstrap
@@ -51,6 +55,7 @@ test-env-up: disk-guard $(TEST_ENV) ## Start the ephemeral test stack (project e
 
 test-env-down: ## Destroy the ephemeral test stack INCLUDING its volumes (all test evidence)
 	-$(TEST_COMPOSE) down -v --remove-orphans
+	-$(STACK_LOCK) release $(TEST_LOCK)
 
 up: disk-guard .env ## Start all local infra, wait until healthy, run init jobs (idempotent)
 	$(COMPOSE) up -d --wait $(SERVICES)
@@ -100,13 +105,16 @@ test: ## Unit tests (no services required)
 test-integration: disk-guard ## Integration tests on a FRESH ephemeral stack, destroyed afterwards (never the dev stack)
 	@rm -rf $(TEST_TMP) && mkdir -p $(TEST_TMP)
 	@status=0; \
-	$(MAKE) test-env-up && \
-	$(TEST_RUN) pytest $(TESTS) -m "not elasticsearch" --basetemp=$(TEST_TMP)/pytest $(PYTEST_ARGS) || status=$$?; \
-	if [ $$status -ne 0 ]; then $(TEST_COMPOSE) logs --no-color --tail=200 > $(TEST_LOGS) 2>&1 || true; \
-	  echo "test stack logs saved to $(TEST_LOGS)" >&2; fi; \
-	$(MAKE) test-env-down; rm -rf $(TEST_TMP); exit $$status
+	if $(MAKE) test-env-up LOCK_LABEL=test-integration; then \
+	  $(TEST_RUN) pytest $(TESTS) -m "not elasticsearch" --basetemp=$(TEST_TMP)/pytest $(PYTEST_ARGS) || status=$$?; \
+	  if [ $$status -ne 0 ]; then $(TEST_COMPOSE) logs --no-color --tail=200 > $(TEST_LOGS) 2>&1 || true; \
+	    echo "test stack logs saved to $(TEST_LOGS)" >&2; fi; \
+	  $(MAKE) test-env-down; \
+	else status=$$?; fi; \
+	rm -rf $(TEST_TMP); exit $$status
 
 test-integration-only: ## Run integration tests on an ALREADY RUNNING test stack (make test-env-up); keeps it
+	@$(STACK_LOCK) require $(TEST_LOCK)
 	@rm -rf $(TEST_TMP) && mkdir -p $(TEST_TMP)
 	$(TEST_RUN) pytest $(TESTS) -m "not elasticsearch" --basetemp=$(TEST_TMP)/pytest $(PYTEST_ARGS)
 

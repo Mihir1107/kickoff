@@ -15,6 +15,10 @@ CRLF = b"\r\n"
 LINE = 78
 HARD_LINE = 998
 _B64_IN = 57  # 57 input bytes -> 76 base64 characters per line
+# base64 is a Python-level loop (one b2a per line), so a SINGLE large chunk is an unbounded CPU
+# burst even with a yield between chunks (ADR 0015 §24.6). Encode at most this many bytes per loop
+# turn (a multiple of _B64_IN, so each feed emits whole lines and buffers nothing): ~228 KiB.
+_B64_FEED = _B64_IN * 4096
 _DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
@@ -142,14 +146,21 @@ async def aenvelope(
     summary: str,
     zip_chunks: AsyncIterator[bytes],
 ) -> AsyncIterator[bytes]:
-    """The whole EML as an async stream of byte chunks. Yields to the event loop after every
-    chunk: a source whose reads complete without suspending (buffered or in-memory bytes) must not
-    keep the loop, and the activity's heartbeats, waiting for a whole multi-GB stream."""
+    """The whole EML as an async stream of byte chunks. Yields to the event loop while encoding: a
+    source whose reads complete without suspending (buffered or in-memory bytes) must not keep the
+    loop, and the activity's heartbeats, waiting for a whole multi-GB stream -- not between chunks
+    only (one large chunk's base64 is itself an unbounded burst, ADR 0015 §24.6), but every
+    `_B64_FEED` bytes of base64 work."""
     yield _head(headers, boundary, summary)
     encoder = _Base64Lines()
     async for chunk in zip_chunks:
-        out = encoder.feed(chunk)
-        if out:
-            yield out
-        await asyncio.sleep(0)
+        for start in range(0, len(chunk), _B64_FEED):  # bound the base64 CPU per loop turn
+            out = encoder.feed(chunk[start : start + _B64_FEED])
+            if out:
+                yield out
+            await asyncio.sleep(0)
+        if not chunk:
+            await asyncio.sleep(
+                0
+            )  # an empty chunk still yields, as the per-chunk contract promised
     yield encoder.finish() + f"--{boundary}--".encode("ascii") + CRLF

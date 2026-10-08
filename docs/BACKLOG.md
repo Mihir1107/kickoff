@@ -35,7 +35,12 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - Periodic mutation-testing CI job (e.g. mutmut) on `packages/custody`, `packages/evidence` and `edisc_core.kms`/`envelope`/`canonical`, publishing a surviving-mutants report; this automates the manual "teeth" checks done per milestone.
 - Rate-limit fairness across concurrent jobs within one tenant (e.g. per-job sub-buckets or weighted round-robin over a shared bucket) so one large job cannot starve another (ADR 0010).
 - Test infra: run integration tests in parallel ephemeral stacks (pytest-xdist + per-worker compose project)
-  if suite time grows; today one `edisc-test` stack per run.
+  if suite time grows; today one `edisc-test` stack per run (an exclusive lock, `scripts/stack_lock.py`,
+  stops two runs sharing it; CI shards one stack per runner).
+- Audit the other per-chunk-yield sites for the single-LARGE-chunk bound that `aenvelope` now has
+  (ADR 0015 §24.6): `edisc_core.jsonstream` yields per chunk but scans a coalesced ~8 MiB window
+  (~0.4 s, §24), and `edisc_custody.archive.open_entry` inflates per chunk; bound each to a fixed work
+  size per loop turn like the RSMF envelope, or confirm their chunks are already small in every caller.
 - Throughput: make `guard_job_open` a statement-level check (or cache the job-open check per transaction) instead of
   a per-row `FOR SHARE` on the job row for every inserted item/link/event.
 - Activity hang detection: `_ticking` heartbeats keep a deadlocked-but-alive activity alive until start-to-close
