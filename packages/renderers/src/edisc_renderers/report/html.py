@@ -21,16 +21,24 @@ and VISIBLE (`user`):
   (zero-width space, ZWJ, BOM, ...);
 - the text around the markers is HTML-escaped, and the whole value is wrapped in `<bdi>` so a
   right-to-left run cannot reorder the cells around it.
-Glyph coverage (replacing characters no vendored font draws) is a PDF concern and lives in step 3; the
-HTML keeps every covered character as itself.
+- REPLACED as well: every character no vendored font draws (§5.5, renderer 1.2.0), from the committed
+  coverage set `fonts/coverage.txt` (whitespace excepted), so the PDF rendered from THIS stored HTML
+  never shows a missing glyph and the HTML says exactly what the PDF shows.
+
+For the PDF (§5.6, §4.2): `dcterms.created` / `dcterms.modified` carry the job's `sealed_at` (the
+PDF's only dates), and a page-identity element (job id, snapshot digest) feeds the running footer of
+the print stylesheet (`print_css`).
 """
 
 from __future__ import annotations
 
 import base64
+import bisect
 import hashlib
 import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
+from functools import cache
+from importlib import resources
 from typing import Any
 
 from edisc_renderers.report.version import REPORT_RENDERER_VERSION
@@ -53,9 +61,37 @@ def invalid_in_html(cp: int) -> bool:
     )
 
 
+@cache
+def _coverage() -> tuple[list[int], list[int]]:
+    """Range starts and ends of the vendored fonts' cmaps (`fonts/coverage.txt`)."""
+    text = (resources.files("edisc_renderers.report") / "fonts" / "coverage.txt").read_text()
+    starts: list[int] = []
+    ends: list[int] = []
+    for line in text.splitlines():
+        if line and not line.startswith("#"):
+            lo, _, hi = line.partition("-")
+            starts.append(int(lo, 16))
+            ends.append(int(hi or lo, 16))
+    return starts, ends
+
+
+def covered(cp: int) -> bool:
+    """A vendored font has a glyph for ``cp`` (§5.5)."""
+    starts, ends = _coverage()
+    i = bisect.bisect_right(starts, cp) - 1
+    return i >= 0 and cp <= ends[i]
+
+
 def replaced(cp: int) -> bool:
-    """Characters dropped and shown only as their marker (§3.2)."""
-    return cp in BIDI_CONTROLS or invalid_in_html(cp)
+    """Characters dropped and shown only as their marker (§3.2, §5.5): bidi controls and code points
+    invalid in HTML always; a character no vendored font draws unless it is whitespace or one of the
+    revealed categories (kept with its marker: default-ignorable, never drawn)."""
+    if cp in BIDI_CONTROLS or invalid_in_html(cp):
+        return True
+    ch = chr(cp)
+    return (
+        not covered(cp) and not ch.isspace() and unicodedata.category(ch) not in _REVEAL_CATEGORIES
+    )
 
 
 def marker(cp: int) -> str:
@@ -226,6 +262,11 @@ def report_html(doc: Mapping[str, Any]) -> bytes:
                  ("units", "units"), ("expected", "expected"), ("collected", "collected"),
                  ("file gaps", "file_gaps")]  # fmt: skip
     conv = doc.get("conversations") or {}
+    sealed = doc["job"].get("sealed_at")  # the PDF's only dates (§5.6): recorded, never a clock
+    dates = (
+        [f'<meta content="{escape(str(sealed))}" name="dcterms.created">',
+         f'<meta content="{escape(str(sealed))}" name="dcterms.modified">'] if sealed else []
+    )  # fmt: skip
     parts = [
         "<!doctype html>",
         '<html lang="en">',
@@ -233,12 +274,14 @@ def report_html(doc: Mapping[str, Any]) -> bytes:
         '<meta charset="utf-8">',
         f'<meta content="{escape(CSP)}" http-equiv="Content-Security-Policy">',
         '<meta content="width=device-width, initial-scale=1" name="viewport">',
+        *dates,
         el("title", "Collection report"),
         el("style", STYLE),
         "</head>",
         "<body>",
         el("h1", "Collection report"),
         _banner(doc),
+        _page_identity(doc),
         _section_pairs("Job", doc["job"]),
         _section_pairs("Access", doc["access"], skip=("database", "export")),
         _h2("Exceptions", exc.get("source")),
@@ -270,6 +313,13 @@ def report_html(doc: Mapping[str, Any]) -> bytes:
         "</html>",
     ]
     return "\n".join(parts).encode("utf-8")
+
+
+def _page_identity(doc: Mapping[str, Any]) -> str:
+    """Job id and snapshot digest: the running footer of every PDF page (§4.2, `print_css`). Early in
+    the document, so the footer starts on page 1."""
+    job, digest = doc["job"].get("id"), doc.get("integrity", {}).get("snapshot_digest")
+    return el("p", f"job {user(job)} · snapshot {user(digest)}", **{"class": "pageid src"})
 
 
 def _divergences(divs: Sequence[Mapping[str, Any]]) -> str:

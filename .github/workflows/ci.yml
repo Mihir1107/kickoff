@@ -94,3 +94,34 @@ jobs:
             ${{ runner.temp }}/test-artifacts
           if-no-files-found: warn
           retention-days: 14
+
+  # M16 step 3 (ADR 0018 §5.8, §6): the report PDF inside the pinned linux/amd64 report image, natively
+  # on amd64. This IS the image admission gate: the toolchain id is measured, the PDF goldens of that
+  # id must match byte for byte (an image whose id has no recorded generation fails), veraPDF must pass
+  # PDF/A-2u on every golden PDF, fonts stay isolated, and a real report worker container survives an
+  # OOM of its PDF child (RLIMIT_AS and cgroup paths) and heartbeats while the child works.
+  report-pdf:
+    runs-on: ubuntu-24.04
+    needs: [lint, typecheck, unit]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --all-packages --locked
+      - run: make test-env-up MIN_FREE_GB=8
+      - run: make test-report-pdf REPORT_PDF_OUT=${{ runner.temp }}/report-pdf
+      - name: Report PDFs and veraPDF output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: report-pdf-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/report-pdf
+            test-stack-logs.txt
+          if-no-files-found: warn
+          retention-days: 14
+      - if: always()
+        run: make test-env-down

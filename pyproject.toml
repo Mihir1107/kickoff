@@ -36,6 +36,7 @@ dev = [
     "pytest-timeout>=2.4.0",
     "types-jsonschema>=4.23",
     "html5lib>=1.1",
+    "pypdf==6.19.0",
 ]
 
 [tool.uv]

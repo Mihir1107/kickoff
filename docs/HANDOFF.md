@@ -1,4 +1,4 @@
-# Handoff (2026-10-08: three fixes before M16 done (ADR 0015 §24.6-§24.9); M16 steps 1, 2 and 4 built (ADR 0018 §19-§20, §3.2-§4); next: M16 step 3 (PDF))
+# Handoff (2026-10-10: fixes before step 3 done (42951ba, CI green); M16 step 3 (PDF) built; next: M16 step 5 (API, package, verifier))
 
 This file alone is enough to build M16. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (read it in full before any
@@ -6,19 +6,12 @@ code); the rest of the plan of record is `docs/ARCHITECTURE.md`, `docs/adr/`, `d
 and `docs/BACKLOG.md`. `docs/plans/m16.md` is the superseded proposal (history only).
 
 ## Current state
-**Branch and CI:** `main`, green on GitHub CI (lint, typecheck, unit, integration including the 50k SIGKILL
-acceptance run). Repo: `github.com/Mihir1107/kickoff`. One commit per milestone or review round;
-`git log` is the history. Migrations at head: **0031**. Renderer **1.3.1**, dummy connector **0.4.0**,
-report renderer **1.0.0** (now also builds `report.html`). M16 **steps 1, 2 and 4 are built**: the
-pure report model and HTML builder, the loader, the access facts in `job_started` (§19); the report
-custody stream with `report.json`, the JSONL files AND `report.html` stored and sealed,
-`ReportWorkflow`, `ensure-job-reports`, `production_episodes` (§20). Steps 3 (PDF), 5 (API, package,
-verifier), 6 (preview), 7 (docs) are not; `conversations.jsonl` (the above-cap per-conversation
-aggregate, §1) is also not built yet (it only appears above 1,000 conversations; no test or production
-hits it). Last commits: the three pre-M16 fixes `ef453ee` + `4d9d52d` (fix 1), `3bd3c1f` + `e7fc73e`
-(fix 2), `1574e16` (fix 3, CI now SHARDED 4 ways and green); then M16 step 2 (HTML). The spike
-(`spikes/m16-pdf/`) and its manual-only CI workflow (`gh workflow run spike-m16-pdf`) remain the PDF
-evidence.
+**Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`. Migrations at head: **0031**.
+Renderer **1.3.1**, dummy connector **0.4.0**, report renderer **1.2.0**. M16 **steps 1-4 are built**
+(model, HTML, PDF, loader, custody stream); steps 5 (API, package, verifier), 6 (preview), 7 (docs)
+are not. Commits this round: `42951ba` (the six fixes before step 3; CI run 38048366877 green: lint,
+typecheck, unit, 4 integration shards) and the step 3 commit after it (see `git log`; its CI adds the
+`report-pdf` job, the image admission gate: check that run's final status first).
 
 **Phase 1 (M0-M13) is complete:** WORM evidence (S3 Object Lock COMPLIANCE on MinIO, rolling retention
 plus extension floor); hash-chained custody with WORM anchors, seals and the offline verifier
@@ -29,6 +22,29 @@ the 1M-message soak (needs a cloud VM; `scripts/resume_soak.py --messages 100000
 
 **Phase 2:** M14 (Slack exports) done; M15 (RSMF renders) done; **M16 in progress** (steps 1, 2, 4); then
 M17 (UI, sessions: ADR 0016 and the M17 backend plan in `docs/plans/phase-2.md`).
+
+## Done: six fixes before step 3, then M16 step 3 (2026-10-10; ADR 0018 §21, §22; ADR 0015 §24.10)
+Fixes (`42951ba`): markers are ELEMENTS (`<span class="cp">`), so literal "[U+202E]" text differs
+from a replaced U+202E; HTML-invalid code points (NUL, C0 but tab/LF/CR, DEL, C1, noncharacters, lone
+surrogates) are replaced; pages parse under html5lib STRICT; `conversations.jsonl` above 1,000
+conversations (tested at 1,000 / 1,001); report goldens `tests/golden/report/` (`EDISC_RECORD_REPORT`);
+CI shards: "1067 vs 1068" was the macOS-only ditto test skipped on Linux, and a real defect was found
+and fixed (shards were cut before `-m` deselection, so jobs ran a split the verify never checked;
+`--verify` now collects per shard like the jobs); BACKLOG SCRAM item (pool minimum, warm-up) open with
+the loop-guard exemption. Round `m16-pre3`: 14 breaks.
+
+Step 3 (PDF): report image `deploy/report-image/Dockerfile` (targets `report`, `report-test`),
+toolchain id `edisc_worker.versions` (measured with the child's interpreter; `none` outside the image,
+local/test/ci only), the PDF child `edisc_worker.report_pdf` (RLIMIT_AS, oom_score_adj, minimal env,
+killed on timeout/cancel, `ReportPdfRenderError` retryable), `report.pdf` rendered from the stored HTML
+read back by VersionId, glyph coverage in the HTML (`report/fonts/coverage.txt`), print stylesheet with
+the banner and page identity on every page, ICC + OFL licences vendored, PDF goldens for toolchain
+`e24aecbb3dd4` (6 cases x Letter/A4; recorded under emulation, verified natively by CI), veraPDF 12/12
+PASS, the OOM crash point with real worker containers (RLIMIT_AS and cgroup kill paths) and the
+heartbeat-hold test. Found on the way: the worker could not start from a production install
+(`types_aiobotocore_s3` was dev-only; now a runtime dependency). Round `m16-pdf`: 14 breaks.
+Not done (ADR 0018 §22.8): image registry push and `deploy/render-images.json`; a tamper test for
+PDF-from-stored-HTML; production deployment files for report workers.
 
 ## Done: the three fixes before M16, then M16 step 2 (2026-10-08)
 1. **Loop guard blind spot (fix 1, `ef453ee`; follow-up `4d9d52d`).** `edisc_core.loopblock` is the
@@ -60,12 +76,14 @@ hard-string class from S1, hypothesis sanitiser fuzz, determinism) and the integ
 **Not done in step 2 (by plan):** `conversations.jsonl` (above-cap only); report goldens via
 `EDISC_RECORD_REPORT` (step 1 used oracle + determinism; byte-stability is covered the same way here).
 
-## Next: M16 step 3 (PDF). Stop and report before it (done).
-The rest of ADR 0018 §16 (step 4 was moved before 2 and 3, §20). Step 3 must also build the
-PDF child process with its own memory limit and the OOM crash point (ADR 0018 §6, §13, amendment 7),
-and give reports a real toolchain id (a new identity and queue; `none` today). Step 5 adds the API
-(manual regeneration returns the existing report on `duplicate_identity`), the report package and
-`edisc-verify` recomputation from `edisc_renderers.report.model`.
+## Next: M16 step 5 (API, report package, verifier). Stop and report before it.
+ADR 0018 §16.5: `/v1/jobs/{id}/reports` POST (manual regeneration with a reason; `duplicate_identity`
+returns the existing report) / GET, `/v1/reports/{id}`, file content and package routes with
+`first_byte.py` tests, `edisc-report-package/1`, and `edisc-verify` recomputation from
+`edisc_renderers.report.model`. Production creators need `EDISC_REPORT_TOOLCHAIN_ID` (the admitted
+image id) once reports carry PDFs outside test stacks. Local PDF work: `MIN_FREE_GB=9 make
+test-env-up` then `make test-report-pdf` (Docker Desktop, amd64 emulation: ~5 min after the first
+build).
 
 ## Done: stage 0 before M16 (2026-10-06/07, ADR 0015 §24; commits fcd3f82, d704ae0)
 - `render_store._render_slice`'s thread is pure compute and writes nothing; enforced by an audit-hook
@@ -366,7 +384,11 @@ Where the data is (verified 2026-10-05/06):
 - **Elasticsearch:** its image pull from docker.elastic.co stalls here. It is in an opt-in compose profile
   (`make up-search`) and nothing uses it.
 
-**PDF (spike S1):**
+**PDF (spike S1, step 3):**
+- Under Rosetta, a PDF child over its RLIMIT_AS dies of a failed mmap or a GLib thread abort (SIGTRAP),
+  not a Python MemoryError: tests accept any death as `ReportPdfRenderError`. Worker containers on
+  Docker Desktop reach the test stack via host.docker.internal (Linux: `--network host`).
+- `.dockerignore` keeps `apps/web` (another branch) and `docs`/`spikes` out of the image context.
 - **Docker Hub pulls can stall for 20+ minutes here** (0 B progress, then finish). Do not cancel a
   build stuck at `FROM`; once the base is cached, rebuilds are fast. `snapshot.debian.org` was fast.
 - **fontTools writes the current time into `head.modified`** unless fonts are opened with

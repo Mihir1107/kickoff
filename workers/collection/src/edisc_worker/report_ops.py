@@ -30,8 +30,8 @@ from edisc_worker.render_routing import workers_polling
 from edisc_worker.reports import (
     close_episodes,
     create_report,
+    new_report_identity,
     open_episode,
-    runtime_identity,
     start_report_workflow,
 )
 
@@ -54,7 +54,7 @@ async def ensure_job_reports(
     limit: int = 200,
 ) -> EnsureResult:
     out = EnsureResult()
-    identity = runtime_identity()
+    identity = new_report_identity(settings)
     async with sweeper_sessions() as session, session.begin():
         todo = (
             await session.execute(

@@ -42,6 +42,7 @@ make test               # unit tests
 make test-integration   # FRESH ephemeral stack (-p edisc-test, .env.test, other ports), tests, then down -v
 make test-env-up / test-integration-only / test-env-down   # keep the test stack up while iterating
                         # up/up-ci/test targets refuse below MIN_FREE_GB (15) free disk
+make test-report-pdf    # report image (amd64): in-image PDF tests, PDF goldens, veraPDF, worker OOM (needs test-env-up)
 make worker / api       # Temporal worker (+ maintenance queue, sweeper schedules, exports, renders) / API
 ```
 
@@ -156,7 +157,7 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Every manifest is validated against the vendored `rsmf_schema_2_0_0.json` (SHA-256 pinned, format
   checks on). The Relativity validator is not used until the licence is confirmed.
 
-## Collection report and preview (M16, ADR 0018; steps 1, 2 and 4 built: model, HTML, loader, stream)
+## Collection report and preview (M16, ADR 0018; steps 1-4 built: model, HTML, PDF, loader, stream)
 - Read ADR 0018 in full (and its §19/§20 implementation notes) before changing M16 code;
   `docs/HANDOFF.md` has what is next. The report has its own custody stream (a sealed job chain is
   never appended to); facts come from the verified job chain first, database disagreements are
@@ -177,10 +178,18 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   renders); files via `EvidenceWriter.write_report_file`; `report_generated` root via
   `edisc_custody.report_files`. Episodes (render and report) live in `production_episodes`.
   `ensure-job-reports` creates a report for every sealed job once and flags missing ones.
-- PDF bytes are promised only inside the pinned linux/amd64 report image (`spikes/m16-pdf/` is the
-  prototype: vendored fonts by SHA-256, fontconfig isolated, Debian snapshot, TrueType CJK fonts).
-  PDF goldens are authoritative only in CI on amd64; locally they run in the image or skip with a
-  visible reason, never silently.
+- PDF (ADR 0018 §22): bytes are promised only inside the pinned linux/amd64 report image
+  (`deploy/report-image/Dockerfile`; fonts by `fonts.lock`, fontconfig isolated, Debian snapshot).
+  The render runs in a CHILD process (`python -m edisc_worker.report_pdf`: RLIMIT_AS, oom_score_adj,
+  minimal env, stdin/stdout only), never a thread; `render_pdf` kills it on timeout/cancel and any
+  failure is the retryable `ReportPdfRenderError`. The PDF is rendered from the STORED report.html
+  read back by VersionId. The toolchain id (`edisc_worker.versions`) is measured with the child's
+  interpreter; outside the image it is `none` (local/test/ci only: no PDF). Glyph coverage lives in
+  the HTML (`report/fonts/coverage.txt`, regenerate with `scripts/report_font_coverage.py`).
+  `make test-report-pdf` (needs `make test-env-up`) builds the image and runs the in-image tests
+  (`tests/unit/report_image`, skipped elsewhere with a visible reason), veraPDF and the worker
+  OOM/heartbeat tests; PDF goldens `tests/golden/report-pdf/<key>_toolchain-<id12>/` are the image's
+  admission gate (record by hand with `EDISC_RECORD_REPORT_PDF=1`, never in CI, never overwrite).
 
 ## Conventions
 - Python 3.12, `uv` only (no pip). Add deps with `uv add --package <member> <dep>`.

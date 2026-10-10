@@ -428,3 +428,35 @@ def test_the_conversation_list_names_conversations_jsonl_only_above_the_cap(tota
     assert f"{total:,} total; showing the 1,000 worst" in text
     assert text.count("<bdi>C0") == 1_000
     assert ("1 more in conversations.jsonl, SHA-256 " + "c" * 64 in text) is (total > 1_000)
+
+
+def test_characters_no_vendored_font_draws_are_replaced_by_their_marker() -> None:
+    """§5.5: the PDF renders the stored HTML, so the HTML already shows a marker wherever no
+    vendored font has a glyph (never tofu, never a silent substitute)."""
+    c = cell("Linear B \U00010000 and \U00013000")
+    assert markers(c) == ["U+10000", "U+13000"] and plain(c) == "Linear B  and "
+    for s in ("张伟", "김민준", "محمد", "שרה", "नमस्ते", "สวัสดี", "🎉👍🏽", "é̂"):
+        assert markers(cell(s)) == [] and plain(cell(s)) == s, s  # covered scripts stay as they are
+    assert rhtml.covered(0x41) and not rhtml.covered(0x10000)
+    assert not rhtml.replaced(0x3000)  # whitespace is never replaced
+
+
+def test_the_coverage_file_is_tied_to_fonts_lock() -> None:
+    """Changing a font in fonts.lock without regenerating coverage.txt fails here, everywhere (the
+    report image recomputes the coverage from the installed fonts too)."""
+    from scripts.report_font_coverage import COVERAGE, lock_fonts
+
+    header = [line.split()[2:] for line in COVERAGE.read_text().splitlines()
+              if line.startswith("# font ")]  # fmt: skip
+    assert [tuple(h) for h in header] == lock_fonts()
+    assert len(lock_fonts()) == 10  # the vendored set of ADR 0018 §5.4 (no Japanese font)
+
+
+def test_the_page_carries_the_seal_dates_and_its_identity_for_the_pdf() -> None:
+    d = doc()
+    d["job"]["sealed_at"] = "2026-01-06T12:34:56Z"
+    out = rhtml.report_html(d).decode()
+    assert '<meta content="2026-01-06T12:34:56Z" name="dcterms.created">' in out
+    assert '<meta content="2026-01-06T12:34:56Z" name="dcterms.modified">' in out
+    assert '<p class="pageid src">job <bdi>j1</bdi> · snapshot <bdi>d</bdi></p>' in out
+    assert out.index('class="pageid') < out.index("<h2>")  # before content: footer from page 1

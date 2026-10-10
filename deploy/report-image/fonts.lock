@@ -1,0 +1,22 @@
+# name  sha256  url   (pinned commits; fetched and verified by fetch_fonts.py at report image build;
+# scripts/report_font_coverage.py and the coverage.txt header are tied to these lines)
+NotoSans-Regular.ttf 478c558ea716033cd60c03438f628dfa75694dcf6b5f6d505a2f05fd2b4f3823 https://raw.githubusercontent.com/notofonts/notofonts.github.io/86eb2ddc3a2e97cb9747fd9069ee5d47880e3305/fonts/NotoSans/hinted/ttf/NotoSans-Regular.ttf
+NotoSans-Bold.ttf 1df075a380fc7cb898acf64c1f7b3b4dd780de3caa860178bf929de35817a913 https://raw.githubusercontent.com/notofonts/notofonts.github.io/86eb2ddc3a2e97cb9747fd9069ee5d47880e3305/fonts/NotoSans/hinted/ttf/NotoSans-Bold.ttf
+NotoSansMono-Regular.ttf 65b5e2b2c4a1fba9ae8be1f026cb35b03dcb8886d9b2a4147054fde12f7e767d https://raw.githubusercontent.com/notofonts/notofonts.github.io/86eb2ddc3a2e97cb9747fd9069ee5d47880e3305/fonts/NotoSansMono/hinted/ttf/NotoSansMono-Regular.ttf
+NotoSansArabic-Regular.ttf bdff3e5659d67e67def05b33f749683b9376ae819d65d3dd62ac4640b3aaef48 https://raw.githubusercontent.com/notofonts/notofonts.github.io/86eb2ddc3a2e97cb9747fd9069ee5d47880e3305/fonts/NotoSansArabic/hinted/ttf/NotoSansArabic-Regular.ttf
+NotoSansHebrew-Regular.ttf cdefaf8efd47045f6820928eba84db5bed7557539328952b5f828315485e02ee https://raw.githubusercontent.com/notofonts/notofonts.github.io/86eb2ddc3a2e97cb9747fd9069ee5d47880e3305/fonts/NotoSansHebrew/hinted/ttf/NotoSansHebrew-Regular.ttf
+NotoSansDevanagari-Regular.ttf 4e3c66638958c3e2ab5d37f47a8deb89fffeb7be9985c665a519bbc7ba762313 https://raw.githubusercontent.com/notofonts/notofonts.github.io/86eb2ddc3a2e97cb9747fd9069ee5d47880e3305/fonts/NotoSansDevanagari/hinted/ttf/NotoSansDevanagari-Regular.ttf
+NotoSansThai-Regular.ttf 61cf814eec46b294d6ea4401ac295d0cecd5207bd2331dcc5a15e7301d30ee44 https://raw.githubusercontent.com/notofonts/notofonts.github.io/86eb2ddc3a2e97cb9747fd9069ee5d47880e3305/fonts/NotoSansThai/hinted/ttf/NotoSansThai-Regular.ttf
+# CJK as TrueType (glyf) variable fonts, instanced at build: the CID-keyed CFF SubsetOTF files
+# subset by HarfBuzz failed veraPDF 6.2.11.4.1 / 6.2.11.5 / 6.2.11.8 (S1, first round)
+NotoSansSC-VF.ttf a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da https://raw.githubusercontent.com/google/fonts/7085eb89a950e85db5b166b7a58d414544b4140c/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf
+NotoSansKR-VF.ttf 194018e6b2b293a7964f037b25c0249ce1418bc9ab3c971060a03aa57861e252 https://raw.githubusercontent.com/google/fonts/7085eb89a950e85db5b166b7a58d414544b4140c/ofl/notosanskr/NotoSansKR%5Bwght%5D.ttf
+NotoEmoji-VF.ttf de6c18832938afc99caf132b39d6a30a19bac7f2e812e28db2535b4608d27551 https://raw.githubusercontent.com/google/fonts/7085eb89a950e85db5b166b7a58d414544b4140c/ofl/notoemoji/NotoEmoji%5Bwght%5D.ttf
+# the leak probe: covers U+10000 (Linear B), which no vendored font covers; NEVER in the vendored dir
+leak/NotoSansLinearB-Regular.ttf 940af117332cd4ff54fbc19553399be9228aff0da370a7ed36baa18fe1a9f23f https://raw.githubusercontent.com/notofonts/notofonts.github.io/86eb2ddc3a2e97cb9747fd9069ee5d47880e3305/fonts/NotoSansLinearB/hinted/ttf/NotoSansLinearB-Regular.ttf
+# licences
+licenses/OFL-notosans.txt cee9892f9f0cc8fe882c9e9537ee6a89621d86ee7ceaf70b02e2b2b1c25c061a https://raw.githubusercontent.com/google/fonts/7085eb89a950e85db5b166b7a58d414544b4140c/ofl/notosans/OFL.txt
+licenses/OFL-notosansarabic.txt 07fc70bfeb985cc1a87a8587d0a0c80bab11c86c9dc3fd95b6f0cb332f983e96 https://raw.githubusercontent.com/google/fonts/7085eb89a950e85db5b166b7a58d414544b4140c/ofl/notosansarabic/OFL.txt
+licenses/OFL-notoemoji.txt 500bb1ccf43df7bbb522112f9133a52b16e1c35e809632f5d8609b179152de5b https://raw.githubusercontent.com/google/fonts/7085eb89a950e85db5b166b7a58d414544b4140c/ofl/notoemoji/OFL.txt
+licenses/OFL-notosanssc.txt 1c05c68c34f9708415aada51f17e1b0092d2cea709bf4a94cd38114f9e73d7d9 https://raw.githubusercontent.com/google/fonts/7085eb89a950e85db5b166b7a58d414544b4140c/ofl/notosanssc/OFL.txt
+licenses/OFL-notosanskr.txt 1c05c68c34f9708415aada51f17e1b0092d2cea709bf4a94cd38114f9e73d7d9 https://raw.githubusercontent.com/google/fonts/7085eb89a950e85db5b166b7a58d414544b4140c/ofl/notosanskr/OFL.txt

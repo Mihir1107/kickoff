@@ -29,12 +29,14 @@ Report events have ``report_id`` set and ``job_id`` NULL: a sealed job's chain i
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import sys
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from functools import wraps
+from functools import cache, wraps
 from typing import Any
 
 from sqlalchemy import text
@@ -59,8 +61,10 @@ from edisc_custody.report_files import (
     files_root,
 )
 from edisc_db.session import tenant_tx
+from edisc_evidence.worm import get_bytes
 from edisc_evidence.writer import EvidenceIntegrityError, EvidenceWriter
 from edisc_renderers.report.version import REPORT_RENDERER_VERSION
+from edisc_worker import versions
 from edisc_worker.activities import _ticking
 from edisc_worker.contracts import (
     ErrorClass,
@@ -72,17 +76,19 @@ from edisc_worker.contracts import (
 from edisc_worker.errors import classify, describe, to_application_error
 from edisc_worker.pipeline import CrashHooks
 from edisc_worker.report_loader import ReportLoader
+from edisc_worker.report_pdf import ReportPdfRenderError, child_command, render_pdf
 
 ACTOR = "system:report"
 LIVE = ("requested", "snapshotted", "generating", "generated")
 FINAL = ("completed", "refused", "failed")
 DEFAULT_PAPER = "letter"  # pending mentor (ADR 0018 §17.1): one constant, part of the identity
-NO_TOOLCHAIN = "none"  # the PDF toolchain id until the PDF exists (M16 step 3)
+NO_TOOLCHAIN = versions.NO_TOOLCHAIN  # no report image: no PDF (local/test/ci only)
 
 MEDIA_TYPES = {
     ".json": "application/json",
     ".jsonl": "application/x-ndjson",
     ".html": "text/html; charset=utf-8",
+    ".pdf": "application/pdf",
 }
 
 
@@ -90,15 +96,36 @@ class ReportIntegrityError(RuntimeError):
     """What a report stored or recorded disagrees with what it builds now. Always an incident."""
 
 
-def runtime_identity() -> dict[str, str]:
-    """The report runtime this worker produces (ADR 0018 §6): renderer, PDF toolchain, Unicode."""
+@cache
+def _toolchain(python: str | None, ephemeral: bool) -> str:
+    """Measured once per process, by the interpreter the PDF child runs (ADR 0018 §5.3)."""
+    return versions.report_toolchain_id(ephemeral, python)
+
+
+def runtime_identity(settings: Settings | None = None) -> dict[str, str]:
+    """The report runtime this process produces (ADR 0018 §6): renderer, PDF toolchain, Unicode.
+    Outside the report image the toolchain is `none` (local/test/ci only: reports without a PDF);
+    elsewhere a missing toolchain raises (`ToolchainError`)."""
     import unicodedata
 
+    s = settings or Settings()
     return {
         "renderer_version": REPORT_RENDERER_VERSION,
-        "toolchain_id": NO_TOOLCHAIN,
+        "toolchain_id": _toolchain(s.report_pdf_python, s.env.is_disposable),
         "unicode_version": unicodedata.unidata_version,
     }
+
+
+def new_report_identity(settings: Settings) -> dict[str, str]:
+    """The identity NEW reports are created with: the admitted toolchain when configured
+    (`EDISC_REPORT_TOOLCHAIN_ID`), else this process's own runtime."""
+    ident = runtime_identity(settings) if settings.report_toolchain_id is None else {
+        **runtime_identity(settings.model_copy(update={"report_pdf_python": None})),
+        "toolchain_id": settings.report_toolchain_id,
+    }  # fmt: skip
+    if ident["toolchain_id"] == NO_TOOLCHAIN and not settings.env.is_disposable:
+        raise versions.ToolchainError("reports without a PDF exist only in local/test/ci")
+    return ident
 
 
 @dataclass(frozen=True)
@@ -121,7 +148,7 @@ async def create_report(
 ) -> CreatedReport:
     """A new report in ``requested`` (inside the caller's tenant transaction). Its identity is
     complete only once the snapshot is taken (``snapshot``)."""
-    ident = dict(identity or runtime_identity())
+    ident = dict(identity or new_report_identity(Settings()))
     report_id = new_id()
     await s.execute(
         text(
@@ -463,6 +490,14 @@ class ReportRun:
             identity=self._identity_payload(row),
             image_digest=row.image_digest,
         )
+        if row.toolchain_id != NO_TOOLCHAIN:
+            html = next(r for r in stored if r["name"] == "report.html")
+            pdf = await self._pdf(tenant_id, report_id, html, str(row.paper))
+
+            async def one(data: bytes) -> AsyncIterator[bytes]:
+                yield data
+
+            await sink("report.pdf", lambda: one(pdf), lambda: None)
         async with tenant_tx(self.sessions, tenant_id) as s:
             cur = await self._locked(s, report_id)
             if cur.status != "generating":
@@ -499,6 +534,32 @@ class ReportRun:
         await self.hooks.hit("generated_committed")
         await self._anchor(tenant_id, report_id)
         return "generated"
+
+    async def _pdf(
+        self, tenant_id: uuid.UUID, report_id: uuid.UUID, html: Mapping[str, Any], paper: str
+    ) -> bytes:
+        """`report.pdf` from the STORED `report.html` (ADR 0018 §10): read back from WORM by its
+        pinned VersionId and checked against its recorded SHA-256, then rendered by the PDF child
+        (§6). Nothing is written here: the caller stores the bytes only after the child exited 0
+        with a complete PDF."""
+        limit = self.settings.report_max_html_bytes
+        if html["size"] > limit:
+            raise ReportIntegrityError(f"report {report_id}: report.html exceeds {limit} bytes")
+        body = await get_bytes(
+            self.s3, bucket=self.settings.s3_evidence_bucket,
+            key=f"t/{tenant_id}/reports/{report_id}/report.html", version_id=html["version_id"],
+        )  # fmt: skip
+        if hashlib.sha256(body).hexdigest() != html["sha256"] or len(body) != html["size"]:
+            raise ReportIntegrityError(f"report {report_id}: stored report.html is not its record")
+        await self.hooks.hit("pdf_render")
+        python = self.settings.report_pdf_python or sys.executable
+        return await render_pdf(
+            body,
+            command=child_command(python, paper, self.settings.report_pdf_memory_bytes, limit),
+            timeout_seconds=self.settings.report_pdf_timeout_seconds,
+            max_pdf_bytes=self.settings.report_max_pdf_bytes,
+            concurrency=self.settings.report_pdf_concurrency,
+        )
 
     async def _hooked(self, chunks: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
         first = True
@@ -827,9 +888,12 @@ def _classified[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[
         try:
             return await fn(*args, **kwargs)
         except Exception as exc:
-            kind = (
-                ErrorClass.REPORT_INTEGRITY if isinstance(exc, _REPORT_INTEGRITY) else classify(exc)
-            )
+            if isinstance(exc, _REPORT_INTEGRITY):
+                kind = ErrorClass.REPORT_INTEGRITY
+            elif isinstance(exc, ReportPdfRenderError):
+                kind = ErrorClass.TRANSIENT  # the child died or overran: render again (§6)
+            else:
+                kind = classify(exc)
             raise to_application_error(exc, error_class=kind) from exc
 
     return wrapper

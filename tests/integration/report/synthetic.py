@@ -31,13 +31,18 @@ def unit_keys(conversations: int, days: int = 1) -> list[str]:
     ]
 
 
-def recon_of(key: str) -> str:
-    """Every 97th conversation has a gap (so the capped list has a worst-first order to check)."""
-    return "gap" if int(key[1:7]) % 97 == 0 else "matched"
+def recon_of(key: str, gap_every: int = 97) -> str:
+    """Every ``gap_every``-th conversation has a gap (so the capped list has a worst-first order)."""
+    return "gap" if int(key[1:7]) % gap_every == 0 else "matched"
 
 
 async def sealed_job(
-    sessions: Sessions, s3: S3Client, settings: Settings, t: Tenant, keys: list[str]
+    sessions: Sessions,
+    s3: S3Client,
+    settings: Settings,
+    t: Tenant,
+    keys: list[str],
+    gap_every: int = 97,
 ) -> uuid.UUID:
     job = new_id()
     async with tenant_tx(sessions, t.tenant_id) as s:
@@ -60,17 +65,23 @@ async def sealed_job(
                     " 'done', 5, CASE WHEN r = 'gap' THEN 4 ELSE 5 END, r"
                     " FROM unnest(CAST(:k AS text[]), CAST(:r AS text[])) AS u(k, r)"
                 ),
-                {"t": t.tenant_id, "j": job, "k": chunk, "r": [recon_of(k) for k in chunk]},
+                {
+                    "t": t.tenant_id,
+                    "j": job,
+                    "k": chunk,
+                    "r": [recon_of(k, gap_every) for k in chunk],
+                },
             )
             for key in chunk:
-                gap = recon_of(key) == "gap"
+                gap = recon_of(key, gap_every) == "gap"
                 await append(s, tenant_id=t.tenant_id, stream_id=job, job_id=job,
                              event_type="unit_reconciled", actor="synthetic",
                              payload={"unit_key": key, "expected": 5, "collected": 4 if gap else 5,
-                                      "recon_status": recon_of(key), "file_gaps": 0,
+                                      "recon_status": recon_of(key, gap_every), "file_gaps": 0,
                                       "no_longer_observed": 0},
                              anchor_every=1 << 30)  # fmt: skip
-    status = "completed_with_gaps" if any(recon_of(k) == "gap" for k in keys) else "completed"
+    gaps = any(recon_of(k, gap_every) == "gap" for k in keys)
+    status = "completed_with_gaps" if gaps else "completed"
     async with tenant_tx(sessions, t.tenant_id) as s:
         await append(s, tenant_id=t.tenant_id, stream_id=job, job_id=job, event_type="job_finished",
                      actor="synthetic", payload={"status": status, "units": {}, "paused_ms": 0,

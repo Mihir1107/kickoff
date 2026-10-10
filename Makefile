@@ -21,7 +21,7 @@ TEST_LOCK := $(or $(EDISC_TEST_STACK_LOCK),$(or $(TMPDIR),/tmp)/edisc-test-stack
 STACK_LOCK := uv run python scripts/stack_lock.py
 
 .DEFAULT_GOAL := help
-.PHONY: help hooks sync disk-guard test-env-up test-env-down up up-search up-ci down nuke ps logs migrate lint fmt typecheck test test-integration test-all worker api check
+.PHONY: help hooks sync disk-guard test-env-up test-env-down up up-search up-ci down nuke ps logs migrate lint fmt typecheck test test-integration test-all worker api check test-report-pdf
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -112,6 +112,22 @@ test-integration: disk-guard ## Integration tests on a FRESH ephemeral stack, de
 	  $(MAKE) test-env-down; \
 	else status=$$?; fi; \
 	rm -rf $(TEST_TMP); exit $$status
+
+REPORT_IMAGE ?= edisc-report-test:dev
+REPORT_PDF_OUT ?= $(TEST_TMP)/report-pdf
+VERAPDF = verapdf/cli:v1.30.2@sha256:d5ee329657cf9bc4b2400392dd54c7d0a0ce9980ff6fa2da5590eebeec007cdb
+test-report-pdf: ## M16 PDF in the pinned linux/amd64 report image (needs make test-env-up): toolchain, PDF goldens (admission), font isolation, veraPDF, worker OOM + heartbeats
+	docker buildx build --platform linux/amd64 -f deploy/report-image/Dockerfile --target report-test -t $(REPORT_IMAGE) --load .
+	@mkdir -p $(REPORT_PDF_OUT)
+	docker run --rm --platform linux/amd64 -e EDISC_REPORT_PDF_OUT=/out -e EDISC_RECORD_REPORT_PDF -e CI \
+	  -v $(REPORT_PDF_OUT):/out -v $(CURDIR)/tests/golden:/src/tests/golden $(REPORT_IMAGE) \
+	  python -m pytest tests/unit/report_image -p no:randomly -p no:cacheprovider -rs --timeout 1800
+	docker run --rm --platform linux/amd64 -v $(REPORT_PDF_OUT):/data $(VERAPDF) --flavour 2u --format text /data \
+	  | tee $(REPORT_PDF_OUT)/verapdf.txt
+	@test "$$(grep -c '^PASS' $(REPORT_PDF_OUT)/verapdf.txt)" = "$$(ls $(REPORT_PDF_OUT)/*.pdf | wc -l | tr -d ' ')" \
+	  || { echo "veraPDF: not every report PDF passes PDF/A-2u" >&2; exit 1; }
+	$(MAKE) test-integration-only TESTS=tests/integration/reports/test_report_pdf_worker.py \
+	  PYTEST_ARGS="-p no:randomly -rs" EDISC_REPORT_IMAGE=$(REPORT_IMAGE)
 
 test-integration-only: ## Run integration tests on an ALREADY RUNNING test stack (make test-env-up); keeps it
 	@$(STACK_LOCK) require $(TEST_LOCK)

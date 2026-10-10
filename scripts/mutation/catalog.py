@@ -16,6 +16,9 @@ Rounds (ADR 0015):
 - ``m16-pre3``: the fixes before step 3: marker elements, HTML-invalid code points replaced,
   `conversations.jsonl` above the cap, report goldens, CI shards cut after `-m` and verified from
   the collected set (ADR 0018 §21).
+- ``m16-pdf``: the report PDF child and toolchain (ADR 0018 §5, §6; M16 step 3). The breaks that
+  only a report image can catch (PDF goldens, the child's RLIMIT_AS in main, font isolation) are
+  checked by hand in the image (ADR 0018 §22), not here: this harness runs on the host.
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
   and the blocking-I/O guard ``edisc_core.loopblock``, §24.8), every CPU step moved off the loop, the
   render thread writing nothing (ADR 0015 §24).
@@ -77,6 +80,10 @@ UMU = "tests/unit/renderers/test_report_model.py"
 USH = "tests/unit/test_ci_shards.py"
 ICF = "tests/integration/conftest.py"
 SH = "scripts/ci_shard.py"
+RP = "workers/collection/src/edisc_worker/report_pdf.py"
+VER = "workers/collection/src/edisc_worker/versions.py"
+UPR = "tests/unit/report_pdf/test_pdf_child_runner.py"
+UTM = "tests/unit/report_pdf/test_toolchain_manifest.py"
 RWF = "tests/integration/reports/test_report_workflow.py"
 ROP = "tests/integration/reports/test_report_operations.py"
 
@@ -637,4 +644,37 @@ CATALOG: list[Mutation] = [
       "    @pytest.hookimpl(tryfirst=True)\n", USH, "verify_uses_the_collected_set"),
     m("verify_from_durations", "m16-pre3", SH, "    collected = collect(target)\n",
       "    collected = sorted(load_durations())\n", USH, "verify_uses_the_collected_set"),
+    # ------------------------------------------------------------------ M16 step 3: the PDF
+    m("pdf_concurrency_ignored", "m16-pdf", RP,
+      "        sem = per_loop[concurrency] = asyncio.Semaphore(concurrency)",
+      "        sem = per_loop[concurrency] = asyncio.Semaphore(concurrency + 1)", UPR, "one_at_a_time"),
+    m("pdf_overrun_not_killed", "m16-pdf", RP,
+      "        except TimeoutError as exc:\n            await _kill(proc)\n",
+      "        except TimeoutError as exc:\n", UPR, "overrunning"),
+    m("pdf_cancel_not_killed", "m16-pdf", RP,
+      "        except BaseException:  # cancelled (attempt timed out or worker stopping), oversize, ...\n            await _kill(proc)\n",
+      "        except BaseException:  # cancelled (attempt timed out or worker stopping), oversize, ...\n",
+      UPR, "cancelled_attempt"),
+    m("pdf_truncated_accepted", "m16-pdf", RP, "    if not complete_pdf(out):\n",
+      "    if not out:\n", UPR, "retryable_pdf_error"),
+    m("pdf_nonzero_exit_accepted", "m16-pdf", RP, "    if code != 0:\n", "    if code not in (0, 2):\n",
+      UPR, "retryable_pdf_error"),
+    m("pdf_child_env_leaks", "m16-pdf", RP,
+      "    env = {k: environ[k] for k in _CHILD_ENV if k in environ}",
+      "    env = dict(environ)", UPR, "no_credentials"),
+    m("pdf_output_unbounded", "m16-pdf", RP, "            if size > max_pdf_bytes:\n",
+      "            if False:\n", UPR, "beyond_the_bound"),
+    m("toolchain_without_zlib", "m16-pdf", VER, '"libpng16-16", "libbrotli1", "zlib1g", "libexpat1"',
+      '"libpng16-16", "libbrotli1", "libexpat1"', UTM, "zlib"),
+    m("toolchain_with_installers", "m16-pdf", VER,
+      'INSTALLERS = frozenset({"pip", "setuptools", "wheel"})', "INSTALLERS = frozenset()",
+      UTM, "installers"),
+    m("icc_check_off", "m16-pdf", VER, "    if bundled != vendored:\n", "    if False:\n", UTM, "icc"),
+    m("no_toolchain_in_production", "m16-pdf", VER, "        if env_is_ephemeral:\n",
+      "        if True:\n", UTM, "only_where_allowed"),
+    m("glyph_coverage_off", "m16-pdf", RH,
+      "        not covered(cp) and not ch.isspace()", "        False and not ch.isspace()", UH,
+      "no_vendored_font"),
+    m("pdf_dates_missing", "m16-pdf", RH, "        *dates,\n", "", UH, "seal_dates"),
+    m("page_identity_missing", "m16-pdf", RH, "        _page_identity(doc),\n", "", UH, "seal_dates"),
 ]  # fmt: skip

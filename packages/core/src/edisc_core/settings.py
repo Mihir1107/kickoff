@@ -264,6 +264,39 @@ class Settings(BaseSettings):
         ge=1,
         description="report activities per report worker process (ADR 0018 §6)",
     )
+    report_pdf_concurrency: int = Field(
+        default=1,
+        ge=1,
+        description="PDF children at once per report worker process (ADR 0018 §6: 1; scale out by"
+        " adding workers, never by raising this)",
+    )
+    report_pdf_memory_bytes: int = Field(
+        default=5 * 2**29,  # 2.5 GiB, under the 3 GiB report container
+        ge=64 * 2**20,
+        description="RLIMIT_AS of the PDF child (ADR 0018 §6, amendment 7)",
+    )
+    report_pdf_timeout_seconds: float = Field(
+        default=900, gt=0, description="wall-clock limit of one PDF child, then it is killed"
+    )
+    report_max_html_bytes: int = Field(
+        default=4 * 2**20,
+        ge=1,
+        description="report.html above this is an integrity failure, never rendered (ADR 0018 §6)",
+    )
+    report_max_pdf_bytes: int = Field(
+        default=64 * 2**20, ge=1, description="a PDF child writing more than this is killed"
+    )
+    report_pdf_python: str | None = Field(
+        default=None,
+        description="the interpreter of the PDF child (the report image sets"
+        " /opt/edisc/venv/bin/python); default: this process's interpreter",
+    )
+    report_toolchain_id: str | None = Field(
+        default=None,
+        description="the PDF toolchain id NEW reports are created with (the admitted report image's"
+        " id, deploy/render-images.json); unset: this process's own runtime ('none' outside the"
+        " image, local/test/ci only)",
+    )
     test_report_barrier: str | None = Field(
         default=None,
         description="TEST ONLY (EDISC_ENV test/ci): '<point>:<directory>', like"

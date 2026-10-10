@@ -15,6 +15,7 @@ dependencies = [
     "fastapi>=0.142.2",
     "httpx>=0.28.1",
     "pyjwt[crypto]>=2.15.1",
+    "types-aiobotocore[s3]>=3.9.1",
     "uvicorn[standard]>=0.54.0",
 ]
 

@@ -1,0 +1,15 @@
+# report image build context (deploy/report-image/Dockerfile): source only. apps/web belongs to
+# another branch and session and is never part of a backend image.
+apps/web
+**/node_modules
+.venv
+**/__pycache__
+**/.mypy_cache
+**/.ruff_cache
+**/.pytest_cache
+.git
+.env
+.env.*
+test-stack-logs.txt
+spikes
+docs
