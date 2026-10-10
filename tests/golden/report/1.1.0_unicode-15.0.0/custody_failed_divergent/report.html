@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta content="default-src &#x27;none&#x27;; style-src &#x27;sha256-X0HVtDgeZz+U+ElsgLy5oOXsVRK/LCWsYgvRjvNgczc=&#x27;; img-src &#x27;none&#x27;; base-uri &#x27;none&#x27;; form-action &#x27;none&#x27;" http-equiv="Content-Security-Policy">
+<meta content="width=device-width, initial-scale=1" name="viewport">
+<title>Collection report</title>
+<style>html{font-family:system-ui,sans-serif;font-size:14px;color:#111;background:#fff;margin:0}body{max-width:60rem;margin:0 auto;padding:1rem}h1{font-size:1.4rem}h2{font-size:1.1rem;margin:1.4rem 0 .3rem;border-bottom:1px solid #ccc}.banner{border:2px solid #000;padding:.6rem .8rem;margin:.6rem 0;font-weight:700}.banner.notclean{background:#fff0f0;border-color:#a00}.banner.clean{background:#f0fff0;border-color:#0a0}table{border-collapse:collapse;width:100%;margin:.3rem 0;table-layout:fixed}th,td{border:1px solid #bbb;padding:2px 5px;text-align:left;vertical-align:top;overflow-wrap:anywhere}th{background:#f3f3f3}.src{color:#666;font-weight:400;font-size:.85em}.more{color:#a00;font-style:italic}bdi{unicode-bidi:isolate}.cp{font-family:monospace;font-size:.78em;font-weight:400;font-style:normal;color:#fff;background:#5a0a8a;border-radius:2px;padding:0 2px;margin:0 1px;white-space:nowrap;unicode-bidi:isolate;direction:ltr}</style>
+</head>
+<body>
+<h1>Collection report</h1>
+<div class="banner notclean">CUSTODY VERIFICATION FAILED<br>RECORDS DISAGREE: 2 divergence(s) between the chain and the database<br>NOT COMPLETE: status completed</div>
+<h2>Job <span class="src">source: job_chain</span></h2><table><tr><th>field</th><th>value</th></tr><tr><td>id</td><td><bdi>0192f3a4-7c1e-7d2a-9b5e-3f0c2d1e4a5b</bdi></td></tr><tr><td>status</td><td><bdi>completed</bdi></td></tr><tr><td>sealed_at</td><td><bdi>2026-01-06T12:34:56.000000Z</bdi></td></tr><tr><td>requested_by</td><td><bdi>user:alice</bdi></td></tr><tr><td>status_database</td><td><bdi>completed</bdi></td></tr><tr><td>clean</td><td>no</td></tr><tr><td>clean_basis</td><td><bdi>source</bdi></td></tr><tr><td>archive_caveat</td><td><bdi></bdi></td></tr><tr><td>unit_day_zone</td><td><bdi>UTC</bdi></td></tr><tr><td>unit_day_zone_source</td><td><bdi>job_chain</bdi></td></tr></table>
+<h2>Access <span class="src">source: job_chain</span></h2><table><tr><th>field</th><th>value</th></tr><tr><td>connector</td><td><bdi>dummy</bdi></td></tr><tr><td>connector_version</td><td><bdi>0.4.0</bdi></td></tr><tr><td>connection_id</td><td><bdi>conn-1</bdi></td></tr><tr><td>plan_tier</td><td><bdi>pro</bdi></td></tr><tr><td>granted_scopes</td><td><bdi>[&#x27;channels:history&#x27;]</bdi></td></tr><tr><td>blind_spots</td><td><bdi>[&#x27;private channels&#x27;]</bdi></td></tr></table>
+<h2>Exceptions <span class="src">source: job_chain</span></h2>
+<p>Units with exceptions (worst status first):</p>
+<p>0 total; showing the 0 worst</p><table><tr><th>status</th><th>unit</th><th>expected</th><th>collected</th><th>error</th></tr></table>
+<p>Item-level observations:</p>
+<p>0 total; showing the 0 worst</p><table><tr><th>kind</th><th>unit</th><th>item</th><th>file</th><th>reason</th></tr></table>
+<h2>Counts <span class="src">source: job_chain</span></h2>
+<p>Units by status (every value, zeros included):</p>
+<table><tr><th>value</th><th>count</th></tr><tr><td><bdi>pending</bdi></td><td>0</td></tr><tr><td><bdi>running</bdi></td><td>0</td></tr><tr><td><bdi>done</bdi></td><td>4</td></tr><tr><td><bdi>failed</bdi></td><td>0</td></tr><tr><td><bdi>retry_later</bdi></td><td>0</td></tr><tr><td><bdi>paused</bdi></td><td>0</td></tr></table>
+<p>Units by reconciliation status:</p>
+<table><tr><th>value</th><th>count</th></tr><tr><td><bdi>pending</bdi></td><td>0</td></tr><tr><td><bdi>matched</bdi></td><td>4</td></tr><tr><td><bdi>gap</bdi></td><td>0</td></tr><tr><td><bdi>surplus</bdi></td><td>0</td></tr><tr><td><bdi>unverifiable</bdi></td><td>0</td></tr><tr><td><bdi>failed</bdi></td><td>0</td></tr><tr><td><bdi>access_lost</bdi></td><td>0</td></tr><tr><td><bdi>not_applicable</bdi></td><td>0</td></tr><tr><td><bdi>matched_against_archive</bdi></td><td>0</td></tr></table>
+<p>Item observations by kind:</p>
+<table><tr><th>value</th><th>count</th></tr><tr><td><bdi>file_unavailable</bdi></td><td>0</td></tr><tr><td><bdi>file_became_available</bdi></td><td>0</td></tr><tr><td><bdi>access_lost</bdi></td><td>0</td></tr><tr><td><bdi>access_restored</bdi></td><td>0</td></tr><tr><td><bdi>no_longer_observed</bdi></td><td>0</td></tr><tr><td><bdi>observed_again</bdi></td><td>0</td></tr></table>
+<h2>Conversations <span class="src">source: job_chain</span></h2>
+<p>Per conversation (worst status first):</p>
+<p>1 total; showing the 1 worst</p><table><tr><th>worst status</th><th>conversation</th><th>units</th><th>expected</th><th>collected</th><th>file gaps</th></tr><tr><td><bdi>matched</bdi></td><td><bdi>C00000</bdi></td><td><bdi>4</bdi></td><td><bdi>20</bdi></td><td><bdi>20</bdi></td><td><bdi>0</bdi></td></tr></table>
+<h2>Pauses <span class="src">source: job_chain</span></h2><table><tr><th>field</th><th>value</th></tr><tr><td>never_resumed</td><td>0</td></tr></table>
+<h2>Versions <span class="src">source: job_chain</span></h2><table><tr><th>field</th><th>value</th></tr><tr><td>connector_version</td><td><bdi>0.4.0</bdi></td></tr><tr><td>normalizer_versions</td><td><bdi>[&#x27;0.2.0&#x27;]</bdi></td></tr><tr><td>report_renderer</td><td><bdi>1.1.0</bdi></td></tr><tr><td>unicode</td><td><bdi>15.0.0</bdi></td></tr><tr><td>pdf_toolchain</td><td><bdi></bdi></td></tr><tr><td>worker_image</td><td><bdi>UNKNOWN (not recorded)</bdi></td></tr></table>
+<h2>Custody verification <span class="src">source: job_chain</span></h2><table><tr><th>field</th><th>value</th></tr><tr><td>ok</td><td>no</td></tr><tr><td>errors</td><td><bdi>[&#x27;broken&#x27;]</bdi></td></tr></table>
+<h2>Evidence store <span class="src">source: snapshot</span></h2><table><tr><th>field</th><th>value</th></tr><tr><td>objects</td><td>4</td></tr><tr><td>not_complete</td><td>0</td></tr></table>
+<h2>Renders <span class="src">source: snapshot</span></h2><table><tr><th>field</th><th>value</th></tr><tr><td>renders</td><td>0</td></tr><tr><td>file</td><td><bdi>{&#x27;name&#x27;: &#x27;renders.jsonl&#x27;, &#x27;sha256&#x27;: &#x27;e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&#x27;, &#x27;size&#x27;: 0, &#x27;rows&#x27;: 0}</bdi></td></tr></table>
+<h2>Divergences <span class="src">source: job_chain</span></h2>
+<table><tr><th>kind</th><th>subject</th><th>chain says</th><th>database says</th></tr><tr><td><bdi>unit_differs</bdi></td><td><bdi>u0</bdi></td><td><bdi>1</bdi></td><td><bdi>2</bdi></td></tr><tr><td><bdi>unit_differs</bdi></td><td><bdi>u1</bdi></td><td><bdi>1</bdi></td><td><bdi>2</bdi></td></tr></table>
+<h2>Integrity <span class="src">source: snapshot</span></h2><table><tr><th>field</th><th>value</th></tr><tr><td>snapshot_digest</td><td><bdi>3f9a1c0d3f9a1c0d3f9a1c0d3f9a1c0d3f9a1c0d3f9a1c0d3f9a1c0d3f9a1c0d</bdi></td></tr><tr><td>identity</td><td><bdi>{&#x27;paper&#x27;: &#x27;letter&#x27;}</bdi></td></tr></table>
+<table><tr><th>file</th><th>rows</th><th>bytes</th><th>sha256</th></tr><tr><td><bdi>observations.jsonl</bdi></td><td>0</td><td>0</td><td><bdi>e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855</bdi></td></tr><tr><td><bdi>renders.jsonl</bdi></td><td>0</td><td>0</td><td><bdi>e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855</bdi></td></tr><tr><td><bdi>units.jsonl</bdi></td><td>4</td><td>1,464</td><td><bdi>a5ee913b17bce43165a01221fb09fcd9f506bb287a2501a7c4aa8c6493f4fb72</bdi></td></tr></table>
+<p class="src">report renderer 1.1.0</p>
+</body>
+</html>

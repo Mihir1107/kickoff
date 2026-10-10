@@ -164,9 +164,13 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - The pure model is `edisc_renderers.report.model` and the pure HTML builder `edisc_renderers.report.html`
   (no DB/S3/clock: the purity test covers both; the offline verifier imports the model). `report.html`
   renders `report.json`: no template engine, the only text path is `escape`; every user string is
-  revealed (bidi controls REPLACED by `[U+XXXX]`, other Cf/Cc/Zl/Zp kept + marker), escaped and
-  `<bdi>`-wrapped; one constant inline `<style>` whose SHA-256 is in the page CSP; byte-identical per
-  renderer version. The loader `edisc_worker.report_loader` streams every file;
+  revealed (bidi controls and HTML-invalid code points -- NUL, C0 but tab/LF/CR, DEL, C1,
+  noncharacters, lone surrogates -- REPLACED by a marker; other Cf/Zl/Zp and tab/LF/CR kept + marker),
+  escaped and `<bdi>`-wrapped. A marker is an ELEMENT (`<span class="cp">U+XXXX</span>`), never
+  text. Pages must parse under html5lib STRICT. One constant inline `<style>` whose SHA-256 is in the
+  page CSP; byte-identical per renderer version (`REPORT_RENDERER_VERSION`, bump on any byte change;
+  goldens `tests/golden/report/<version>_unicode-<u>/`, recorded with `EDISC_RECORD_REPORT=1`, never
+  overwritten, refused in CI). Above 1,000 conversations `conversations.jsonl` is written and named. The loader `edisc_worker.report_loader` streams every file;
   everything a report states that can change after the request goes into the write-once snapshot
   (renders, retention gaps, lock settings, the audit head, the job's own evidence statistics).
 - Lifecycle in `edisc_worker.reports` (status fences in the same transaction as each event, like

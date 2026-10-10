@@ -51,19 +51,35 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         if "tests/integration" in str(item.path):
             item.add_marker(pytest.mark.integration)
-    # CI sharding (ADR 0015 §24): keep only this job's balanced shard, deselect the rest. Every
-    # collected test lands in exactly one shard (scripts/ci_shard.assign), so the shards together
-    # run the whole suite once. Off (EDISC_CI_SHARDS unset or <= 1) outside the sharded CI job.
-    shards = int(os.environ.get("EDISC_CI_SHARDS") or "0")
-    if shards <= 1:
-        return
-    from scripts.ci_shard import assign, load_durations
 
-    shard = int(os.environ["EDISC_CI_SHARD"])
-    where = assign([i.nodeid for i in items], shards, load_durations())
-    keep = [i for i in items if where[i.nodeid] == shard]
-    config.hook.pytest_deselected(items=[i for i in items if where[i.nodeid] != shard])
-    items[:] = keep
+
+class _CiShard:
+    """CI sharding (ADR 0015 §24): keep only this job's balanced shard, deselect the rest. Every
+    collected test lands in exactly one shard (scripts/ci_shard.assign), so the shards together run
+    the whole suite once. Off (EDISC_CI_SHARDS unset or <= 1) outside the sharded CI job.
+
+    `trylast`: the shards are cut from the tests that SURVIVE `-m` / `-k` deselection, i.e. exactly
+    the set `scripts/ci_shard.py --verify` collects. (Before, this ran first and assigned the
+    deselected `elasticsearch` test too, so the jobs' shards differed from the verified ones.)"""
+
+    @pytest.hookimpl(trylast=True)
+    def pytest_collection_modifyitems(
+        self, config: pytest.Config, items: list[pytest.Item]
+    ) -> None:
+        shards = int(os.environ.get("EDISC_CI_SHARDS") or "0")
+        if shards <= 1:
+            return
+        from scripts.ci_shard import assign, load_durations
+
+        shard = int(os.environ["EDISC_CI_SHARD"])
+        where = assign([i.nodeid for i in items], shards, load_durations())
+        keep = [i for i in items if where[i.nodeid] == shard]
+        config.hook.pytest_deselected(items=[i for i in items if where[i.nodeid] != shard])
+        items[:] = keep
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.pluginmanager.register(_CiShard(), "edisc-ci-shard")
 
 
 # ------------------------------------------------------------------ failure artifacts (CI)

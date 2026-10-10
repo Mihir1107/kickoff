@@ -1,2 +1,4 @@
 # rendered RSMF goldens are compared byte for byte (CRLF line endings): never convert them
 tests/golden/rsmf/** binary
+# report goldens hold raw CR/tab/NUL-class test characters in report.html: never convert them
+tests/golden/report/** binary

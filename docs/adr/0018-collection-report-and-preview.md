@@ -113,6 +113,8 @@ RECORDED times (seal, pauses, the snapshot's S3 observation).
   `[U+XXXX]` marker (kept, they reorder the text around them and the marker too: S1 rendered
   `‮evil.exe‬` as `exe.live[E202+U]`); zero-width and other `Cf` characters, `Cc`, `Zl`,
   `Zp` stay and get the marker after them. The marker is ASCII, so a vendored font always covers it.
+  **Amended (§21.1, §21.2):** the marker is an ELEMENT (`<span class="cp">U+XXXX</span>`, a boxed
+  style), never text; code points invalid in HTML are replaced too.
 - Identity: `REPORT_RENDERER_VERSION`, `PREVIEW_RENDERER_VERSION`, Unicode (+ tzdata for the
   preview's time-zone days only).
 #### 3.3 Times in the report (D11)
@@ -738,3 +740,39 @@ the same `report_files` / `report_generated`; nothing in the stream changes shap
 8. **Not built here (by plan):** the OOM crash point needs the PDF child (step 3); the API routes,
    the report package and `edisc-verify` recomputation are step 5; manual regeneration (`POST`) is
    step 5.
+
+## 21. Fixes before step 3 (2026-10-10), report renderer 1.1.0
+1. **Markers are elements.** A `[U+XXXX]` text marker was ambiguous: a name that literally reads
+   "[U+202E]" rendered exactly like a replaced U+202E. The marker is now `<span class="cp">U+202E</span>`
+   (`html.marker`), styled as a white-on-dark box (`.cp`, isolated, left-to-right) that prints too;
+   user text is escaped, so it can never produce the element. Tested: the literal text and the real
+   character give different bytes and DOMs (strict parse: text node vs one `span.cp`), a forged
+   `<span class="cp">` in user text stays text wherever it sits.
+2. **HTML-invalid code points are replaced, not kept.** NUL, the C0 controls except tab, LF and CR
+   (form feed included), DEL and C1, noncharacters (U+FDD0-U+FDEF, U+xFFFE/U+xFFFF of every plane) and
+   lone surrogates are dropped and shown only as their marker (`html.invalid_in_html`). Tab, LF, CR
+   and the other Cf/Zl/Zp stay with the marker after them. A lone surrogate can reach the pure builder
+   only from decoded escaped JSON (Postgres refuses it in text and jsonb): the page still builds and
+   encodes, a valid pair beside it stays its character; `report.json` refuses it loudly
+   (`CanonicalizationError`: RFC 8785 cannot represent it, and user strings are never altered in the
+   data). Every page is parsed by html5lib in STRICT mode (any parse error, invalid code points
+   included, raises) as well as `html.parser`; hypothesis fuzzes every class above (they are drawn
+   explicitly: the default alphabet never yields surrogates) and checks that the markers appear in
+   order and that nothing else of the input is lost or altered.
+3. **`conversations.jsonl`.** Built now, because above the cap the report names it. `report.json`
+   gains `conversations` (per conversation: units, worst status, units per status, expected,
+   collected, file gaps; worst status first then id; exact total). At most 1,000 conversations: all
+   listed, no file. Above: the 1,000 worst, the remainder named by `conversations.jsonl` and its
+   SHA-256; the file holds every conversation in id order, from a second pass over the units in file
+   order (memory O(page + cap); `ConversationFold`). `conversations_section` refuses to name the file
+   when it was not built. Tested at exactly 1,000 and 1,001 conversations (two units each) through the
+   loader on a synthetic sealed job, and stored and sealed through `ReportRun` at 1,001.
+4. **Report goldens** (`tests/golden/report/<renderer>_unicode-<unicode>/<case>/`: `report.json`,
+   `report.html`, `index.json`), same rules as the RSMF goldens: `EDISC_RECORD_REPORT=1` writes only a
+   missing case directory, never overwrites, and fails under `CI`. Six fixed cases (clean, gaps and
+   failures with every hard string, archive, a pre-change job, custody failure with divergences and a
+   retention gap, both caps exceeded). They are the input of the PDF goldens (step 3).
+5. Renderer **1.1.0** (HTML and `report.json` bytes changed). Mutation round `m16-pre3` (14 breaks)
+   plus the updated `m16-html` entries; all caught. Fix 5 (CI shards) is ADR 0015 §24.10; fix 6 is the
+   BACKLOG item for SCRAM bursts (pool minimum size, warm-up), open together with the loop-guard
+   exemption it would remove.

@@ -369,6 +369,75 @@ def unit_order(row: Mapping[str, Any]) -> tuple[str, str, str]:
     return (str(row.get("conversation_id") or ""), str(row.get("day") or ""), str(row["unit_key"]))
 
 
+def unit_severity(row: Mapping[str, Any]) -> str:
+    """A `units.jsonl` row's place in the severity order: "failed" for a failed unit, else its
+    recon status (§4.6)."""
+    return "failed" if row["status"] == UnitStatus.FAILED.value else str(row["recon_status"])
+
+
+def worst(statuses: Iterable[str]) -> str | None:
+    return min(statuses, key=lambda s: (_RANK.get(s, len(SEVERITY)), s), default=None)
+
+
+class ConversationFold:
+    """Per-conversation aggregates over `units.jsonl` rows IN FILE ORDER (conversation id first), so
+    a conversation is complete when the next one starts: memory O(1) in the number of units. Units
+    with no conversation (the directory unit) are not part of any conversation row.
+
+    A `conversations.jsonl` row (§1): conversation id, units, the worst unit status, units per recon
+    status (zeros omitted), expected, collected and file gaps summed (null values count 0)."""
+
+    def __init__(self) -> None:
+        self._cur: dict[str, Any] | None = None
+        self.count = 0
+
+    def add(self, row: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Fold one unit row; returns the previous conversation's row when this one starts a new
+        conversation."""
+        conv = row.get("conversation_id")
+        if not conv:
+            return None
+        done = None
+        if self._cur is not None and self._cur["conversation_id"] != conv:
+            done = self._close()
+        if self._cur is None:
+            self._cur = {"conversation_id": conv, "units": 0, "statuses": Counter(),
+                         "expected": 0, "collected": 0, "file_gaps": 0}  # fmt: skip
+        cur = self._cur
+        cur["units"] += 1
+        cur["statuses"][unit_severity(row)] += 1
+        for k in ("expected", "collected", "file_gaps"):
+            cur[k] += int(row.get(k) or 0)
+        return done
+
+    def finish(self) -> dict[str, Any] | None:
+        return None if self._cur is None else self._close()
+
+    def _close(self) -> dict[str, Any]:
+        cur, self._cur = self._cur, None
+        if cur is None:
+            raise RuntimeError("no open conversation")
+        self.count += 1
+        statuses: Counter[str] = cur["statuses"]
+        return {
+            "conversation_id": cur["conversation_id"], "units": cur["units"],
+            "worst_status": worst(statuses), "units_by_status": dict(sorted(statuses.items())),
+            "expected": cur["expected"], "collected": cur["collected"],
+            "file_gaps": cur["file_gaps"],
+        }  # fmt: skip
+
+
+def conversations_section(capped: Capped, file: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The per-conversation list in `report.json` (§1, §4.6): every conversation when there are at
+    most CAP of them (and no file), else the CAP worst with the rest named by `conversations.jsonl`
+    and its SHA-256. Above the cap the file MUST exist: a report never names a missing file."""
+    if capped.total > capped.cap and file is None:
+        raise ValueError(
+            f"{capped.total} conversations need conversations.jsonl (cap {capped.cap})"
+        )
+    return {"source": "job_chain", **capped.record(file)}
+
+
 def observation_row(
     *, unit_key: str, item_id: str, kind: str, source_item_id: str, derived: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -532,6 +601,7 @@ class ReportInputs:
     files: Sequence[JsonlDigest]
     evidence: Mapping[str, Any]  # retain-until range of the job's evidence
     identity: Mapping[str, Any]
+    conversations: Mapping[str, Any] = field(default_factory=dict)  # `conversations_section`
 
 
 def report_document(inp: ReportInputs) -> dict[str, Any]:
@@ -593,6 +663,8 @@ def report_document(inp: ReportInputs) -> dict[str, Any]:
             "units_by_recon_status": zero_rows((s.value for s in ReconStatus), inp.recon_counts),
             **{k: int(v) for k, v in sorted(inp.totals.items())},
         },
+        "conversations": dict(inp.conversations)
+        or {"source": "job_chain", "rows": [], "total": 0, "more": 0, "more_in": None},
         "pauses": {
             "source": "job_chain",
             "pauses": [p.record() for p in inp.chain.pauses],

@@ -92,8 +92,12 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - The render loader's `_index` still fetches every `job_items` link of a conversation in one query
   (decoded on the event loop by asyncpg): bounded only by the conversation's size. The day-bounded
   loader of ADR 0018 step 6 (`RenderLoader.day_slice`) should be used for renders too.
-- asyncpg authenticates every NEW connection with SCRAM-SHA-256 on the event loop (4,096 PBKDF2
-  iterations in Python-level HMAC calls: tens of ms each, 285 ms seen during a burst of new
-  connections under load). Production workers open pooled connections on demand; pre-warm the pools
-  at worker start (or cap pool growth per second) so a burst of activities cannot stall heartbeats.
-  The test loop guard records this as `library` time (ADR 0015 §24).
+- **[open; paired with the loop-guard exemption]** Fix the SCRAM connection bursts. asyncpg
+  authenticates every NEW connection with SCRAM-SHA-256 on the event loop (4,096 PBKDF2 iterations in
+  Python-level HMAC calls: tens of ms each, 285 ms seen during a burst of new connections under
+  load). Production workers open pooled connections on demand, so a burst of activities can stall
+  heartbeats. Fix: a pool MINIMUM size (connections opened before the worker polls, and kept), a
+  WARM-UP at worker and API start (open the minimum in the background before serving), and/or a cap
+  on new connections per second. The test loop guard currently EXEMPTS this as `library` time
+  (`edisc_core.loopguard`, ADR 0015 §24.3 and §24.7); when the pools are warmed, narrow or remove that
+  exemption so a regression is caught again. Both halves stay open until done together.

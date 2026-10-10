@@ -234,3 +234,58 @@ def test_nothing_looks_clean_that_is_not(
         assert doc["banner"][0].startswith("RECORDS DISAGREE")
     values = [r["value"] for r in doc["counts"]["units_by_recon_status"]]
     assert values[: len(ReconStatus)] == [s.value for s in ReconStatus]
+
+
+# ------------------------------------------------------------------ conversations (fix 3, §1, §4.6)
+def _unit(conv: str | None, day: int, *, status: str = "done", recon: str = "matched",
+          expected: int | None = 3, collected: int | None = 3) -> dict[str, object]:  # fmt: skip
+    key = f"{conv}/2026-01-{day:02d}" if conv else "directory"
+    return {"unit_key": key, "conversation_id": conv, "status": status, "recon_status": recon,
+            "expected": expected, "collected": collected, "file_gaps": 0}  # fmt: skip
+
+
+def test_a_conversation_row_folds_its_units_in_file_order() -> None:
+    fold = m.ConversationFold()
+    rows = [_unit(None, 0), _unit("A", 1), _unit("A", 2, recon="gap", collected=2),
+            _unit("A", 3, status="failed", recon="failed", expected=None, collected=None),
+            _unit("B", 1)]  # fmt: skip
+    done = [r for r in (fold.add(u) for u in rows) if r is not None]
+    last = fold.finish()
+    assert last is not None and fold.count == 2
+    a, b = (*done, last)
+    assert a == {"conversation_id": "A", "units": 3, "worst_status": "failed",
+                 "units_by_status": {"failed": 1, "gap": 1, "matched": 1},
+                 "expected": 6, "collected": 5, "file_gaps": 0}  # fmt: skip
+    assert b["conversation_id"] == "B" and b["worst_status"] == "matched"
+
+
+def _conversations(n: int) -> m.Capped:
+    capped = m.Capped()
+    fold = m.ConversationFold()
+    for i in range(n):
+        recon = "gap" if i % 97 == 0 else "matched"
+        for row in (fold.add(_unit(f"C{i:05d}", 1, recon=recon)),):
+            if row is not None:
+                capped.add(row["worst_status"], (row["conversation_id"],), row)
+    last = fold.finish()
+    assert last is not None
+    capped.add(last["worst_status"], (last["conversation_id"],), last)
+    return capped
+
+
+def test_at_the_cap_every_conversation_is_listed_and_no_file_is_named() -> None:
+    section = m.conversations_section(_conversations(m.CAP), None)
+    assert section["total"] == 1_000 and len(section["rows"]) == 1_000
+    assert section["more"] == 0 and section["more_in"] is None
+    assert section["rows"][0]["worst_status"] == "gap"  # worst first
+
+
+def test_above_the_cap_the_remainder_is_named_by_file_and_the_file_is_required() -> None:
+    capped = _conversations(m.CAP + 1)
+    with pytest.raises(ValueError, match=r"conversations\.jsonl"):
+        m.conversations_section(capped, None)  # a report never names a file that does not exist
+    file = {"name": "conversations.jsonl", "sha256": "c" * 64}
+    section = m.conversations_section(capped, file)
+    assert section["total"] == 1_001 and len(section["rows"]) == 1_000 and section["more"] == 1
+    assert section["more_in"] == file
+    assert all(r["worst_status"] == "gap" for r in section["rows"][:11])  # the 11 gaps lead

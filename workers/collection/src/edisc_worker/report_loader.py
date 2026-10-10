@@ -10,7 +10,8 @@ Passes, each in keyset pages with short transactions and no transaction across S
    (`compare_units`): those are the divergences, and the chain fact is what gets stated.
 4. **Files:** `units.jsonl` (file order: conversation, day, unit key), `observations.jsonl` (unit
    key, item id), `renders.jsonl` (render id, from the snapshot), `conversations.jsonl` (only when
-   there are more conversations than the cap), each line hashed as it streams; then `report.json`.
+   there are more conversations than the cap: a second pass over the units in file order), each
+   line hashed as it streams; then `report.json` and `report.html`.
 
 Memory is O(page + cap + divergent units). CPU-bound folding runs in worker threads (ADR 0015 §24).
 """
@@ -93,11 +94,33 @@ class _UnitsPass:
     recon_counts: Counter[str] = field(default_factory=Counter)
     totals: Counter[str] = field(default_factory=Counter)
     exceptions: m.Capped = field(default_factory=m.Capped)
-    conversations: int = 0
+    conversations: m.ConversationFold = field(default_factory=m.ConversationFold)
+    conversations_capped: m.Capped = field(default_factory=m.Capped)
 
 
 def _event_row(r: Any) -> m.ChainEvent:
     return m.ChainEvent(r.seq, r.event_type, r.actor, r.created_at, r.payload)
+
+
+def unit_rows_page(
+    rows: Sequence[Mapping[str, Any]], *, zone: str, archive_backed: bool,
+    stated: Mapping[str, m.UnitFact], divergent: set[str],
+) -> list[dict[str, Any]]:  # fmt: skip
+    """The `units.jsonl` rows of one page. Pure CPU work: only ever called in a worker thread
+    (`OFF_LOOP`, ADR 0015 §24)."""
+    out = []
+    for r in rows:
+        key = r["unit_key"]
+        fact: m.UnitFact | None = stated.get(key)
+        if fact is None and key not in divergent:
+            # bucket agreed: the database fact IS the chain fact
+            fact = m.unit_fact_from_row(
+                r, no_longer_observed=r["nlo"], archive_backed=archive_backed
+            )
+        out.append(
+            m.unit_row(r, stated=fact, zone=zone, scopes=r["scopes"], divergent=key in divergent)
+        )
+    return out
 
 
 class ReportLoader:
@@ -330,38 +353,58 @@ class ReportLoader:
         self, *, zone: str, archive_backed: bool, stated: Mapping[str, m.UnitFact],
         divergent: set[str], acc: _UnitsPass, digest: m.JsonlDigest,
     ) -> AsyncIterator[bytes]:  # fmt: skip
-        last_conv: str | None = None
-
         def page(rows: Sequence[Mapping[str, Any]]) -> bytes:
-            nonlocal last_conv
             out = []
-            for r in rows:
-                key = r["unit_key"]
-                fact: m.UnitFact | None = stated.get(key)
-                if fact is None and key not in divergent:
-                    # bucket agreed: the database fact IS the chain fact
-                    fact = m.unit_fact_from_row(
-                        r, no_longer_observed=r["nlo"], archive_backed=archive_backed
-                    )
-                row = m.unit_row(
-                    r, stated=fact, zone=zone, scopes=r["scopes"], divergent=key in divergent
-                )
+            for row in unit_rows_page(rows, zone=zone, archive_backed=archive_backed,
+                                       stated=stated, divergent=divergent):  # fmt: skip
                 acc.status_counts[row["status"]] += 1
                 if row["kind"] != "directory":
                     acc.recon_counts[row["recon_status"]] += 1
                 for k in ("expected", "collected", "file_gaps"):
                     acc.totals[k] += int(row[k] or 0)
-                severity = "failed" if row["status"] == "failed" else row["recon_status"]
+                severity = m.unit_severity(row)
                 if severity in m.EXCEPTION_RECON:
                     acc.exceptions.add(severity, m.unit_order(row), row)
-                if row["conversation_id"] and row["conversation_id"] != last_conv:
-                    acc.conversations += 1
-                    last_conv = row["conversation_id"]
+                conv = acc.conversations.add(row)
+                if conv is not None:
+                    acc.conversations_capped.add(
+                        conv["worst_status"], (conv["conversation_id"],), conv
+                    )
                 out.append(digest.add(m.jsonl_line(row)))
             return b"".join(out)
 
         async for rows in self._unit_pages("file"):
             yield await asyncio.to_thread(page, rows)
+        last = acc.conversations.finish()
+        if last is not None:
+            acc.conversations_capped.add(last["worst_status"], (last["conversation_id"],), last)
+
+    async def conversations_file(
+        self, *, zone: str, archive_backed: bool, stated: Mapping[str, m.UnitFact],
+        divergent: set[str], capped: m.Capped, digest: m.JsonlDigest,
+    ) -> AsyncIterator[bytes]:  # fmt: skip
+        """`conversations.jsonl` (§1): one row per conversation in conversation-id order, folded
+        from a second pass over the units in file order (memory O(page + cap))."""
+        fold = m.ConversationFold()
+
+        def take(conv: dict[str, Any] | None, out: list[bytes]) -> None:
+            if conv is not None:
+                capped.add(conv["worst_status"], (conv["conversation_id"],), conv)
+                out.append(digest.add(m.jsonl_line(conv)))
+
+        def page(rows: Sequence[Mapping[str, Any]]) -> bytes:
+            out: list[bytes] = []
+            for row in unit_rows_page(rows, zone=zone, archive_backed=archive_backed,
+                                       stated=stated, divergent=divergent):  # fmt: skip
+                take(fold.add(row), out)
+            return b"".join(out)
+
+        async for rows in self._unit_pages("file"):
+            yield await asyncio.to_thread(page, rows)
+        tail: list[bytes] = []
+        take(fold.finish(), tail)
+        if tail:
+            yield b"".join(tail)
 
     async def observations_file(
         self, counts: Counter[str], by_reason: Counter[tuple[str, str]], capped: m.Capped,
@@ -662,6 +705,23 @@ class ReportLoader:
         units: _UnitsPass = state["units"]
         obs_counts, by_reason, obs_capped = state["obs"]
         files = [state["units_digest"], state["obs_digest"], state["renders_digest"]]
+        conversations = units.conversations_capped
+        conversations_file: dict[str, Any] | None = None
+        if units.conversations.count > m.CAP:
+            # above the cap the report names the remainder by file: the file must exist (§1, §4.6)
+            def conversations_stream() -> AsyncIterator[bytes]:
+                state["conv"] = m.Capped()
+                state["conv_digest"] = m.JsonlDigest("conversations.jsonl")
+                return self.conversations_file(
+                    zone=zone, archive_backed=archive_backed, stated=stated, divergent=divergent,
+                    capped=state["conv"], digest=state["conv_digest"],
+                )  # fmt: skip
+
+            await sink(
+                "conversations.jsonl", conversations_stream, lambda: state["conv_digest"].rows
+            )
+            files.append(state["conv_digest"])
+            conversations, conversations_file = state["conv"], state["conv_digest"].record()
 
         evidence = dict(snap["evidence"])
         exceptions: dict[str, Any] = {
@@ -694,6 +754,7 @@ class ReportLoader:
                       "worker_image": image_digest or m.UNKNOWN},
             audit_events=await self._audit_events(snap.get("audit_head")),
             files=files, evidence=evidence, identity=dict(identity or {}),
+            conversations=m.conversations_section(conversations, conversations_file),
         )  # fmt: skip
         document = await asyncio.to_thread(m.report_document, inputs)
         body = await asyncio.to_thread(canonical_json, document)

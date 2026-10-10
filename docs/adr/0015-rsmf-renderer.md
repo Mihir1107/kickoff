@@ -1182,3 +1182,21 @@ what was done and why.
    mutations `zipwriter_no_chunk_yield` and `zipwriter_no_yield`. The yield changes no output byte, so
    goldens and the byte-identity guarantees are unaffected.
 
+10. **The shard verify checked a different split than CI ran (2026-10-10, fix 5 before M16 step 3).**
+   Two questions about fix 3's numbers. (a) "1067 passed vs 1068": the verify counted 1,068 tests and
+   the four shards ran 1,068; one of them is skipped on Linux
+   (`test_render_package.py::...ditto...`: Apple's `ditto` is macOS only), so CI reports 1,067 passed +
+   1 skipped. Nothing was lost. (b) Looking for that, a real defect: `tests/integration/conftest.py`
+   assigned shards in a FIRST-run `pytest_collection_modifyitems`, i.e. over every collected item
+   INCLUDING the `elasticsearch` test that `-m "not elasticsearch"` deselects afterwards, while
+   `ci_shard.py --verify` assigned over the post-`-m` set. One extra item (weighed at the median)
+   shifts the greedy packing, so the jobs ran a different split than the one verified (run
+   37780923335: verify 266/267/268/270, jobs 267/267/267/270). Every test still ran once (the jobs'
+   split is also a cover), but the verify did not prove what CI executed. Fix: the shard hook is
+   `trylast` (cut from the tests that survive `-m`/`-k`), and `--verify` is computed from the
+   COLLECTED set: it collects the suite as the job does, then once per shard with the job's
+   environment, and checks the selections are disjoint, cover the collection exactly and match
+   `assign`. `durations.json` only weighs node ids: a collected test missing from it (14 today, e.g.
+   new tests) gets the median and lands in exactly one shard; a stale entry is ignored.
+   `test_verify_uses_the_collected_set_and_places_an_unrecorded_test_in_exactly_one_shard`;
+   mutations `shard_before_deselection`, `verify_from_durations`.

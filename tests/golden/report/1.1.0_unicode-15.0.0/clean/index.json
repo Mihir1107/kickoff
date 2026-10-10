@@ -1,0 +1,16 @@
+{
+  "files": [
+    {
+      "name": "report.html",
+      "sha256": "7c2b396b9eecb32aa92e2602fd24ba1629bf5baa8934c22bdcf8bccd0d9fe39d",
+      "size": 7565
+    },
+    {
+      "name": "report.json",
+      "sha256": "33ffbfa8eef078053a823d31f1de04673c923e7fb115f64b254bb8e024c27a81",
+      "size": 3751
+    }
+  ],
+  "renderer_version": "1.1.0",
+  "unicode": "15.0.0"
+}

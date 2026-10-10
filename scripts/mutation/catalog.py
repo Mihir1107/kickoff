@@ -13,6 +13,9 @@ Rounds (ADR 0015):
   §9, §11, §13; M16 step 4).
 - ``m16-model``: the collection report model and loader (ADR 0018 §4, §7, §8, §12; M16 step 1).
 - ``m16-html``: the report HTML builder and its sanitiser (ADR 0018 §3.2, §4; M16 step 2).
+- ``m16-pre3``: the fixes before step 3: marker elements, HTML-invalid code points replaced,
+  `conversations.jsonl` above the cap, report goldens, CI shards cut after `-m` and verified from
+  the collected set (ADR 0018 §21).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
   and the blocking-I/O guard ``edisc_core.loopblock``, §24.8), every CPU step moved off the loop, the
   render thread writing nothing (ADR 0015 §24).
@@ -68,6 +71,12 @@ WR = "tests/integration/worker/test_report_cases.py"
 AE = "tests/integration/api/test_report_export.py"
 RW = "workers/collection/src/edisc_worker/reports.py"
 RLC = "tests/integration/reports/test_report_lifecycle.py"
+RCC = "tests/integration/report/test_conversations_cap.py"
+UG = "tests/unit/renderers/test_report_golden.py"
+UMU = "tests/unit/renderers/test_report_model.py"
+USH = "tests/unit/test_ci_shards.py"
+ICF = "tests/integration/conftest.py"
+SH = "scripts/ci_shard.py"
 RWF = "tests/integration/reports/test_report_workflow.py"
 ROP = "tests/integration/reports/test_report_operations.py"
 
@@ -569,15 +578,15 @@ CATALOG: list[Mutation] = [
     m("html_no_escape", "m16-html", RH, '        .replace("<", "&lt;")\n', '        .replace("<", "<")\n',
       UH, "escaping"),
     m("html_no_bdi", "m16-html", RH,
-      "    return f\"<bdi>{escape(reveal('' if value is None else str(value)))}</bdi>\"",
-      "    return escape(reveal('' if value is None else str(value)))", UH, "escaping"),
+      "    return f\"<bdi>{reveal('' if value is None else str(value))}</bdi>\"",
+      "    return reveal('' if value is None else str(value))", UH, "escaping"),
     m("html_bidi_not_replaced", "m16-html", RH,
       "            out.append(marker(cp))  # replaced: a marker after it would itself be reordered",
       "            out.append(ch + marker(cp))  # replaced: a marker after it would itself be reordered",
       UH, "bidi_controls_are_replaced"),
     m("html_invisible_not_marked", "m16-html", RH,
-      "            out.append(ch + marker(cp))  # kept, with the marker after it",
-      "            out.append(ch)  # kept, with the marker after it", UH, "bidi_controls_are_replaced"),
+      "            out.append(marker(cp))  # kept, with the marker after it",
+      "            pass  # kept, with the marker after it", UH, "bidi_controls_are_replaced"),
     m("html_banner_always_clean", "m16-html", RH,
       '    cls = "banner clean" if clean else "banner notclean"', '    cls = "banner clean"',
       UH, "clean_banner_and_the_not_clean"),
@@ -591,4 +600,41 @@ CATALOG: list[Mutation] = [
       "    f\"default-src 'none'; style-src '{STYLE_CSP_HASH}'; img-src 'none'; base-uri 'none'; \"",
       "    f\"default-src 'none'; style-src 'self'; img-src 'none'; base-uri 'none'; \"",
       UH, "only_allowed_elements"),
+    # ------------------------------------------------------------------ fixes before M16 step 3
+    m("marker_as_text", "m16-pre3", RH, '    return f\'<span class="cp">U+{cp:04X}</span>\'',
+      '    return f"[U+{cp:04X}]"', UH, "marker_is_an_element"),
+    m("marker_forgeable", "m16-pre3", RH, '            out.append(escape("".join(run)))\n            run.clear()\n            out.append(marker(cp))  # replaced',
+      '            out.append("".join(run))\n            run.clear()\n            out.append(marker(cp))  # replaced',
+      UH, "marker_is_an_element"),
+    m("html_c1_kept", "m16-pre3", RH, "        or 0x7F <= cp <= 0x9F  # DEL and C1\n",
+      "        or 0x7F == cp  # DEL and C1\n", UH, "invalid_in_html"),
+    m("html_c0_kept", "m16-pre3", RH,
+      "        (cp < 0x20 and cp not in _HTML_WHITESPACE_CONTROLS)  # NUL and C0 (form feed included)",
+      "        (cp == 0 and cp not in _HTML_WHITESPACE_CONTROLS)  # NUL and C0 (form feed included)",
+      UH, "invalid_in_html"),
+    m("html_surrogate_kept", "m16-pre3", RH, "        or 0xD800 <= cp <= 0xDFFF  # a lone surrogate\n",
+      "", UH, "surrogate"),
+    m("html_nonchar_kept", "m16-pre3", RH, "        or (cp & 0xFFFE) == 0xFFFE  # U+xFFFE / U+xFFFF of every plane\n",
+      "", UH, "invalid_in_html"),
+    m("conversations_file_skipped", "m16-pre3", RL, "        if units.conversations.count > m.CAP:",
+      "        if False:", RCC, "cap_boundary"),
+    m("conversations_cap_off_by_one", "m16-pre3", RL, "        if units.conversations.count > m.CAP:",
+      "        if units.conversations.count >= m.CAP:", RCC, "cap_boundary"),
+    m("conversations_named_without_file", "m16-pre3", RM,
+      "    if capped.total > capped.cap and file is None:", "    if False:", UMU,
+      "file_is_required"),
+    m("conversation_worst_wrong", "m16-pre3", RM,
+      "    return min(statuses, key=lambda s: (_RANK.get(s, len(SEVERITY)), s), default=None)",
+      "    return max(statuses, key=lambda s: (_RANK.get(s, len(SEVERITY)), s), default=None)",
+      UMU, "conversation"),
+    m("conversations_rows_on_loop", "m16-pre3", RL,
+      "                take(fold.add(row), out)\n            return b\"\".join(out)\n\n        async for rows in self._unit_pages(\"file\"):\n            yield await asyncio.to_thread(page, rows)",
+      "                take(fold.add(row), out)\n            return b\"\".join(out)\n\n        async for rows in self._unit_pages(\"file\"):\n            yield page(rows)",
+      RCC, "cap_boundary and 1001"),
+    m("report_bytes_change_without_bump", "m16-pre3", RH, '        el("title", "Collection report"),',
+      '        el("title", "Collection report."),', UG, "golden_bytes"),
+    m("shard_before_deselection", "m16-pre3", ICF, "    @pytest.hookimpl(trylast=True)\n",
+      "    @pytest.hookimpl(tryfirst=True)\n", USH, "verify_uses_the_collected_set"),
+    m("verify_from_durations", "m16-pre3", SH, "    collected = collect(target)\n",
+      "    collected = sorted(load_durations())\n", USH, "verify_uses_the_collected_set"),
 ]  # fmt: skip

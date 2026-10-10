@@ -43,3 +43,29 @@ def test_the_committed_durations_file_is_valid() -> None:
     data = json.loads((REPO / DURATIONS).read_text())
     assert data and all(isinstance(k, str) and isinstance(v, (int, float)) for k, v in data.items())
     assert default_seconds(load_durations()) > 0
+
+
+def test_verify_uses_the_collected_set_and_places_an_unrecorded_test_in_exactly_one_shard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix 5: `--verify` derives everything from the COLLECTED node ids (a real collection, then one
+    per shard with the CI job's environment), not from durations.json. A collected test whose
+    duration was never recorded still lands in exactly one shard, and the jobs' selections match
+    `assign` (they cut shards from the same post-`-m` set)."""
+    from scripts.ci_shard import collect, verify
+
+    collected = collect()
+    dropped = collected[len(collected) // 2]
+    durations = {k: v for k, v in load_durations().items() if k != dropped}
+    durations["tests/integration/test_gone.py::test_deleted_long_ago"] = 9_999.0  # stale entry
+    path = tmp_path / "durations.json"
+    path.write_text(json.dumps(durations))
+    monkeypatch.setenv("EDISC_CI_DURATIONS", str(path))
+    result = verify(4)
+    assert result.ok, result.problems[:10]
+    assert result.collected == collected  # the suite itself, not the durations file's keys
+    assert dropped in result.unrecorded
+    assert [g for g, ids in enumerate(result.selected) if dropped in ids] != []
+    assert sum(ids.count(dropped) for ids in result.selected) == 1
+    assert sorted(n for ids in result.selected for n in ids) == sorted(collected)
+    assert all("test_gone" not in n for ids in result.selected for n in ids)
