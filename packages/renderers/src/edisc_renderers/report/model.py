@@ -26,6 +26,8 @@ from datetime import date, datetime
 from typing import Any, Literal
 
 from edisc_core.canonical import canonical_json
+from edisc_core.lone_surrogates import FIELD as LONE_SURROGATES
+from edisc_core.lone_surrogates import from_utf16_units, make_valid, replacement, restore
 from edisc_core.schemas import ARCHIVE_CAVEAT, JobStatus, ReconStatus, UnitStatus
 from edisc_core.time import format_utc
 from edisc_renderers.report.version import REPORT_FORMAT, REPORT_RENDERER_VERSION
@@ -58,9 +60,19 @@ def iso(value: datetime | None) -> str | None:
     return None if value is None else format_utc(value)
 
 
+def valid_record(record: Mapping[str, Any]) -> tuple[dict[str, Any], int]:
+    """A row as WRITTEN (§23): a string holding a lone surrogate (an error text can quote one) is
+    its replacement text (U+FFFD for each) and the row gains ``lone_surrogates``: JSON Pointer ->
+    the exact UTF-16 code units. Returns the row and how many such strings it holds."""
+    valid, found = make_valid(record)
+    if not found:
+        return dict(record), 0
+    return {**valid, LONE_SURROGATES: found}, len(found)
+
+
 def jsonl_line(record: Mapping[str, Any]) -> bytes:
-    """One JSONL row: RFC 8785 canonical JSON and LF (§3.1)."""
-    return canonical_json(record) + b"\n"
+    """One JSONL row: RFC 8785 canonical JSON and LF (§3.1), valid (§23)."""
+    return canonical_json(valid_record(record)[0]) + b"\n"
 
 
 def _leaf(record: Mapping[str, Any]) -> int:
@@ -102,6 +114,9 @@ class UnitFact:
     day_anomalies: int | None = None
     error_type: str | None = None
     error: str | None = None
+    # the exact error when the chain recorded it with `error_utf16` (a lone surrogate, §23); not
+    # part of the record compared with the database, which holds the valid text only
+    error_exact: str | None = field(default=None, compare=False)
 
     def record(self) -> dict[str, Any]:
         return {
@@ -129,9 +144,16 @@ def unit_fact_from_event(event_type: str, payload: Mapping[str, Any]) -> UnitFac
             basis=payload.get("basis"), day_anomalies=payload.get("day_anomalies"),
         )  # fmt: skip
     if event_type == "unit_failed":
+        error = str(payload.get("error"))
+        units = payload.get("error_utf16")
+        exact = None
+        if units is not None:  # recorded valid with its exact code units (§23)
+            exact = from_utf16_units(list(units))
+            if replacement(exact) != error:
+                raise ValueError(f"{key}: unit_failed error does not match its code units")
         return UnitFact(
             key, "failed", ReconStatus.FAILED.value,
-            error_type=str(payload.get("error_type")), error=str(payload.get("error")),
+            error_type=str(payload.get("error_type")), error=error, error_exact=exact,
         )  # fmt: skip
     raise ValueError(f"not a unit event: {event_type}")
 
@@ -279,6 +301,9 @@ class ChainFold:
     batches: int = 0
     duplicate_starts: int = 0
     duplicate_finals: int = 0
+    # unit facts whose error the chain recorded with its exact code units (`error_utf16`, §23): the
+    # database holds the valid text only, so these are stated from the chain. Memory: O(such units)
+    exact_errors: dict[str, UnitFact] = field(default_factory=dict)
 
     def add(self, e: ChainEvent) -> UnitFact | None:
         """Fold one event; returns its unit fact for a unit event."""
@@ -308,6 +333,8 @@ class ChainFold:
             self.batches += 1
         elif e.event_type in UNIT_EVENTS:
             fact = unit_fact_from_event(e.event_type, e.payload)
+            if fact.error_exact is not None:
+                self.exact_errors.setdefault(fact.unit_key, fact)
             self.units.add(fact)
             self.outcomes[fact.recon_status] += 1
             return fact
@@ -353,7 +380,7 @@ def unit_row(
             "recon_status": f.recon_status, "expected": f.expected, "collected": f.collected,
             "file_gaps": f.file_gaps, "no_longer_observed": f.no_longer_observed,
             "basis": f.basis, "day_anomalies": f.day_anomalies, "error_type": f.error_type,
-            "error": f.error,
+            "error": f.error if f.error_exact is None else f.error_exact,
         }  # fmt: skip
     return {
         **base, "source": "database", "status": row["status"],
@@ -512,6 +539,7 @@ class JsonlDigest:
     sha: Any = field(default_factory=hashlib.sha256)
     size: int = 0
     rows: int = 0
+    lone_surrogates: int = 0  # strings written as replacement text + code units (§23)
 
     def add(self, line: bytes) -> bytes:
         self.sha.update(line)
@@ -519,9 +547,15 @@ class JsonlDigest:
         self.rows += 1
         return line
 
+    def row(self, record: Mapping[str, Any]) -> bytes:
+        """One row's line, valid (§23), counted."""
+        valid, found = valid_record(record)
+        self.lone_surrogates += found
+        return self.add(canonical_json(valid) + b"\n")
+
     def record(self) -> dict[str, Any]:
         return {"name": self.name, "sha256": self.sha.hexdigest(), "size": self.size,
-                "rows": self.rows}  # fmt: skip
+                "rows": self.rows, "lone_surrogates": self.lone_surrogates}  # fmt: skip
 
 
 # ------------------------------------------------------------------ clean (§4.1)
@@ -710,5 +744,24 @@ def report_document(inp: ReportInputs) -> dict[str, Any]:
     }
 
 
+def valid_document(doc: Mapping[str, Any]) -> dict[str, Any]:
+    """`report.json` as WRITTEN (§23): valid Unicode everywhere, never a failure on hostile source
+    data. A string holding a lone surrogate is its replacement text (U+FFFD for each), and
+    `integrity.lone_surrogates` says so: `count` (such strings in `report.json` and in the JSONL
+    files, each file's own count in its record) and `report_json` (JSON Pointer -> the exact UTF-16
+    code units). The HTML restores the exact strings from it and shows each surrogate as a marker."""
+    valid, found = make_valid(doc)
+    in_files = sum(int(f.get(LONE_SURROGATES, 0)) for f in doc["integrity"].get("files", []))
+    integrity = {**valid["integrity"],
+                 LONE_SURROGATES: {"count": len(found) + in_files, "report_json": found}}  # fmt: skip
+    return {**valid, "integrity": integrity}
+
+
+def exact_document(doc: Mapping[str, Any]) -> dict[str, Any]:
+    """`report.json` with its exact strings back (the inverse of `valid_document`)."""
+    found = doc.get("integrity", {}).get(LONE_SURROGATES, {}).get("report_json") or {}
+    return dict(restore(doc, found)) if found else dict(doc)
+
+
 def report_json(inp: ReportInputs) -> bytes:
-    return canonical_json(report_document(inp))
+    return canonical_json(valid_document(report_document(inp)))

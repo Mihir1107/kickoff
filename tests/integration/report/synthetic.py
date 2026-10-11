@@ -7,16 +7,20 @@ reads a collected job. Expected values come from the parameters, never from the 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from datetime import date, timedelta
 
 from sqlalchemy import text
 from types_aiobotocore_s3 import S3Client
 
+from edisc_connector_dummy.connector import DummyConnector
 from edisc_core.ids import new_id
 from edisc_core.settings import Settings
 from edisc_custody.log import append, seal_job_chain
 from edisc_db.session import tenant_tx
+from edisc_worker.pipeline import CrashHooks, Pipeline
 
+from ...unit.dummy.conftest import RecordingLimiter
 from ..normalizer.harness import Sessions, Tenant
 
 PER_TX = 500
@@ -43,7 +47,12 @@ async def sealed_job(
     t: Tenant,
     keys: list[str],
     gap_every: int = 97,
+    failed: Mapping[str, str] | None = None,
 ) -> uuid.UUID:
+    """``failed``: unit key -> error text; those units fail through the pipeline's own `fail_unit`
+    (the status, `last_error` and the `unit_failed` event exactly as collection records them)."""
+    failed = dict(failed or {})
+    keys = [k for k in keys if k not in failed]
     job = new_id()
     async with tenant_tx(sessions, t.tenant_id) as s:
         await s.execute(text("INSERT INTO collection_jobs (id, tenant_id, matter_id, connection_id,"
@@ -80,8 +89,28 @@ async def sealed_job(
                                       "recon_status": recon_of(key, gap_every), "file_gaps": 0,
                                       "no_longer_observed": 0},
                              anchor_every=1 << 30)  # fmt: skip
+    if failed:
+        async with tenant_tx(sessions, t.tenant_id) as s:
+            await s.execute(
+                text(
+                    "INSERT INTO work_units (tenant_id, job_id, unit_key, conversation_id, day,"
+                    " status) SELECT :t, :j, k, split_part(k, '/', 1),"
+                    " CAST(split_part(k, '/', 2) AS date), 'running' FROM unnest(CAST(:k AS text[])) k"
+                ),
+                {"t": t.tenant_id, "j": job, "k": list(failed)},
+            )
+        pipeline = Pipeline(
+            sessions, s3, settings, DummyConnector(RecordingLimiter()), CrashHooks()
+        )
+        for key, error in failed.items():
+            await pipeline.fail_unit(
+                tenant_id=t.tenant_id, job_id=job, unit_key=key, error_type="SourceError",
+                error=error,
+            )  # fmt: skip
     gaps = any(recon_of(k, gap_every) == "gap" for k in keys)
-    status = "completed_with_gaps" if gaps else "completed"
+    status = (
+        "completed_with_failed_units" if failed else "completed_with_gaps" if gaps else "completed"
+    )
     async with tenant_tx(sessions, t.tenant_id) as s:
         await append(s, tenant_id=t.tenant_id, stream_id=job, job_id=job, event_type="job_finished",
                      actor="synthetic", payload={"status": status, "units": {}, "paused_ms": 0,

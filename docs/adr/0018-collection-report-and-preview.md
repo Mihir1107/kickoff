@@ -854,3 +854,56 @@ the same `report_files` / `report_generated`; nothing in the stream changes shap
    host mutation harness. "PDF-from-stored-HTML" has its check (read back + SHA-256) but no tamper
    test yet. Worker container limits for deployment (3 GiB, CPU 1) are what the tests use; no
    production compose/orchestrator file exists yet for report workers.
+
+## 23. Lone surrogates from hostile source data (fixes before step 5, 2026-10-11)
+A source's JSON may escape a lone UTF-16 surrogate (`"\ud83d"` with no partner): JSON allows the
+escape, Python decodes it into a `str`, but UTF-8, Postgres `text`/`jsonb` and RFC 8785 cannot carry
+the code point. Traced with the corpus cases `lone_surrogates` (live) and `export_lone_surrogates`
+(export): dummy connector **0.5.0**, `spec.lone_surrogates` puts surrogates (high, low, a reversed
+pair, a high one last, beside a real astral character) in two message texts of conversation 0 / day 0
+and in one user's display name, written as `\uXXXX` escapes like a JSON encoder writes them.
+
+| Stage | Before (observed unless noted) | Now |
+|---|---|---|
+| Export ingestion (lock, validate, index) | Message text passed untouched (the zip is stored as uploaded, the index reads `ts`/`thread_ts` only). By inspection: a surrogate in a `thread_ts`, `team_id`, conversation id or name reached a Postgres text column and failed the ingest with an unclassified encoding error | Unchanged for text; `storable_key` refuses such a `thread_ts` (not indexed, counted in the findings as `thread_ts_lone_surrogate`) or `team_id` (never names the workspace); `conversation_record` treats such an id/name as an invalid record (counted, as before for other invalid records) |
+| Normalizer | `canonical_hash(raw)` raised `CanonicalizationError`, classified JOB_INTEGRITY: one hostile message failed the WHOLE job | Normalizer **0.3.0**: source hashes (`raw_hash`, fingerprints, fragments) use `canonical_source_json`; every `Derived` record is stored valid: the string's replacement text (U+FFFD per surrogate, one for one) plus `lone_surrogates` = {JSON Pointer: exact UTF-16 code units}; change hints are stored replaced (the derivation keeps the exact `edited_ts`/`deleted_ts`); an item IDENTITY holding one fails the unit loudly (`NormalizationError`; replacing would merge distinct subjects) |
+| Canonical JSON | `canonical_json` refused it (and a surrogate KEY escaped as a bare `UnicodeEncodeError`) | `canonical_json` unchanged and strict (key case now a `CanonicalizationError`); new `canonical_source_json`/`_hash`: byte-identical for every value the strict form accepts, a lone surrogate written as its lowercase `\uXXXX` escape exactly as ECMAScript's well-formed `JSON.stringify` does (Node cross-check), lossless (decodes back), injective against the replacement text; a high surrogate directly followed by a low one as two code points is refused (its escapes would decode as one character) |
+| Custody | Unreachable (collection failed first) | Events never carry a raw surrogate: derivations are valid, and a recorded error text (`fail_unit`, `fail_render`, `fail_report`) is stored valid with its exact code units in the event (`error_utf16`); recording a failure never fails on what it quotes. The job package verifier re-hashes fragments with the source form: the corpus job's package verifies offline |
+| RSMF | Unreachable; once the normalizer was fixed, `assemble` raised `CanonicalizationError` on the manifest | Renderer **1.3.2**: the loader restores the exact strings (`restore`, refusing a text unlike its code units); the renderer writes U+FFFD and adds `edisc.lone_surrogates` = `<pointer inside the object>: <code units>` to that event, participant or conversation; EML headers, summary and placeholder texts valid (a placeholder gives the name's code units); zip names were already safe (`Cs` -> `_`). Other output byte-identical to 1.3.1 (golden diff: version strings only) |
+| Report | `report.json` refused any such string (reachable through error texts quoting source data) | Renderer **1.3.0**: every JSONL row and `report.json` valid (replacement text + `lone_surrogates` per row; `integrity.lone_surrogates` = total count and `report_json` pointers -> code units; each file record counts its rows); the chain's exact error is stated (`ChainFold.exact_errors`, memory O(such units)); `report.html` restores the exact strings and shows each surrogate as its `U+XXXX` marker element (so does the PDF), and states the count |
+
+Tests: `tests/unit/core/test_lone_surrogates.py` (incl. Node), normalizer, RSMF, report and layout unit
+tests, the two corpus cases (oracle now checks every body: `replacement(text)` plus the exact units),
+`tests/integration/report/test_lone_surrogates.py` (a real `fail_unit` quoting one, then the report).
+The 22 earlier corpus cases' masked goldens are byte-identical in the new generation.
+
+## 24. The glyph set is part of the report identity (fixes before step 5)
+`report.html` replaces every character no vendored font draws (§5.5), from the committed coverage
+`fonts/coverage.txt`. The identity (job, snapshot, renderer, PDF toolchain id, Unicode, paper) named
+the fonts only through the toolchain id, which is `none` outside the image; the HTML golden key named
+neither. Now `glyph_set` = SHA-256 of the coverage ranges (`html.glyph_set_id`) is in the identity
+(migration **0032**: column, immutable by trigger, in the one-live-report unique index; reports made
+before carry `unrecorded`), in `report_started`, in the runtime check, in the queue name
+(`reports.r<renderer>.p<toolchain12>.u<unicode>.g<glyphs12>`) and in the golden key
+(`tests/golden/report/<renderer>_unicode-<u>_glyphs-<g12>/`, which the PDF goldens' key extends).
+Tested: a coverage change (Thai removed) changes the id, queue, golden key and the HTML bytes.
+
+## 25. The PDF from the stored HTML, tamper-tested; image-only breaks in CI (fixes before step 5)
+`tests/integration/reports/test_report_pdf_from_stored_html.py`: with the PDF child replaced by a
+recorder, the intact path renders exactly the stored `report.html`; when storage returns altered bytes
+for the pinned version, the render refuses (`ReportIntegrityError`), the child never runs, no
+`report.pdf` object or row and no `report_generated` exist. The mutation harness gained an `image`
+kind: entries whose test lives in `tests/unit/report_image` edit the INSTALLED code in the report
+image's venvs (or `/opt/edisc/fonts.conf`) and run there; `make test-report-pdf` (CI `report-pdf`) runs
+`scripts/mutation/run.py --kind image`: a PDF byte change only the goldens see, the child without its
+own `RLIMIT_AS`, `fonts.conf` scanning a system font dir, the child without `FONTCONFIG_FILE`. The
+runner now reports a selection that ran no test as a problem, never as "caught".
+
+## 26. A production install starts (fixes before step 5)
+`tests/integration/production/test_production_install.py` (marker `production_install`, CI job
+`production-install`, `make test-production-install`; excluded from the integration shards): the API
+and the worker are installed like the images install them (`uv sync --frozen --no-dev --package <app>
+--no-editable`, pytest absent, `edisc_core` from the venv), then the API (answers 401 on `/v1/me`) and
+every worker type (each source, maintenance, exports, renders, reports) start against the test stack
+and keep running. Breaks: a dev-only import in the API and in the worker.
+

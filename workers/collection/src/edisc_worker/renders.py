@@ -52,6 +52,7 @@ from types_aiobotocore_s3 import S3Client
 
 from edisc_core.canonical import canonical_json
 from edisc_core.ids import new_id
+from edisc_core.lone_surrogates import recorded_text, replacement
 from edisc_core.settings import Settings
 from edisc_custody.chain import ANCHOR_FORMAT, anchor_key
 from edisc_custody.log import anchor_if_due, append, verify_chain
@@ -729,6 +730,9 @@ class RenderRun:
     async def fail(
         self, tenant_id: uuid.UUID, render_id: uuid.UUID, error_type: str, error: str
     ) -> dict[str, Any]:
+        # an error text quoting a lone surrogate: valid, exact code units in the event (§23)
+        error_type = replacement(error_type)
+        error, exact = recorded_text(error, 2000)
         row = await self.row(tenant_id, render_id)
         if row.status in LIVE:
             async with tenant_tx(self.sessions, tenant_id) as s:
@@ -743,7 +747,8 @@ class RenderRun:
                             "job_id": str(cur.job_id),
                             "from_status": cur.status,
                             "error_type": error_type[:200],
-                            "error": error[:2000],
+                            "error": error,
+                            **{f"error_{k}": v for k, v in exact.items()},
                             "files_done": cur.files_done,
                             "batches_done": cur.batches_done,
                         },
@@ -754,7 +759,7 @@ class RenderRun:
                             "UPDATE renders SET status = 'failed', reason = :r, detail = :d,"
                             " finished_at = now(), updated_at = now() WHERE id = :i"
                         ),
-                        {"r": error_type[:200] or "error", "d": error[:2000], "i": render_id},
+                        {"r": error_type[:200] or "error", "d": error, "i": render_id},
                     )
                     await s.execute(
                         text(

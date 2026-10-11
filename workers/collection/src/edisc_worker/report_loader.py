@@ -370,7 +370,7 @@ class ReportLoader:
                     acc.conversations_capped.add(
                         conv["worst_status"], (conv["conversation_id"],), conv
                     )
-                out.append(digest.add(m.jsonl_line(row)))
+                out.append(digest.row(row))
             return b"".join(out)
 
         async for rows in self._unit_pages("file"):
@@ -390,7 +390,7 @@ class ReportLoader:
         def take(conv: dict[str, Any] | None, out: list[bytes]) -> None:
             if conv is not None:
                 capped.add(conv["worst_status"], (conv["conversation_id"],), conv)
-                out.append(digest.add(m.jsonl_line(conv)))
+                out.append(digest.row(conv))
 
         def page(rows: Sequence[Mapping[str, Any]]) -> bytes:
             out: list[bytes] = []
@@ -449,7 +449,7 @@ class ReportLoader:
                     by_reason[(r.event_kind, str(row.get("reason")))] += 1
                     if r.event_kind in ("file_unavailable", "access_lost", "no_longer_observed"):
                         capped.add(r.event_kind, (r.unit_key, str(r.item_id)), row)
-                    out.append(digest.add(m.jsonl_line(row)))
+                    out.append(digest.row(row))
                 return b"".join(out)
 
             yield await asyncio.to_thread(page)
@@ -458,7 +458,7 @@ class ReportLoader:
         self, renders: Sequence[Mapping[str, Any]], digest: m.JsonlDigest
     ) -> AsyncIterator[bytes]:
         for r in sorted(renders, key=lambda r: str(r["render_id"])):
-            yield digest.add(m.jsonl_line(m.render_row(r)))
+            yield digest.row(m.render_row(r))
 
     # ------------------------------------------------------------------ snapshot
     async def snapshot(self) -> dict[str, Any]:
@@ -674,6 +674,9 @@ class ReportLoader:
         chain = await self.chain_pass()
         database = await self.database_pass(archive_backed)
         divergences, stated = await self.resolve(chain.units.differing(database), archive_backed)
+        # an agreeing bucket states the database row, which holds a recorded error's valid text
+        # only: the chain's exact error (lone surrogates, §23) is stated instead
+        stated = {**chain.exact_errors, **stated}
         divergent = {d.subject for d in divergences}
         divergences.extend(self._job_divergences(job, chain, await self._pauses_db()))
         zone = (chain.started.payload.get("unit_day_zone") if chain.started else None) or (
@@ -758,6 +761,7 @@ class ReportLoader:
             conversations=m.conversations_section(conversations, conversations_file),
         )  # fmt: skip
         document = await asyncio.to_thread(m.report_document, inputs)
+        document = await asyncio.to_thread(m.valid_document, document)  # §23: never fails
         body = await asyncio.to_thread(canonical_json, document)
         page = await asyncio.to_thread(report_html, document)
 

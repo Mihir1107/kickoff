@@ -190,6 +190,19 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   (`tests/unit/report_image`, skipped elsewhere with a visible reason), veraPDF and the worker
   OOM/heartbeat tests; PDF goldens `tests/golden/report-pdf/<key>_toolchain-<id12>/` are the image's
   admission gate (record by hand with `EDISC_RECORD_REPORT_PDF=1`, never in CI, never overwrite).
+  It also runs the `image` kind of mutation breaks INSIDE the image (`scripts/mutation/run.py --kind
+  image` edits the installed code there).
+- Lone UTF-16 surrogates (ADR 0018 §23): SOURCE data is hashed with `canonical_source_json` (lossless
+  `\uXXXX` escapes, = `canonical_json` for valid input); everything stored or published is valid
+  Unicode via `edisc_core.lone_surrogates` (replacement text + `lone_surrogates`: JSON Pointer -> exact
+  UTF-16 code units; `recorded_text` for error texts, `error_utf16` in the event). Never put a raw
+  lone surrogate in a custody event, a DB row, a report or an RSMF; never hash source data with the
+  strict form. Writing Python test sources with the Write tool turns `\ud83d\ude00` escapes into
+  the real character: build surrogates with `chr()`.
+- The report identity includes `glyph_set` (SHA-256 of the coverage ranges, §24): queue
+  `reports.r<renderer>.p<toolchain12>.u<unicode>.g<glyphs12>`, golden key `..._glyphs-<g12>`.
+- `make test-production-install` (CI job `production-install`): the API and every worker type start
+  from a no-dev, non-editable install. A runtime import of a dev-only package fails it.
 
 ## Conventions
 - Python 3.12, `uv` only (no pip). Add deps with `uv add --package <member> <dep>`.

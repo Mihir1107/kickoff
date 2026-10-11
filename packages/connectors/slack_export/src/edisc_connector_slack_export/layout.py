@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from edisc_core.lone_surrogates import has_lone
+
 KNOWN_METADATA = frozenset(
     {
         "users.json",
@@ -166,14 +168,27 @@ def conversation_record(kind: str, element: Any) -> ConversationRecord | None:
         return None
     if name is not None and not isinstance(name, str):
         return None
+    if any(isinstance(v, str) and has_lone(v) for v in (cid, name)):
+        return None  # a lone surrogate (escaped JSON) names no storable id or zip folder (§23)
     folder = cid if kind == "dm" else name
     if not folder or "/" in folder or folder in (".", ".."):
         return None
     team = next(
-        (v for f in TEAM_FIELDS if isinstance(v := element.get(f), str) and v and "/" not in v),
+        (
+            v
+            for f in TEAM_FIELDS
+            if isinstance(v := element.get(f), str) and v and "/" not in v and not has_lone(v)
+        ),
         None,
     )
     return ConversationRecord(cid, kind, folder, name, team)
+
+
+def storable_key(value: Any) -> str | None:
+    """A source value an export record may be keyed by (a ``thread_ts`` in the thread index, a
+    ``team_id`` naming the workspace): a string without a lone surrogate, else None. Escaped JSON
+    can hold one; nothing can be stored or keyed by it (ADR 0018 §23)."""
+    return value if isinstance(value, str) and not has_lone(value) else None
 
 
 @dataclass(frozen=True)

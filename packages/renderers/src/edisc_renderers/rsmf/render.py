@@ -18,6 +18,7 @@ from datetime import date, datetime, tzinfo
 from typing import Any
 
 from edisc_core.canonical import canonical_json
+from edisc_core.lone_surrogates import has_lone, make_valid, replacement, utf16_units
 from edisc_core.schemas import ARCHIVE_CAVEAT
 from edisc_core.time import format_utc, from_epoch
 from edisc_custody.merkle import batch_root
@@ -95,6 +96,23 @@ def _flag(value: bool) -> str:
 def _custom(pairs: Iterable[tuple[str, str | None]]) -> list[dict[str, str]]:
     """Name/value pairs, empty values omitted (the schema needs a non-empty value), sorted."""
     return [{"name": n, "value": v} for n, v in sorted((n, v) for n, v in pairs if v)]
+
+
+def _units(units: Sequence[int]) -> str:
+    return " ".join(f"{u:04x}" for u in units)
+
+
+def _valid(obj: dict[str, Any]) -> dict[str, Any]:
+    """A manifest object (event, participant, conversation) with valid strings (ADR 0018 §23): a
+    string holding a lone surrogate (from escaped source JSON) is written as its replacement text
+    (U+FFFD for each), and the object gains one `edisc.lone_surrogates` custom field per such string:
+    `<JSON Pointer inside the object>: <its exact UTF-16 code units, 4 hex digits each>`."""
+    valid, found = make_valid(obj)
+    if not found:
+        return obj
+    pairs = [(c["name"], c["value"]) for c in valid.get("custom", [])]
+    pairs += [("edisc.lone_surrogates", f"{p}: {_units(u)}") for p, u in found.items()]
+    return {**valid, "custom": _custom(pairs)}
 
 
 def _root_of(message: Message) -> str | None:
@@ -337,7 +355,7 @@ def _event(
             ("edisc.parent_not_rendered_reason", placed.not_rendered[1]),
         ]
     event["custom"] = _custom(pairs)
-    return event
+    return _valid(event)
 
 
 def _placeholder_text(f: FileUnavailable) -> bytes:
@@ -345,11 +363,14 @@ def _placeholder_text(f: FileUnavailable) -> bytes:
         "This file was not collected. This text file stands in for it.",
         f"File: {attachment_name(f.file_id, f.name)}",
         f"File id: {f.file_id}",
-        f"Name in the message: {f.name}",
-        f"Reason reported by the source: {f.reason}",
+        f"Name in the message: {replacement(f.name)}",
+        # a name holding a lone surrogate (ADR 0018 §23): its replacement above, the exact name here
+        *([f"Name in the message, UTF-16 code units: {_units(utf16_units(f.name))}"]
+          if has_lone(f.name) else []),
+        f"Reason reported by the source: {replacement(f.reason)}",
         f"Recorded as item: {f.item.idempotency_key}",
         "",
-    ]
+    ]  # fmt: skip
     return "\r\n".join(lines).encode("utf-8")
 
 
@@ -469,7 +490,7 @@ def _build_file(
     everyone = observed | set(members) | set(conv.custodians)
     identities = {u: _identity_at(inp.identities.get(u, ()), bounds[1]) for u in everyone}
     participants = [
-        _participant(u, identities[u], inp.identities.get(u, ())) for u in sorted(everyone)
+        _valid(_participant(u, identities[u], inp.identities.get(u, ()))) for u in sorted(everyone)
     ]
     displays = {p["id"]: p["display"] for p in participants}
 
@@ -502,6 +523,7 @@ def _build_file(
         conversation["type"] = _RSMF_TYPE[conv.slack_type]
     if conv.name:
         conversation["display"] = conv.name
+    conversation = _valid(conversation)
     if len(conv.custodians) == 1:
         conversation["custodian"] = conv.custodians[0]
 
@@ -562,7 +584,7 @@ def _build_file(
         )
     )
     custodian = ", ".join(displays[c] for c in conv.custodians) or None
-    title = conv.name or conv.id
+    title = conversation.get("display") or conv.id  # valid text (§23)
     headers: list[tuple[str, str]] = [
         ("Date", eml.rfc5322_date(end)),
         ("From", "rsmf@rsmf.edisc"),

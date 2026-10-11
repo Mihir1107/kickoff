@@ -47,6 +47,7 @@ class Expected:
     root_primary_same_slice: bool
     subtype: str | None
     tags: tuple[str, ...]
+    text: str = ""  # the exact current text ("" when deleted): lone surrogates included (§23)
 
 
 @dataclass
@@ -161,7 +162,7 @@ def build(case: Case) -> RenderOracle:
                 root_primary_same_slice=bool(
                     root_msg is not None and root_msg.sent_at.astimezone(zone).date() == day
                 ),
-                subtype=subtype, tags=m.tags,
+                subtype=subtype, tags=m.tags, text="" if m.deleted_ts is not None else m.text,
             )  # fmt: skip
             if (
                 root
@@ -180,6 +181,8 @@ def build(case: Case) -> RenderOracle:
 def features(case: Case, ds: Dataset, o: RenderOracle) -> set[str]:
     """What the case exercises (the coverage matrix is checked over every case)."""
     f = {f"dialect:{case.source}:{case.spec.dialect}"}
+    if case.source == "export" and case.spec.lone_surrogates:
+        f.add("dialect:export:lone_surrogate")
     if case.source == "export":
         f.add(f"export_tier:{case.export_tier}")
         if case.export_legacy_layout:
@@ -220,7 +223,8 @@ def features(case: Case, ds: Dataset, o: RenderOracle) -> set[str]:
             f.add("thread:root_not_collected")
         if e.root and e.root_linked and not e.root_primary_same_slice:
             f.add("thread:root_elsewhere")
-        for t in ("emoji", "rtl", "zero_width", "combining", "long", "attachment_only"):
+        for t in ("emoji", "rtl", "zero_width", "combining", "long", "attachment_only",
+                  "lone_surrogate"):  # fmt: skip
             if t in e.tags:
                 f.add(f"text:{t}")
         if e.subtype == "thread_broadcast" or "thread_broadcast" in e.tags:
@@ -294,6 +298,7 @@ COVERAGE = {
     "file:external_in_several_slices", "parts:split_by_entries",
     "thread:root_same_slice", "thread:root_elsewhere", "thread:root_not_collected",
     "text:emoji", "text:rtl", "text:zero_width", "text:combining", "text:long", "text:attachment_only",
+    "text:lone_surrogate", "dialect:export:lone_surrogate",
     "broadcast", "broadcast:parent_outside_slice", "broadcast:edited", "broadcast:deleted",
     "files:3@batch3", "files:4@batch3", "slice_events:10000", "slice_events:10001",
     "renamed:channel_and_user", "archived:channel",

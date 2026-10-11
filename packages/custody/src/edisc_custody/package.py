@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from edisc_core.canonical import canonical_hash
+from edisc_core.canonical import canonical_source_hash
 from edisc_core.idempotency import idempotency_key
 from edisc_core.jsonpath import JsonPathError, resolve
 from edisc_custody.chain import BATCH_EVENT, Anchor, ChainVerifier, EventRecord, VerificationReport
@@ -243,7 +243,7 @@ def _check_fragment(
     except JsonPathError as exc:
         report.errors.append(f"{where}: json_path does not resolve in its page: {exc}")
         return page_cache
-    if canonical_hash(fragment) != item["raw_hash"]:
+    if canonical_source_hash(fragment) != item["raw_hash"]:  # source data: lossless (ADR 0018 §23)
         report.errors.append(
             f"{where}: raw_hash does not match the page fragment at {item['json_path']}"
         )

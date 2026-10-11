@@ -47,6 +47,7 @@ from edisc_connectors_base.types import (
     WorkUnit,
 )
 from edisc_core.ids import new_id
+from edisc_core.lone_surrogates import recorded_text, replacement
 from edisc_core.schemas import ItemType, JobStatus, ReconStatus, ScopeType
 from edisc_core.settings import Settings
 from edisc_core.time import day_bounds, ensure_utc, utc_now
@@ -1240,7 +1241,11 @@ class Pipeline:
     async def fail_unit(
         self, *, tenant_id: uuid.UUID, job_id: uuid.UUID, unit_key: str, error_type: str, error: str
     ) -> None:
-        """Unit-scoped failure: loud (status, error, custody lifecycle event); other units go on."""
+        """Unit-scoped failure: loud (status, error, custody lifecycle event); other units go on. An
+        error text quoting a lone surrogate is recorded valid, with its exact code units in the event
+        (`error_utf16`, ADR 0018 §23): recording a failure never fails on what it quotes."""
+        error_type = replacement(error_type)
+        chain_error, exact = recorded_text(error, 2000)
         async with tenant_tx(self.sessions, tenant_id) as s:
             done = (
                 await s.execute(
@@ -1248,7 +1253,7 @@ class Pipeline:
                         "UPDATE work_units SET status = 'failed', recon_status = 'failed', last_error = :e, updated_at = now()"
                         " WHERE job_id = :j AND unit_key = :k AND status NOT IN ('done', 'failed') RETURNING unit_key"
                     ),
-                    {"e": f"{error_type}: {error}"[:4000], "j": job_id, "k": unit_key},
+                    {"e": replacement(f"{error_type}: {error}"[:4000]), "j": job_id, "k": unit_key},
                 )
             ).first()
             if done is None:
@@ -1260,7 +1265,12 @@ class Pipeline:
                 job_id=job_id,
                 event_type="unit_failed",
                 actor=ACTOR,
-                payload={"unit_key": unit_key, "error_type": error_type, "error": error[:2000]},
+                payload={
+                    "unit_key": unit_key,
+                    "error_type": error_type,
+                    "error": chain_error,
+                    **{f"error_{k}": v for k, v in exact.items()},
+                },
                 anchor_every=self.anchor_every,
             )
         await anchor_if_due(
@@ -1282,7 +1292,7 @@ class Pipeline:
                         " last_error = :e, updated_at = now() WHERE job_id = :j AND unit_key = :k AND status NOT IN"
                         " ('done', 'failed') RETURNING first_failure_at, now() AS now"
                     ),
-                    {"e": error[:4000], "j": job_id, "k": unit_key},
+                    {"e": replacement(error[:4000]), "j": job_id, "k": unit_key},
                 )
             ).first()
             if row is None:

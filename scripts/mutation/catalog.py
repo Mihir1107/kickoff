@@ -19,6 +19,11 @@ Rounds (ADR 0015):
 - ``m16-pdf``: the report PDF child and toolchain (ADR 0018 §5, §6; M16 step 3). The breaks that
   only a report image can catch (PDF goldens, the child's RLIMIT_AS in main, font isolation) are
   checked by hand in the image (ADR 0018 §22), not here: this harness runs on the host.
+- ``m16-pre5``: the fixes before M16 step 5 (ADR 0018 §23-§26): lone surrogates hashed losslessly
+  and stored/published valid at every stage, the glyph set in the report identity, the PDF rendered
+  from the stored HTML (tamper), the production-install smoke job. Its ``image`` entries (tests under
+  ``tests/unit/report_image``) run INSIDE the report-test image: ``make test-report-pdf`` runs
+  ``scripts/mutation/run.py --kind image`` there (the CI ``report-pdf`` job).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
   and the blocking-I/O guard ``edisc_core.loopblock``, §24.8), every CPU step moved off the loop, the
   render thread writing nothing (ADR 0015 §24).
@@ -86,6 +91,26 @@ UPR = "tests/unit/report_pdf/test_pdf_child_runner.py"
 UTM = "tests/unit/report_pdf/test_toolchain_manifest.py"
 RWF = "tests/integration/reports/test_report_workflow.py"
 ROP = "tests/integration/reports/test_report_operations.py"
+CAN = "packages/core/src/edisc_core/canonical.py"
+NSL = "packages/normalizer/src/edisc_normalizer/slack.py"
+NMO = "packages/normalizer/src/edisc_normalizer/model.py"
+RLO = "workers/collection/src/edisc_worker/render_loader.py"
+PKG = "packages/custody/src/edisc_custody/package.py"
+PIPE = "workers/collection/src/edisc_worker/pipeline.py"
+LAY = "packages/connectors/slack_export/src/edisc_connector_slack_export/layout.py"
+CON = "workers/collection/src/edisc_worker/contracts.py"
+FONTS_CONF = "deploy/report-image/fonts.conf"
+ULS = "tests/unit/core/test_lone_surrogates.py"
+UNS = "tests/unit/normalizer/test_slack_normalizer.py"
+URE = "tests/unit/renderers/test_render.py"
+ULA = "tests/unit/connectors/test_slack_export_layout.py"
+UGI = "tests/unit/renderers/test_report_glyph_identity.py"
+RLS = "tests/integration/report/test_lone_surrogates.py"
+RPS = "tests/integration/reports/test_report_pdf_from_stored_html.py"
+IPG = "tests/unit/report_image/test_pdf_goldens.py"
+IPD = "tests/unit/report_image/test_pdf.py"
+IFI = "tests/unit/report_image/test_font_isolation.py"
+PROD = "tests/integration/production/test_production_install.py"
 
 
 @dataclass(frozen=True)
@@ -99,6 +124,10 @@ class Mutation:
 
     @property
     def kind(self) -> str:
+        if self.test.startswith("tests/unit/report_image/"):
+            return (
+                "image"  # runs inside the report-test image (scripts/mutation/run.py --kind image)
+            )
         return "integration" if self.test.startswith("tests/integration/") else "unit"
 
 
@@ -677,4 +706,73 @@ CATALOG: list[Mutation] = [
       "no_vendored_font"),
     m("pdf_dates_missing", "m16-pdf", RH, "        *dates,\n", "", UH, "seal_dates"),
     m("page_identity_missing", "m16-pdf", RH, "        _page_identity(doc),\n", "", UH, "seal_dates"),
+    # ------------------------------------------------------------------ fixes before M16 step 5
+    m("source_json_replaces_surrogates", "m16-pre5", CAN,
+      '            parts.append(b"\\\\u%04x" % cp)', '            parts.append("\\ufffd".encode())',
+      ULS, "escapes or round_trips"),
+    m("source_json_accepts_joined_pair", "m16-pre5", CAN, "            if high and cp >= 0xDC00:",
+      "            if False:", ULS, "high_then_low"),
+    m("normalizer_strict_hash", "m16-pre5", NSL,
+      "from edisc_core.canonical import canonical_source_hash as canonical_hash",
+      "from edisc_core.canonical import canonical_hash", UNS, "hashed_losslessly"),
+    m("derived_stored_raw", "m16-pre5", NMO,
+      '            object.__setattr__(self, "derived", {**valid, FIELD: found})', "            pass",
+      UNS, "hashed_losslessly"),
+    m("hints_stored_raw", "m16-pre5", NSL, "        hints = _stored_hints(exact_hints)",
+      "        hints = exact_hints", UNS, "hints_are_stored"),
+    m("identity_with_surrogate_stored", "m16-pre5", NSL, "    if has_lone(subject):", "    if False:",
+      UNS, "identity_holding"),
+    m("loader_states_replacement", "m16-pre5", RLO, "    found = derived.get(LONE_SURROGATES)",
+      "    found = None", CORPUS, "lone_surrogates"),
+    m("rsmf_raw_surrogates", "m16-pre5", R + "render.py", "    valid, found = make_valid(obj)",
+      "    valid, found = obj, {}", URE, "lone_surrogates"),
+    m("verifier_strict_fragment_hash", "m16-pre5", PKG,
+      "from edisc_core.canonical import canonical_source_hash\n",
+      "from edisc_core.canonical import canonical_hash as canonical_source_hash\n", CORPUS,
+      "lone_surrogates"),
+    m("failure_text_raw", "m16-pre5", PIPE, "        chain_error, exact = recorded_text(error, 2000)",
+      "        chain_error, exact = error[:2000], {}", RLS, "lone_surrogate"),
+    m("report_row_raw", "m16-pre5", RM, "    valid, found = make_valid(record)",
+      "    valid, found = dict(record), {}", UH, "code_units"),
+    m("report_json_raw", "m16-pre5", RM, "    valid, found = make_valid(doc)",
+      "    valid, found = dict(doc), {}", UH, "valid_in_report_json"),
+    m("report_count_missing", "m16-pre5", RM, "        self.lone_surrogates += found\n", "", UH,
+      "code_units"),
+    m("report_html_shows_replacement", "m16-pre5", RH, "    doc = exact_document(doc)\n", "", UH,
+      "valid_in_report_json"),
+    m("report_states_db_error", "m16-pre5", RM, "            if fact.error_exact is not None:",
+      "            if False:", RLS, "lone_surrogate"),
+    m("export_record_with_surrogate", "m16-pre5", LAY,
+      "    if any(isinstance(v, str) and has_lone(v) for v in (cid, name)):", "    if False:", ULA,
+      "conversation_with_a_lone"),
+    m("export_key_with_surrogate", "m16-pre5", LAY,
+      "    return value if isinstance(value, str) and not has_lone(value) else None",
+      "    return value if isinstance(value, str) else None", ULA, "not_storable"),
+    m("glyph_set_not_in_identity", "m16-pre5", RW,
+      '        "glyph_set": glyph_set_id(),', '        "glyph_set": "0" * 64,', UGI, "new_identity"),
+    m("glyph_set_not_in_queue", "m16-pre5", CON, '        f".g{glyph_set[:12]}"', '        ""', UGI,
+      "new_identity"),
+    m("glyph_set_ignores_coverage", "m16-pre5", RH,
+      '    return hashlib.sha256(lines.encode("ascii")).hexdigest()',
+      '    return hashlib.sha256(b"").hexdigest()', UGI, "new_identity"),
+    m("report_created_without_glyph_set", "m16-pre5", RW, '            "gs": ident["glyph_set"],',
+      '            "gs": "unrecorded",', RLC, "stored_recorded_and_sealed"),
+    m("pdf_from_unchecked_html", "m16-pre5", RW,
+      '        if hashlib.sha256(body).hexdigest() != html["sha256"] or len(body) != html["size"]:',
+      "        if False:", RPS, "altered"),
+    m("api_needs_a_dev_only_package", "m16-pre5", "apps/api/src/edisc_api/main.py",
+      "from edisc_api.app import create_app\n",
+      "import html5lib  # noqa: F401\nfrom edisc_api.app import create_app\n", PROD),
+    m("worker_needs_a_dev_only_package", "m16-pre5", W + "__main__.py", "def main() -> None:\n",
+      "import hypothesis  # noqa: F401,E402\n\n\ndef main() -> None:\n", PROD),
+    # image-only breaks: run inside the report-test image (scripts/mutation/run.py --kind image)
+    m("pdf_bytes_change", "m16-pre5", RP, "        uncompressed_pdf=False,\n",
+      "        uncompressed_pdf=False,\n        custom_metadata=True,\n", IPG, "goldens"),
+    m("child_without_rlimit", "m16-pre5", RP,
+      "    resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))\n", "", IPD,
+      "memory_limit"),
+    m("fonts_conf_scans_system_fonts", "m16-pre5", FONTS_CONF, "  <dir>/opt/edisc/fonts</dir>\n",
+      "  <dir>/opt/edisc/fonts</dir>\n  <dir>/usr/share/fonts</dir>\n", IFI, "vendored_dir"),
+    m("child_env_without_fontconfig", "m16-pre5", RP, '_CHILD_ENV = ("PATH", "FONTCONFIG_FILE", ',
+      '_CHILD_ENV = ("PATH", ', IPG, "goldens"),
 ]  # fmt: skip

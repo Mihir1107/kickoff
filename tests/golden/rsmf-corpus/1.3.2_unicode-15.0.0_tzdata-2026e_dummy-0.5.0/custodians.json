@@ -1,0 +1,10 @@
+{
+  "events": 66,
+  "files": [
+    "C00000DUMMY_2026-01-05_part001of001.rsmf",
+    "C00000DUMMY_2026-01-06_part001of001.rsmf",
+    "G00001DUMMY_2026-01-05_part001of001.rsmf",
+    "G00001DUMMY_2026-01-06_part001of001.rsmf"
+  ],
+  "projection_sha256": "68b26cba902a64ce1fad6f8dea275600d1d2837cdf026afc7d37a1b1a8f5ac67"
+}

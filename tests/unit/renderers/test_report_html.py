@@ -379,9 +379,10 @@ FUZZ_TEXT = st.lists(st.one_of(st.characters(), SPECIAL), max_size=60).map("".jo
 
 def _expected_plain(text: str) -> str:
     """What must survive of ``text``: everything but the replaced characters, unchanged (HTML
-    parsing itself turns CR and CRLF into LF)."""
+    parsing itself turns a CR into LF; a CR is always followed by its marker element, so the page
+    never holds a CRLF pair that parsing would merge: "\\r\\n" is two line breaks, each marked)."""
     kept = "".join(ch for ch in text if not rhtml.replaced(ord(ch)))
-    return kept.replace("\r\n", "\n").replace("\r", "\n")
+    return kept.replace("\r", "\n")
 
 
 @given(FUZZ_TEXT)
@@ -460,3 +461,58 @@ def test_the_page_carries_the_seal_dates_and_its_identity_for_the_pdf() -> None:
     assert '<meta content="2026-01-06T12:34:56Z" name="dcterms.modified">' in out
     assert '<p class="pageid src">job <bdi>j1</bdi> · snapshot <bdi>d</bdi></p>' in out
     assert out.index('class="pageid') < out.index("<h2>")  # before content: footer from page 1
+
+
+# ------------------------------------------------------------------ lone surrogates (ADR 0018 §23)
+def test_lone_surrogates_are_valid_in_report_json_counted_and_marked_in_html() -> None:
+    from edisc_core.lone_surrogates import has_lone, restore
+    from edisc_renderers.report import model as m
+    from tests.unit.renderers.test_report_golden import CASES
+
+    exact = m.report_document(CASES["gaps_and_failures_hard_strings"]())
+    doc = m.valid_document(exact)
+    body = json.dumps(doc, ensure_ascii=False).encode("utf-8")  # encodable: nothing raw left
+    lone = doc["integrity"]["lone_surrogates"]
+    assert lone["report_json"] and lone["count"] == len(lone["report_json"]) + sum(
+        f["lone_surrogates"] for f in doc["integrity"]["files"]
+    )
+    assert b"\\ud8" not in body and "�" in body.decode()
+    without = {**doc, "integrity": {k: v for k, v in doc["integrity"].items()
+                                    if k != "lone_surrogates"}}  # fmt: skip
+    restored = restore(without, lone["report_json"])
+    assert restored == {**exact, "integrity": restored["integrity"]}  # lossless
+    assert not has_lone(m.valid_document(exact)["job"]["id"] or "")
+    page = rhtml.report_html(doc)
+    tree = strict_tree(page)  # strict html5lib: no invalid code point reached the page
+    text = "".join(tree.itertext())
+    for cp in (0xD83D, 0xDC00, 0xDE00):  # every surrogate of the hard string: a marker element
+        assert f"U+{cp:04X}" in text
+    assert b"Strings holding lone UTF-16 surrogates: " + str(lone["count"]).encode() in page
+
+
+def test_a_unit_failed_error_recorded_with_its_code_units_is_stated_exactly() -> None:
+    from edisc_renderers.report import model as m
+
+    exact = "bad name " + chr(0xD800) + " here"
+    units = [ord(c) for c in exact]
+    payload = {"unit_key": "C1/2026-01-05", "error_type": "SourceError",
+               "error": "bad name � here", "error_utf16": units}  # fmt: skip
+    fact = m.unit_fact_from_event("unit_failed", payload)
+    assert fact.error == "bad name � here" and fact.error_exact == exact
+    # the database holds the valid text only: the facts still agree (no divergence)
+    row = {"unit_key": "C1/2026-01-05", "status": "failed",
+           "last_error": "SourceError: bad name � here"}  # fmt: skip
+    assert fact == m.unit_fact_from_row(row, no_longer_observed=0, archive_backed=False)
+    stated = m.unit_row({"unit_key": "C1/2026-01-05", "kind": "conversation_day",
+                         "conversation_id": "C1"}, stated=fact, zone="UTC", scopes=[0],
+                        divergent=False)  # fmt: skip
+    assert stated["error"] == exact
+    line = m.jsonl_line(stated)
+    row_out = json.loads(line)
+    assert row_out["error"] == "bad name � here"
+    assert row_out["lone_surrogates"] == {"/error": units}
+    digest = m.JsonlDigest("units.jsonl")  # each file's record counts its rows' strings
+    assert digest.row(stated) == line and digest.row({"unit_key": "plain"}) != line
+    assert digest.record()["lone_surrogates"] == 1 and digest.record()["rows"] == 2
+    with pytest.raises(ValueError, match="code units"):
+        m.unit_fact_from_event("unit_failed", {**payload, "error": "something else"})

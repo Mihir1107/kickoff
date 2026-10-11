@@ -17,6 +17,13 @@ broadcast that is edited at epoch 1 and deleted at epoch 2, day 1 slot 4 (a repl
 previous day) is a broadcast, day 0 slot 6 is a ``me_message``, and the first two eligible top-level
 slots of day 1 are ``channel_topic`` and ``pinned_item``.
 
+Hostile strings (0.5.0, ``spec.lone_surrogates``, off by default): conversation 0 / day 0 slots 0
+and 2 (top-level, never system messages) end with ``LONE_SURROGATE_TEXT`` and user 6's display name
+with ``LONE_SURROGATE_NAME``: lone UTF-16 surrogates (high, low, a reversed pair, a high one last)
+next to a real astral character. The dialects write them as ``\\uXXXX`` escapes, as a JSON encoder
+does (UTF-8 cannot encode them); a high escape is never directly followed by a low one, which a JSON
+decoder would join into one character.
+
 Epochs: epoch ``k >= 1`` adds one new day of messages and changes existing ones (edits, edit markers
 that change without a content change, deletions, reaction changes, renamed users). Edits made in an
 epoch are timestamped after the original collection window.
@@ -43,6 +50,11 @@ FLAVORS: dict[str, str] = {
     "zero_width": "zero​width‌non‍joiner and ﻿BOM inside",
     "combining": "café vs café, Z͑ͫ̓àlgo, ñ and ñ",
 }
+# lone surrogates (0.5.0): see the docstring. Never a high surrogate directly before a low one.
+LONE_SURROGATE_TEXT = (
+    " | lone high \ud83d, lone low \udc00, reversed \ude00\ud83d, real \U0001f600, last \udbff"
+)
+LONE_SURROGATE_NAME = "User06 \udfff lone"
 FLAVOR_ORDER = ("emoji", "rtl", "zero_width", "combining", "long", "attachment_only")
 WORDS = (
     "budget",
@@ -70,7 +82,9 @@ MIMES = (
 
 
 def h64(seed: int, *parts: object) -> int:
-    digest = hashlib.sha256(("|".join([str(seed), *map(str, parts)])).encode()).digest()
+    digest = hashlib.sha256(
+        ("|".join([str(seed), *map(str, parts)])).encode("utf-8", "surrogatepass")
+    ).digest()
     return int.from_bytes(digest[:8], "big")
 
 
@@ -181,6 +195,8 @@ class Dataset:
         for i in range(self.spec.users):
             base = f"user{i:02d}"
             display = base.capitalize()
+            if i == 6 and self.spec.lone_surrogates:
+                display = LONE_SURROGATE_NAME
             if i == 5 and epoch >= 1:
                 display = "User05 (renamed at epoch 1)"  # the directory changes between collections
             out.append(
@@ -408,6 +424,9 @@ class Dataset:
                     text = f"{FLAVORS[flavor]} [{conv} d{d} #{i}]"
                 else:
                     text = plain
+                if spec.lone_surrogates and conv0 and d == 0 and i in (0, 2):
+                    text += LONE_SURROGATE_TEXT
+                    tags.append("lone_surrogate")
                 if flavor == "attachment_only" or unit(self.seed, "file", conv, d, i) < spec.p_file:
                     files = (
                         self._file(conv, h64(self.seed, "fileidx", conv, d, i) % max(3, k // 8)),

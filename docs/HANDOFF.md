@@ -1,4 +1,4 @@
-# Handoff (2026-10-10: fixes before step 3 done (42951ba, CI green); M16 step 3 (PDF) built; next: M16 step 5 (API, package, verifier))
+# Handoff (2026-10-11: fixes before step 5 done; next: M16 step 5 (API, packages, verifier))
 
 This file alone is enough to build M16. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (read it in full before any
@@ -6,22 +6,57 @@ code); the rest of the plan of record is `docs/ARCHITECTURE.md`, `docs/adr/`, `d
 and `docs/BACKLOG.md`. `docs/plans/m16.md` is the superseded proposal (history only).
 
 ## Current state
-**Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`. Migrations at head: **0031**.
-Renderer **1.3.1**, dummy connector **0.4.0**, report renderer **1.2.0**. M16 **steps 1-4 are built**
-(model, HTML, PDF, loader, custody stream); steps 5 (API, package, verifier), 6 (preview), 7 (docs)
-are not. Commits this round: `42951ba` (the six fixes before step 3; CI run 38048366877 green: lint,
-typecheck, unit, 4 integration shards) and the step 3 commit after it (see `git log`; its CI adds the
-`report-pdf` job, the image admission gate: check that run's final status first).
+**Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`. Migrations at head: **0032**.
+Renderer **1.3.2**, dummy connector **0.5.0**, normalizer **0.3.0**, report renderer **1.3.0**.
+M16 **steps 1-4 are built**; step 5 (API, packages, verifier) is the next commit. The step 3 CI run **38052005091 finished green** (lint,
+typecheck, unit, report-pdf, 4 integration shards). This round: two commits, the fixes before step 5
+and step 5 (see `git log`; check each one's CI run first: their ids are below once known).
 
-**Phase 1 (M0-M13) is complete:** WORM evidence (S3 Object Lock COMPLIANCE on MinIO, rolling retention
-plus extension floor); hash-chained custody with WORM anchors, seals and the offline verifier
-`edisc-verify`; RLS tenant isolation, envelope-encrypted tokens, a Redis rate limiter; the dummy
-connector, the Slack normalizer and an exactly-once batch pipeline with reconciliation; Temporal
-workflows; the API (tenant from Host + IdP + principal, scoped roles, audited evidence reads). Not done:
-the 1M-message soak (needs a cloud VM; `scripts/resume_soak.py --messages 1000000 --kills 10`).
+## Done: the fixes before step 5, then M16 step 5 (2026-10-11; ADR 0018 §23-§27)
+1. **Lone surrogates (§23).** Traced through every stage with the corpus cases `lone_surrogates` and
+   `export_lone_surrogates` (dummy 0.5.0 `spec.lone_surrogates`). Before: one escaped `\ud83d` in a
+   message failed the WHOLE job (`CanonicalizationError` in the normalizer, JOB_INTEGRITY); once past
+   that, the RSMF manifest and `report.json` refused it too. Now: source hashes use
+   `canonical_source_json` (lossless escapes, Node-identical, = RFC 8785 for valid input); every stored
+   or published record is valid (`edisc_core.lone_surrogates`: replacement text + `lone_surrogates`
+   JSON Pointer -> exact UTF-16 code units; error texts via `recorded_text`, `error_utf16` in the
+   event); export ingestion refuses such ids/names/`thread_ts`/`team_id` (counted); identities with
+   one fail the unit; RSMF 1.3.2 writes U+FFFD + `edisc.lone_surrogates`; the report (1.3.0) counts
+   them and the HTML/PDF show the marker. Job package verified offline on the corpus job.
+2. **Glyph set in the identity (§24).** It was NOT: the identity named fonts only via the toolchain
+   id (`none` outside the image), the HTML golden key not at all. Migration 0032 `reports.glyph_set`
+   (identity, unique index, immutable), queue `...u<unicode>.g<glyphs12>`, golden key
+   `..._glyphs-<g12>`; tested with a coverage change.
+3. **PDF-from-stored-HTML tamper test (§25)** and the `image` mutation kind run inside the report image
+   by `make test-report-pdf` (4 image-only breaks, all caught in the local image run).
+4. **Production install (§26):** CI job `production-install` / `make test-production-install`: API +
+   every worker type from `uv sync --frozen --no-dev --package <app> --no-editable`. Found on the way:
+   uv reuses a cached build of a LOCAL package until its pyproject changes, so the venvs pass
+   `--refresh-package` for every workspace member (else the test checks stale code).
+5. BACKLOG (needs cloud): image registry push + `deploy/render-images.json`, report worker deployment
+   files.
+Step 5 (§27): `GET /v1/jobs/{id}/package` (job custody package `/3`, deterministic, one generator with
+the directory export; off the BACKLOG); reports API (list all generations with who/why, get, files,
+file content, package; `report.read` every role, `report.create` admin + manager); report package
+`edisc-report-package/1`; `edisc-verify` for report packages and zipped job packages;
+`--job-package` recomputes the chain-derived content (`edisc_renderers.report.recompute`). Fixed:
+`/v1/evidence/{id}/content` served report files. Mutation rounds `m16-pre5` (28) and `m16-api` (17),
+all caught. Also found: a latent sanitiser-fuzz expectation bug (CRLF: each CR gets its marker, so
+the page never holds a CRLF pair); the mutation runner treated "no test ran" as caught (now a
+problem).
 
-**Phase 2:** M14 (Slack exports) done; M15 (RSMF renders) done; **M16 in progress** (steps 1, 2, 4); then
-M17 (UI, sessions: ADR 0016 and the M17 backend plan in `docs/plans/phase-2.md`).
+## Next: M16 step 6 (preview). Stop and report before it.
+ADR 0018 §1.2, §10, §16.6: `RenderLoader.day_slice(...)` (day-bounded; `_index` loads a whole
+conversation today), the pure preview renderer (`edisc_renderers.preview`, same sanitiser and
+lone-surrogate rules), the route (`evidence.read`, audit + `anchor_now` before the first byte, the
+CSP of §10, `audit.preview_refused` on failure), the no-remote-fetch test (Playwright), the
+audit-burst measurement (D14). Production report creators need `EDISC_REPORT_TOOLCHAIN_ID` (the
+admitted image id) once reports carry PDFs outside test stacks. Local PDF work: `MIN_FREE_GB=9 make
+test-env-up` then `make test-report-pdf` (Docker Desktop, amd64 emulation: ~10 min with the image
+breaks; record new PDF goldens with `EDISC_RECORD_REPORT_PDF=1` after a report renderer bump; the
+image copies `tests/`, so do not edit the tree during its build step). Undiagnosed: one 265 ms loop block in the API middleware during the
+first `export_lone_surrogates` run (not reproduced in 11 later runs, 8 of them under 4-core CPU
+contention; see "Gotchas").
 
 ## Done: six fixes before step 3, then M16 step 3 (2026-10-10; ADR 0018 §21, §22; ADR 0015 §24.10)
 Fixes (`42951ba`): markers are ELEMENTS (`<span class="cp">`), so literal "[U+202E]" text differs
@@ -75,15 +110,6 @@ hard-string class from S1, hypothesis sanitiser fuzz, determinism) and the integ
 `tests/integration/report/test_report_model.py`. Mutation round `m16-html` (8 breaks, all caught).
 **Not done in step 2 (by plan):** `conversations.jsonl` (above-cap only); report goldens via
 `EDISC_RECORD_REPORT` (step 1 used oracle + determinism; byte-stability is covered the same way here).
-
-## Next: M16 step 5 (API, report package, verifier). Stop and report before it.
-ADR 0018 §16.5: `/v1/jobs/{id}/reports` POST (manual regeneration with a reason; `duplicate_identity`
-returns the existing report) / GET, `/v1/reports/{id}`, file content and package routes with
-`first_byte.py` tests, `edisc-report-package/1`, and `edisc-verify` recomputation from
-`edisc_renderers.report.model`. Production creators need `EDISC_REPORT_TOOLCHAIN_ID` (the admitted
-image id) once reports carry PDFs outside test stacks. Local PDF work: `MIN_FREE_GB=9 make
-test-env-up` then `make test-report-pdf` (Docker Desktop, amd64 emulation: ~5 min after the first
-build).
 
 ## Done: stage 0 before M16 (2026-10-06/07, ADR 0015 §24; commits fcd3f82, d704ae0)
 - `render_store._render_slice`'s thread is pure compute and writes nothing; enforced by an audit-hook
@@ -437,6 +463,18 @@ Where the data is (verified 2026-10-05/06):
 - **Anchoring:** never write an anchor without winning the claim. One anchor per due point.
 
 **Testing:**
+- **Lone surrogates in test sources:** the Write tool turns `\ud83d\ude00` escapes into the real
+  character (and non-ASCII escapes into literals); build surrogates with `chr()` or edit through a
+  script, and check with `cat -v`.
+- **uv and local packages:** a no-dev venv built from the tree reuses uv's cached wheel of a workspace
+  member until its pyproject changes: pass `--refresh-package <member>` (the production-install test
+  does).
+- **Tests are not type-checked:** a signature change (e.g. `report_task_queue` gaining `glyph_set`)
+  can break a test only the image job runs: grep the tests for every call site.
+- **A loop block seen once (undiagnosed):** 265 ms in Starlette's `BaseHTTPMiddleware` during the
+  first `export_lone_surrogates` run (the stack's first API requests after start-up); not reproduced
+  in 11 later runs, 8 under 4-core contention. Reproduce it in a loop with CPU
+  contention before calling it noise (CLAUDE.md rule).
 - **Heartbeats come from the event loop:** anything CPU-bound in an activity must run in a thread;
   otherwise a live attempt is timed out and retried until it fails (ADR 0015 §23). The real
   SIGKILL tests use `heartbeat_timeout_seconds=3`, which makes such starvation show up in tests.

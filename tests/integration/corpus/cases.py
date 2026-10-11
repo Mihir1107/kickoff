@@ -146,10 +146,17 @@ CASES: dict[str, Case] = {
     "entries_split": Case(
         _spec(seed=48, p_file=0.6, conversations=2), entry_limit=6, check_threads=False
     ),
+    # hostile strings: lone UTF-16 surrogates (`\\uXXXX` escapes in the JSON) in message texts and a
+    # display name, through every stage (ADR 0018 §23): collected, hashed losslessly, rendered with
+    # U+FFFD and the exact code units in `edisc.lone_surrogates`
+    "lone_surrogates": Case(_spec(seed=49, lone_surrogates=True)),
     # the export dialect: completeness against the archive, the ADR 0014 caveat in every file
     "export_full": Case(_spec(seed=42, dialect="slack_history"), source="export"),
     "export_legacy_layout": Case(
         _spec(seed=45, dialect="slack_history"), source="export", export_legacy_layout=True
+    ),
+    "export_lone_surrogates": Case(
+        _spec(seed=50, dialect="slack_history", lone_surrogates=True), source="export"
     ),
     "export_public_only": Case(
         _spec(seed=43, dialect="slack_history"), source="export", export_tier="public_only"

@@ -12,6 +12,7 @@ import pytest
 
 from edisc_connector_dummy.dataset import Dataset
 from edisc_connectors_base.types import BatchKind, WorkUnit
+from edisc_core.canonical import canonical_json, canonical_source_hash
 from edisc_core.schemas import EventKind, ItemType
 from edisc_normalizer.model import (
     NORMALIZER_VERSION,
@@ -23,6 +24,7 @@ from edisc_normalizer.model import (
 )
 from edisc_normalizer.slack import (
     MissingFileEvidenceError,
+    NormalizationError,
     access_lost,
     access_restored,
     finalize_unit,
@@ -402,7 +404,7 @@ def test_message_derivation_carries_the_attachment_references_of_its_fingerprint
     gone = norm(FILE_PAGE, files={"F1": FileUnavailable("F1", "permission")})
     (m,) = only(gone, ItemType.MESSAGE)
     assert m.derived["files"] == m.fingerprint["files"] == [["F1", "a.pdf", "application/pdf"]]
-    assert NORMALIZER_VERSION == "0.2.0"
+    assert NORMALIZER_VERSION == "0.3.0"
 
 
 def _channels(*channels: dict[str, Any]) -> bytes:
@@ -454,3 +456,43 @@ def test_conversation_snapshots_are_versioned_and_reverts_observed() -> None:
             _channels({"id": "D1", **flags}), ctx=dctx, page_ref=REF, prior={}
         ).items
         assert snap.derived["type"] == kind
+
+
+# ------------------------------------------------------------------ lone surrogates (ADR 0018 §23)
+def _hostile(text: str, **extra: Any) -> bytes:
+    """A page as a source writes it: ``json.dumps`` escapes a lone surrogate as ``\\udXXX``."""
+    return page(msg(text=text, **extra))
+
+
+def test_a_lone_surrogate_is_collected_hashed_losslessly_and_stored_valid() -> None:
+    high, low = chr(0xD83D), chr(0xDC00)
+    hostile = only(norm(_hostile(f"a{high}b{low}")), ItemType.MESSAGE)[0]
+    replaced = only(norm(_hostile("a�b�")), ItemType.MESSAGE)[0]
+    other = only(norm(_hostile(f"a{low}b{low}")), ItemType.MESSAGE)[0]
+    # lossless: the replacement text and another surrogate are different content and raw data
+    assert len({hostile.content_hash, replaced.content_hash, other.content_hash}) == 3
+    assert len({hostile.raw_hash, replaced.raw_hash, other.raw_hash}) == 3
+    assert hostile.raw_hash == canonical_source_hash(
+        json.loads(_hostile(f"a{high}b{low}"))["messages"][0]
+    )
+    # stored valid: replacement text, the exact code units by JSON Pointer
+    assert hostile.derived["text"] == "a�b�"
+    assert hostile.derived["lone_surrogates"] == {"/text": [0x61, 0xD83D, 0x62, 0xDC00]}
+    canonical_json(dict(hostile.derived))  # storable (jsonb, derived_hash)
+    assert "lone_surrogates" not in replaced.derived
+
+
+def test_lone_surrogate_hints_are_stored_replaced_and_exact_in_the_derivation() -> None:
+    ts = "1767571300." + chr(0xDFFF)
+    (m,) = only(norm(_hostile("x", edited={"user": "U1", "ts": ts})), ItemType.MESSAGE)
+    assert m.change_hints == {"edited_ts": "1767571300.�"}
+    assert m.derived["edited_ts"] == "1767571300.�"
+    assert m.derived["lone_surrogates"] == {"/edited_ts": [*map(ord, "1767571300."), 0xDFFF]}
+
+
+def test_an_identity_holding_a_lone_surrogate_fails_the_unit_loudly() -> None:
+    """A subject id is stored and indexed: replacing a surrogate would merge distinct subjects."""
+    with pytest.raises(NormalizationError, match="lone surrogate"):
+        norm(page(msg(user="U" + chr(0xD800), user_profile={"display_name": "x"})))
+    with pytest.raises(NormalizationError, match="lone surrogate"):
+        norm(page(msg(ts="1767571200.00010" + chr(0xD800))))

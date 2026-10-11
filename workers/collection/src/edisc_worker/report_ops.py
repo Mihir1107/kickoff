@@ -124,7 +124,7 @@ async def _check_routing(
         rows = (
             await session.execute(
                 text(
-                    "SELECT tenant_id, report_id, renderer_version, toolchain_id, unicode_version"
+                    "SELECT tenant_id, report_id, renderer_version, toolchain_id, unicode_version, glyph_set"
                     " FROM stale_requested_reports(make_interval(secs => :age), :n, :t)"
                 ),
                 {"age": settings.render_unroutable_seconds, "n": limit, "t": tenant_id},
@@ -133,7 +133,9 @@ async def _check_routing(
     max_age = timedelta(seconds=settings.render_poller_max_age_seconds)
     polled: dict[str, bool] = {}
     for row in rows:
-        queue = report_task_queue(row.renderer_version, row.toolchain_id, row.unicode_version)
+        queue = report_task_queue(
+            row.renderer_version, row.toolchain_id, row.unicode_version, row.glyph_set
+        )
         if queue not in polled:
             polled[queue] = await workers_polling(client, queue, max_age)
         async with tenant_tx(sessions, row.tenant_id) as s:

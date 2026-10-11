@@ -306,8 +306,8 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
         report = new_id()
         await conn.execute(
             "INSERT INTO reports (id, tenant_id, job_id, matter_id, renderer_version,"
-            " unicode_version, toolchain_id, paper, requested_by)"
-            " VALUES ($1, $2, $3, $4, '1', '1', 'none', 'letter', 'seed')",
+            " unicode_version, toolchain_id, glyph_set, paper, requested_by)"
+            " VALUES ($1, $2, $3, $4, '1', '1', 'none', 'unrecorded', 'letter', 'seed')",
             report,
             t,
             ids["job"],

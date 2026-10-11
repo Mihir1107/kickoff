@@ -3,6 +3,7 @@ guard only) and ``edisc-verify`` on the exported render package."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -17,9 +18,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
 
 from edisc_connector_dummy.connector import DummyConnector
+from edisc_connector_dummy.dataset import LONE_SURROGATE_NAME
 from edisc_core.canonical import canonical_json
+from edisc_core.lone_surrogates import has_lone, replacement, utf16_units
 from edisc_core.schemas import ARCHIVE_CAVEAT
 from edisc_core.settings import Settings
+from edisc_custody.export import export_package
+from edisc_custody.package import verify_package
 from edisc_custody.render_export import export_render_package
 from edisc_custody.render_package import verify_render_package
 from edisc_db.session import tenant_tx
@@ -98,6 +103,7 @@ def check_against_oracle(
     manifests: dict[str, Any] = {}
     primaries: Counter[str] = Counter()
     context: set[str] = set()
+    lone_names = 0
     cap = case.options.cap
     if case.expect_files is not None:
         assert len(files) == case.expect_files, [r["name"] for r, _ in files]
@@ -126,6 +132,12 @@ def check_against_oracle(
             assert ts_day(want.ts, case.options.time_zone).isoformat() == record["day"], where
             assert e["type"] == want.type, (where, e["type"], want.type)
             assert bool(e.get("deleted")) == want.deleted, where
+            # the text: valid in RSMF, exact in `edisc.lone_surrogates` (ADR 0018 §23)
+            assert e.get("body", "") == replacement(want.text), where
+            body_units = [v for v in c.get("edisc.lone_surrogates", []) if v.startswith("/body: ")]
+            assert body_units == ([f"/body: {_units(want.text)}"] if has_lone(want.text) else []), (
+                where
+            )
             assert len(e.get("edits", [])) == want.edits, (where, e.get("edits"), want.edits)
             if want.deleted:  # reactions recorded before the deletion: history only (custom)
                 assert "reactions" not in e, where
@@ -155,11 +167,30 @@ def check_against_oracle(
                 assert c["edisc.parent_not_rendered"] == [want.root], where
                 assert c["edisc.parent_not_rendered_reason"] == [reason], where
         assert conv.get("custom")
+        for person in parsed.manifest["participants"]:
+            names = custom(person).get("edisc.lone_surrogates", [])
+            if person["id"] == LONE_USER and case.spec.lone_surrogates:
+                # the display, and every custom value holding the name (`edisc.known_name`)
+                assert person["display"] == replacement(LONE_SURROGATE_NAME), person
+                assert f"/display: {_units(LONE_SURROGATE_NAME)}" in names, person
+                assert {v.split(": ", 1)[1] for v in names} == {_units(LONE_SURROGATE_NAME)}
+                lone_names += 1
+            else:
+                assert names == [] and "\ufffd" not in person["display"], person
+    if case.spec.lone_surrogates:
+        assert lone_names, "the participant with a lone surrogate in its name was rendered"
     assert primaries == Counter(dict.fromkeys(oracle.primaries, 1)), "every in-scope message once"
     if case.check_threads:
         assert context == oracle.context_roots
     assert summary["items_in"] == summary["events_out"] == len(oracle.primaries)
     return manifests
+
+
+LONE_USER = "U00006DUMMY"
+
+
+def _units(text: str) -> str:
+    return " ".join(f"{u:04x}" for u in utf16_units(text))
 
 
 def _masked(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -194,6 +225,20 @@ def check_golden(name: str, manifests: dict[str, Any]) -> None:
     assert json.loads(path.read_text()) == doc, (
         f"corpus output changed for {name} (a regression guard)"
     )
+
+
+async def check_job_package(
+    sessions: Sessions, s3: S3Client, settings: Settings, tenant_id: uuid.UUID,
+    job_id: uuid.UUID, dest: Path,
+) -> None:  # fmt: skip
+    """The job's custody package verified offline: every item's raw fragment re-hashed from the page
+    bytes (lossless for lone surrogates, ADR 0018 §23)."""
+    pkg = await export_package(
+        sessions, s3, settings, tenant_id=tenant_id, job_id=job_id, dest=dest
+    )
+    report = await asyncio.to_thread(verify_package, pkg)
+    assert report.ok, report.errors
+    assert report.items_checked > 0
 
 
 async def check_package(

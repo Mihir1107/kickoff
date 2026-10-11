@@ -511,3 +511,27 @@ def test_reactions_recorded_before_a_deletion_are_history_only() -> None:
     ]
     assert "edisc.reactions_before_deletion" not in custom(alive)
     assert "U9" in {p["id"] for p in parsed.manifest["participants"]}  # only reacted, then deleted
+
+
+def test_lone_surrogates_render_valid_with_their_exact_code_units() -> None:
+    """ADR 0018 §23: a text, a conversation name and an unavailable file's name holding a lone
+    surrogate render as U+FFFD (valid manifest, EML, zip names) and each string's exact UTF-16 code
+    units are recorded where it sits (`edisc.lone_surrogates`, JSON Pointer inside the object)."""
+    lone = chr(0xD83D)
+    text = "hi " + lone + " there"
+    m1 = msg("2026-01-05T09:00:00Z", text=text, files=("F1",))
+    files = {"F1": unavailable("F1", "n" + lone + ".pdf", "permission")}
+    [(rendered, parsed)] = render(
+        slice_input(DAY, [m1], files=files, conversation=conv(name="general " + lone))
+    )
+    (e,) = parsed.manifest["events"]
+    assert e["body"] == "hi � there"
+    units = " ".join(f"{ord(c):04x}" for c in text)
+    assert {"name": "edisc.lone_surrogates", "value": f"/body: {units}"} in e["custom"]
+    (c,) = parsed.manifest["conversations"]
+    assert c["display"] == "general �"
+    assert any(x["name"] == "edisc.lone_surrogates" and x["value"].startswith("/display: ")
+               for x in c["custom"])  # fmt: skip
+    placeholder = next(z for z in rendered.entries if z.name.endswith(".UNAVAILABLE.txt"))
+    assert b"Name in the message: n\xef\xbf\xbd.pdf" in placeholder.data  # U+FFFD, UTF-8
+    assert b"UTF-16 code units: 006e d83d 002e 0070 0064 0066" in placeholder.data

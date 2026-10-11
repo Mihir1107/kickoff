@@ -1,6 +1,6 @@
 {
   "_about": "SHA-256 over every byte the dummy source returns for a full collection (all pages, the directory, all files). Changing it means the generator's output changed: bump DummyConnector.version and regenerate deliberately. effective_spec pins every default of the spec (file sizes included) with connector_version.",
-  "connector_version": "0.4.0",
+  "connector_version": "0.5.0",
   "spec": {
     "seed": 20260930,
     "conversations": 3,
@@ -64,6 +64,7 @@
     "p_broadcast": 0.1,
     "p_me_message": 0.03,
     "p_uninterpretable": 0.02,
+    "lone_surrogates": false,
     "p_edit": 0.06,
     "p_hint_only_edit": 0.03,
     "p_delete": 0.03,

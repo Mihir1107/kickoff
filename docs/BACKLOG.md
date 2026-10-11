@@ -11,6 +11,14 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - Re-run WORM acceptance tests against real AWS S3 Object Lock before production.
 - **[required before production]** Verify the vendored sRGB2014 ICC profile (SHA-256 `384b832d…c0a`, the copy WeasyPrint 70.0 bundles) byte for byte against the official file from color.org (scripted downloads got HTML in S1; download in a browser), and record the result in the profile's `SOURCE.md` (ADR 0018 §5.6).
 - Report reproductions (ADR 0017 §4 applied to reports, ADR 0018 §6).
+- **[required before production; needs cloud]** Report image delivery (ADR 0018 §22.8, §6): push
+  the admitted `deploy/report-image` image (target `report`) to our own registry by digest, write
+  `deploy/render-images.json` (per image digest: the identities it serves, e.g.
+  `report: r<renderer>-p<toolchain12>-u<unicode>-g<glyphs12>`, git commit, build date, status,
+  retention), set `EDISC_REPORT_TOOLCHAIN_ID` for report creators from it; and production deployment
+  files for report workers (3 GiB memory limit, no swap, CPU 1, `EDISC_REPORT_PDF_CONCURRENCY=1`,
+  scale out by replicas, one queue per runtime identity). The admission gate (PDF goldens in the
+  image) already runs in CI.
 - Mirror the pinned `pgsty/minio` / `pgsty/mc` images to our own registry (upstream MinIO stopped publishing images; the fork is third-party).
 - **[required before production]** Least-privilege S3 identity for the app instead of root credentials (evidence writer needs PutObject*, GetObject*, no Delete*).
 - AWS KMS implementation of `KmsClient`.

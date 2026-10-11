@@ -20,6 +20,7 @@ from edisc_custody.retention_extension import extend_retention
 from edisc_custody.sweeper import sweep_anchors
 from edisc_db.session import tenant_tx
 from edisc_evidence.retention import effective_retain_until
+from edisc_renderers.report.html import glyph_set_id
 from edisc_worker.report_ops import ensure_job_reports
 from edisc_worker.reports import ReportRun
 
@@ -172,7 +173,12 @@ async def test_a_report_no_worker_can_build_opens_one_unroutable_episode(
     temporal: Client,
 ) -> None:  # fmt: skip
     t, job_id = await _sealed_job(app_sessions, s3, settings)
-    other = {"renderer_version": "0.0.1", "toolchain_id": "none", "unicode_version": "15.0.0"}
+    other = {
+        "renderer_version": "0.0.1",
+        "toolchain_id": "none",
+        "unicode_version": "15.0.0",
+        "glyph_set": glyph_set_id(),
+    }
     report_id = await new_report(app_sessions, t, job_id, identity=other)
     now = settings.model_copy(
         update={"render_unroutable_seconds": 0, "report_missing_seconds": 3600}

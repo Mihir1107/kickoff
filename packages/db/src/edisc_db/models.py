@@ -962,6 +962,7 @@ class Report(Base):
             "renderer_version",
             "toolchain_id",
             "unicode_version",
+            "glyph_set",
             "paper",
             unique=True,
             postgresql_where=text("status NOT IN ('requested', 'failed', 'refused')"),
@@ -978,6 +979,7 @@ class Report(Base):
     renderer_version: Mapped[str] = mapped_column(Text)
     unicode_version: Mapped[str] = mapped_column(Text)
     toolchain_id: Mapped[str] = mapped_column(Text)
+    glyph_set: Mapped[str] = mapped_column(Text)
     paper: Mapped[str] = mapped_column(Text)
     requested_by: Mapped[str] = mapped_column(Text)
     request_reason: Mapped[str | None] = mapped_column(Text)

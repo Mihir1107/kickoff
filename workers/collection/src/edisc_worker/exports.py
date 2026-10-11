@@ -44,6 +44,7 @@ from edisc_connector_slack_export.layout import (
     is_junk,
     nested_metadata,
     relative,
+    storable_key,
 )
 from edisc_core.ids import new_id
 from edisc_core.jsonstream import JsonStreamError, iter_array_elements
@@ -107,6 +108,7 @@ class _Scan:
     anomalies: int = 0
     anomaly_sample: list[str] = field(default_factory=list)
     elements_without_ts: int = 0
+    thread_ts_lone_surrogate: int = 0  # thread_ts holding a lone surrogate: not indexed (§23)
     unparseable: int = 0
     unparseable_sample: list[str] = field(default_factory=list)
 
@@ -377,8 +379,9 @@ class ExportIngest:
                 max_element_bytes=self.settings.export_max_json_element_bytes,
             ):
                 user = json.loads(raw)
-                if isinstance(user, dict) and isinstance(user.get("team_id"), str):
-                    teams[user["team_id"]] += 1
+                team = storable_key(user.get("team_id")) if isinstance(user, dict) else None
+                if team is not None:  # a lone surrogate (§23) never names the workspace
+                    teams[team] += 1
         except (JsonStreamError, ValueError) as exc:
             raise ExportRejectedError("metadata_invalid", f"users.json: {exc}") from exc
         return teams.most_common(1)[0][0] if teams else None
@@ -465,7 +468,12 @@ class ExportIngest:
                     anomalies += 1
                     if len(scan.anomaly_sample) < SAMPLE:
                         scan.anomaly_sample.append(f"{entry.name}: {ts}")
-                thread_ts = message.get("thread_ts")
+                raw_thread = message.get("thread_ts")
+                thread_ts = storable_key(raw_thread)
+                if thread_ts is None and isinstance(raw_thread, str):
+                    # no thread can be keyed by it (ADR 0018 §23): counted in the findings, never
+                    # indexed; the message is collected and its derivation keeps the exact value
+                    scan.thread_ts_lone_surrogate += 1
                 if conversation is not None and isinstance(thread_ts, str):
                     found.append(
                         {"entry": entry.index, "element": index, "conv": conversation,
@@ -758,6 +766,7 @@ class ExportIngest:
             "threaded_messages": scan.threaded,
             "ts_outside_hint_day": {"count": scan.anomalies, "sample": scan.anomaly_sample},
             "elements_without_ts": scan.elements_without_ts,
+            "thread_ts_lone_surrogate": scan.thread_ts_lone_surrogate,
             "day_files_unparseable": {"count": scan.unparseable, "sample": scan.unparseable_sample},
             "os_metadata_entries": {"count": scan.junk, "sample": scan.junk_sample},
             "name_encodings": {

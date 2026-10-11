@@ -9,14 +9,18 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
-from edisc_core.canonical import canonical_hash
+from edisc_core.canonical import canonical_source_hash
 from edisc_core.idempotency import idempotency_key
+from edisc_core.lone_surrogates import FIELD, has_lone, make_valid
 from edisc_core.schemas import EventKind, ItemType
 
-NORMALIZER_VERSION = "0.2.0"
+NORMALIZER_VERSION = "0.3.0"
 """Recorded on every derived record (item_derivations). Bump when derivation logic changes. Changing a
 FINGERPRINT definition additionally changes content hashes (see the fp tags in slack.py) and is a
-deliberate, reviewed change (ADR 0004)."""
+deliberate, reviewed change (ADR 0004). 0.3.0: lone surrogates are collected (ADR 0018 §23): source
+hashes write them as escapes (``canonical_source_json``), a derived record holds their replacement
+text plus ``lone_surrogates`` (JSON Pointer -> exact UTF-16 code units); before, such a page failed
+the job. Every other derivation is byte-identical to 0.2.0's."""
 
 
 @dataclass(frozen=True)
@@ -95,9 +99,22 @@ class Derived:
     in_scope: bool
     derived: Mapping[str, Any]
 
+    def __post_init__(self) -> None:
+        """The record as STORED (ADR 0018 §23): valid Unicode everywhere. A string holding a lone
+        surrogate becomes its replacement text and ``derived["lone_surrogates"]`` records its exact
+        code units by JSON Pointer; hints are stored replaced by the normalizer. The fingerprint is
+        hashed losslessly (it is never stored)."""
+        if FIELD in self.derived:
+            raise ValueError(f"{self.source_item_id}: '{FIELD}' is reserved in a derived record")
+        valid, found = make_valid(dict(self.derived))
+        if found:
+            object.__setattr__(self, "derived", {**valid, FIELD: found})
+        if any(has_lone(v) for v in self.change_hints.values()):
+            raise ValueError(f"{self.source_item_id}: change hints must be stored replaced")
+
     @property
     def content_hash(self) -> str:
-        return canonical_hash(dict(self.fingerprint))
+        return canonical_source_hash(dict(self.fingerprint))
 
     def idempotency_key(self, tenant_id: uuid.UUID, source: str) -> str:
         return idempotency_key(tenant_id, source, self.source_item_id, self.content_hash)

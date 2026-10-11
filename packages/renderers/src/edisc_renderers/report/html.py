@@ -41,6 +41,8 @@ from functools import cache
 from importlib import resources
 from typing import Any
 
+from edisc_core.lone_surrogates import FIELD as LONE_SURROGATES
+from edisc_renderers.report.model import exact_document
 from edisc_renderers.report.version import REPORT_RENDERER_VERSION
 
 # bidi controls: ALEF (U+061C), LRM/RLM, the embeddings/overrides U+202A-U+202E, the isolates
@@ -73,6 +75,17 @@ def _coverage() -> tuple[list[int], list[int]]:
             starts.append(int(lo, 16))
             ends.append(int(hi or lo, 16))
     return starts, ends
+
+
+@cache
+def glyph_set_id() -> str:
+    """SHA-256 of the glyph set the HTML is built with: the coverage ranges, one ``lo-hi`` line each
+    in file order (comments excluded). Part of the report identity, its unique index, its queue and
+    the golden key (§24): a font change that changes coverage changes the HTML's bytes, and must
+    change the identity, even where the PDF toolchain id is ``none``."""
+    starts, ends = _coverage()
+    lines = "".join(f"{lo:04X}-{hi:04X}\n" for lo, hi in zip(starts, ends, strict=True))
+    return hashlib.sha256(lines.encode("ascii")).hexdigest()
 
 
 def covered(cp: int) -> bool:
@@ -251,8 +264,12 @@ def _section_pairs(name: str, section: Mapping[str, Any], skip: Sequence[str] = 
 
 
 def report_html(doc: Mapping[str, Any]) -> bytes:
-    """`report.html` for a `report_document` (§3.2, §4). Banner first, exceptions before the totals,
-    every enum value in the count tables, UNKNOWN where nothing was recorded."""
+    """`report.html` for a `report.json` document (§3.2, §4). Banner first, exceptions before the
+    totals, every enum value in the count tables, UNKNOWN where nothing was recorded. Strings that
+    `report.json` writes as replacement text plus code units (§23) are shown EXACTLY: each lone
+    surrogate as its marker."""
+    lone = (doc.get("integrity") or {}).get(LONE_SURROGATES) or {}
+    doc = exact_document(doc)
     exc = doc["exceptions"]
     unit_cols = [("status", "recon_status"), ("unit", "unit_key"), ("expected", "expected"),
                  ("collected", "collected"), ("error", "error")]  # fmt: skip
@@ -306,7 +323,13 @@ def report_html(doc: Mapping[str, Any]) -> bytes:
         _section_pairs("Renders", doc["renders"]),
         _h2("Divergences", doc["divergences"].get("source")),
         _divergences(doc["divergences"].get("divergences", [])),
-        _section_pairs("Integrity", doc["integrity"], skip=("files",)),
+        _section_pairs("Integrity", doc["integrity"], skip=("files", LONE_SURROGATES)),
+        el(
+            "p",
+            f"Strings holding lone UTF-16 surrogates: {num(int(lone.get('count', 0)))} (each"
+            " surrogate shown as its U+D800-U+DFFF marker; report.json and every JSONL row write"
+            " the string as its replacement text with its exact code units in lone_surrogates)",
+        ),
         _integrity_files(doc["integrity"].get("files", [])),
         el("p", f"report renderer {escape(REPORT_RENDERER_VERSION)}", **{"class": "src"}),
         "</body>",
@@ -331,6 +354,7 @@ def _divergences(divs: Sequence[Mapping[str, Any]]) -> str:
 
 
 def _integrity_files(files: Sequence[Mapping[str, Any]]) -> str:
-    rows = [[user(f.get("name")), num(f.get("rows", 0)), num(f.get("size", 0)), user(f.get("sha256"))]
+    rows = [[user(f.get("name")), num(f.get("rows", 0)), num(f.get("size", 0)),
+             num(f.get(LONE_SURROGATES, 0)), user(f.get("sha256"))]
             for f in files]  # fmt: skip
-    return table(["file", "rows", "bytes", "sha256"], rows)
+    return table(["file", "rows", "bytes", "lone surrogates", "sha256"], rows)

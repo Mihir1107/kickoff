@@ -49,6 +49,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from types_aiobotocore_s3 import S3Client
 
 from edisc_core.ids import new_id
+from edisc_core.lone_surrogates import recorded_text, replacement
 from edisc_core.settings import Settings
 from edisc_custody.chain import anchor_key
 from edisc_custody.log import anchor_if_due, append
@@ -63,6 +64,7 @@ from edisc_custody.report_files import (
 from edisc_db.session import tenant_tx
 from edisc_evidence.worm import get_bytes
 from edisc_evidence.writer import EvidenceIntegrityError, EvidenceWriter
+from edisc_renderers.report.html import glyph_set_id
 from edisc_renderers.report.version import REPORT_RENDERER_VERSION
 from edisc_worker import versions
 from edisc_worker.activities import _ticking
@@ -113,6 +115,7 @@ def runtime_identity(settings: Settings | None = None) -> dict[str, str]:
         "renderer_version": REPORT_RENDERER_VERSION,
         "toolchain_id": _toolchain(s.report_pdf_python, s.env.is_disposable),
         "unicode_version": unicodedata.unidata_version,
+        "glyph_set": glyph_set_id(),  # the HTML depends on it even without a PDF (§24)
     }
 
 
@@ -153,8 +156,8 @@ async def create_report(
     await s.execute(
         text(
             "INSERT INTO reports (id, tenant_id, job_id, matter_id, renderer_version,"
-            " unicode_version, toolchain_id, paper, requested_by, request_reason, request_id)"
-            " VALUES (:i, :t, :j, :m, :rv, :uv, :tc, :p, :by, :why, :rid)"
+            " unicode_version, toolchain_id, glyph_set, paper, requested_by, request_reason,"
+            " request_id) VALUES (:i, :t, :j, :m, :rv, :uv, :tc, :gs, :p, :by, :why, :rid)"
         ),
         {
             "i": report_id,
@@ -164,6 +167,7 @@ async def create_report(
             "rv": ident["renderer_version"],
             "uv": ident["unicode_version"],
             "tc": ident["toolchain_id"],
+            "gs": ident["glyph_set"],
             "p": paper,
             "by": requested_by,
             "why": request_reason,
@@ -285,6 +289,7 @@ class ReportRun:
             "renderer_version": row.renderer_version,
             "toolchain_id": row.toolchain_id,
             "unicode_version": row.unicode_version,
+            "glyph_set": row.glyph_set,
             "paper": row.paper,
         }
 
@@ -683,6 +688,9 @@ class ReportRun:
     async def fail(
         self, tenant_id: uuid.UUID, report_id: uuid.UUID, error_type: str, error: str
     ) -> dict[str, Any]:
+        # an error text quoting a lone surrogate: valid, exact code units in the event (§23)
+        error_type = replacement(error_type)
+        error, exact = recorded_text(error, 2000)
         row = await self.row(tenant_id, report_id)
         if row.status in LIVE:
             async with tenant_tx(self.sessions, tenant_id) as s:
@@ -697,7 +705,8 @@ class ReportRun:
                             "job_id": str(cur.job_id),
                             "from_status": cur.status,
                             "error_type": error_type[:200],
-                            "error": error[:2000],
+                            "error": error,
+                            **{f"error_{k}": v for k, v in exact.items()},
                             "files_done": cur.files_done,
                         },
                     )
@@ -707,7 +716,7 @@ class ReportRun:
                             "UPDATE reports SET status = 'failed', reason = :r, detail = :d,"
                             " finished_at = now(), updated_at = now() WHERE id = :i"
                         ),
-                        {"r": error_type[:200] or "error", "d": error[:2000], "i": report_id},
+                        {"r": error_type[:200] or "error", "d": error, "i": report_id},
                     )
                     await s.execute(
                         text(
@@ -987,7 +996,10 @@ async def start_report_workflow(
             ReportRef.from_settings(str(tenant_id), str(report_id), settings),
             id=report_workflow_id(str(report_id)),
             task_queue=report_task_queue(
-                identity["renderer_version"], identity["toolchain_id"], identity["unicode_version"]
+                identity["renderer_version"],
+                identity["toolchain_id"],
+                identity["unicode_version"],
+                identity["glyph_set"],
             ),
             id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
             id_conflict_policy=WorkflowIDConflictPolicy.FAIL,

@@ -68,7 +68,8 @@ def folder_name(conv: Conversation, opts: ExportOptions, index: int) -> str:
 
 
 def _dump(value: Any) -> bytes:
-    return json.dumps(value, ensure_ascii=False, indent=4).encode("utf-8")
+    # a lone surrogate (spec.lone_surrogates) cannot be UTF-8: written as its `\\uXXXX` JSON escape
+    return json.dumps(value, ensure_ascii=False, indent=4).encode("utf-8", "backslashreplace")
 
 
 def _created(ds: Dataset) -> int:

@@ -33,8 +33,9 @@ from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from edisc_core.canonical import canonical_hash
+from edisc_core.canonical import canonical_source_hash as canonical_hash
 from edisc_core.jsonpath import build
+from edisc_core.lone_surrogates import has_lone, replacement
 from edisc_core.schemas import EventKind, ItemType
 from edisc_core.time import day_bounds, ensure_utc
 from edisc_normalizer.model import (
@@ -78,18 +79,26 @@ class MissingFileEvidenceError(NormalizationError):
 
 
 # ------------------------------------------------------------------ ids
+def _identity(subject: str) -> str:
+    """An item identity is stored and indexed text: a lone surrogate (from escaped source JSON) cannot
+    be one, and replacing it would merge distinct subjects. The unit fails loudly instead."""
+    if has_lone(subject):
+        raise NormalizationError(f"an identity holds a lone surrogate: {subject!a}")
+    return subject
+
+
 def message_id(workspace: str, channel: str, ts: str) -> str:
     if not channel or not ts:
         raise NormalizationError("message identity needs channel and ts")
-    return f"{workspace}/{channel}/{ts}"
+    return _identity(f"{workspace}/{channel}/{ts}")
 
 
 def file_item_id(workspace: str, file_id: str) -> str:
-    return f"{workspace}/file/{file_id}"
+    return _identity(f"{workspace}/file/{file_id}")
 
 
 def profile_id(workspace: str, user_id: str, *, embed: bool = False) -> str:
-    return f"{workspace}/user/{user_id}#profile{'-embed' if embed else ''}"
+    return _identity(f"{workspace}/user/{user_id}#profile{'-embed' if embed else ''}")
 
 
 def ts_datetime(ts: str) -> datetime:
@@ -161,6 +170,13 @@ def _hints(raw: Mapping[str, Any]) -> dict[str, str]:
     if raw.get("deleted_ts"):
         hints["deleted_ts"] = str(raw["deleted_ts"])
     return hints
+
+
+def _stored_hints(hints: Mapping[str, str]) -> dict[str, str]:
+    """Change hints as STORED (``items.change_hints``) and compared with the stored ones: a lone
+    surrogate is its replacement text (the message's derivation keeps the exact value, ADR 0018
+    §23)."""
+    return {k: replacement(v) for k, v in hints.items()}
 
 
 def _changes(
@@ -378,7 +394,8 @@ def normalize_messages_page(
             "deleted": deleted,
             "files": sorted(file_entries),
         }
-        hints = _hints(raw)
+        exact_hints = _hints(raw)
+        hints = _stored_hints(exact_hints)
         text = "" if deleted else raw.get("text", "")
         message = Derived(
             source_item_id=mid,
@@ -401,8 +418,8 @@ def normalize_messages_page(
                 "subtype": raw.get("subtype"),
                 "thread_root": fingerprint["thread_root"],
                 "deleted": deleted,
-                "edited_ts": hints.get("edited_ts"),
-                "deleted_ts": hints.get("deleted_ts"),
+                "edited_ts": exact_hints.get("edited_ts"),
+                "deleted_ts": exact_hints.get("deleted_ts"),
                 "file_ids": sorted(e[0] for e in file_entries),
                 # [id, name, mimetype] as shown in the message (the fingerprint's file references)
                 "files": sorted(file_entries),

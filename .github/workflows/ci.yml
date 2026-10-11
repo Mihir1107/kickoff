@@ -100,6 +100,25 @@ jobs:
   # id must match byte for byte (an image whose id has no recorded generation fails), veraPDF must pass
   # PDF/A-2u on every golden PDF, fonts stay isolated, and a real report worker container survives an
   # OOM of its PDF child (RLIMIT_AS and cgroup paths) and heartbeats while the child works.
+  # The API and every worker type, started from a production install (uv sync --frozen --no-dev
+  # --package <app> --no-editable, as the images install them) against the test stack: a runtime
+  # import of something only the dev group provides fails here (ADR 0018 §26).
+  production-install:
+    runs-on: ubuntu-24.04
+    needs: [lint, typecheck, unit]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --all-packages --locked
+      - run: make test-env-up MIN_FREE_GB=8
+      - run: make test-production-install
+      - if: always()
+        run: make test-env-down
+
   report-pdf:
     runs-on: ubuntu-24.04
     needs: [lint, typecheck, unit]

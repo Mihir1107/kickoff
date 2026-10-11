@@ -23,6 +23,7 @@ from edisc_core.settings import Settings
 from edisc_custody.log import verify_chain
 from edisc_db.session import tenant_tx
 from edisc_evidence.writer import EvidenceWriter
+from edisc_renderers.report.html import glyph_set_id
 from edisc_worker.reports import ReportIntegrityError, ReportRun
 
 from ..normalizer.harness import Sessions, Tenant, new_job, new_tenant
@@ -81,7 +82,7 @@ async def test_a_report_is_stored_recorded_and_sealed(
     )
     assert started["identity"] == {"renderer_version": st["row"].renderer_version,
                                    "toolchain_id": "none", "unicode_version": st["row"].unicode_version,
-                                   "paper": "letter"}  # fmt: skip
+                                   "glyph_set": glyph_set_id(), "paper": "letter"}  # fmt: skip
     await _one_version_per_key(s3, settings, t, report_id)
     # the job's own chain was never appended to
     job_chain = await verify_chain(app_sessions, s3, settings, tenant_id=t.tenant_id,
@@ -244,7 +245,12 @@ async def test_a_report_for_another_runtime_is_never_built_here(
     app_sessions: Sessions, s3: S3Client, settings: Settings
 ) -> None:
     t, job_id = await _sealed_job(app_sessions, s3, settings)
-    other = {"renderer_version": "9.9.9", "toolchain_id": "none", "unicode_version": "15.0.0"}
+    other = {
+        "renderer_version": "9.9.9",
+        "toolchain_id": "none",
+        "unicode_version": "15.0.0",
+        "glyph_set": glyph_set_id(),
+    }
     report_id = await new_report(app_sessions, t, job_id, identity=other)
     out = await drive(ReportRun(app_sessions, s3, settings), t.tenant_id, report_id)
     assert (out["status"], out["reason"]) == ("failed", "ReportIntegrityError")

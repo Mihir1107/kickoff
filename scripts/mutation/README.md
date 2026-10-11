@@ -15,6 +15,7 @@ MIN_FREE_GB=12 make test-env-up                              # integration break
 uv run python scripts/mutation/run.py --kind integration     # about 10 minutes on a laptop
 make test-env-down
 uv run python scripts/mutation/run.py --round s21-review --only native_copy_unlocked -v
+make test-report-pdf                                         # runs --kind image INSIDE the report image
 ```
 
 Exit status 0 only if every selected break was caught and every edit applied. `-v` prints the tail
@@ -43,6 +44,7 @@ broken next to a `<name>.mutation-backup` copy: the runner refuses to start unti
 | `ci-heartbeat` | slice rendering off the event loop: heartbeats never starved (CI run 37412915073, ADR 0015 §23) | 1 |
 | `m16-stream` | the report lifecycle, custody stream, stored files, retention, episodes (ADR 0018, M16 step 4) | 13 |
 | `m16-model` | the collection report model, loader and recorded access facts (ADR 0018, M16 step 1) | 21 |
+| `m16-pre5` | lone surrogates, the glyph set in the identity, PDF from stored HTML (tamper), image-only breaks (kind `image`, run in the report image), production install (ADR 0018 §23-§26) | 28 |
 | `s24-loop` | the event-loop guard, every CPU step of an activity off the loop, the render thread writes nothing (ADR 0015 §24) | 37 |
 
 The `s19-*` rounds were run by hand when they were built and only their categories were written

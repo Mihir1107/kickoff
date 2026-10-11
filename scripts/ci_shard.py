@@ -32,7 +32,7 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[1]
 DURATIONS = _REPO / "tests" / "integration" / "durations.json"
 # the CI job's selection (Makefile `test-integration`): keep in sync
-MARKERS = "not elasticsearch"
+MARKERS = "not elasticsearch and not production_install"
 
 
 def load_durations(path: Path | None = None) -> dict[str, float]:

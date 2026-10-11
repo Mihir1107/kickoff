@@ -15,7 +15,13 @@ from edisc_connector_dummy.dialects.slack_export import ExportOptions, write_exp
 from edisc_worker.renders import RenderRun
 
 from ..corpus.cases import EXPORT
-from ..corpus.check import check_against_oracle, check_golden, check_package, stored
+from ..corpus.check import (
+    check_against_oracle,
+    check_golden,
+    check_job_package,
+    check_package,
+    stored,
+)
 from ..corpus.oracle import build
 from ..renders.conftest import drive, new_render, render_state
 from .conftest import Api, FileHost, TenantCtx, collection_workers
@@ -52,3 +58,7 @@ async def test_export_case(api: Api, tenant: TenantCtx, tmp_path: Path, name: st
         manifests = check_against_oracle(case, oracle, files, dict(st["row"].summary))
         check_golden(name, manifests)
         await check_package(exp.sessions, exp.s3, rs, tenant.tenant_id, render_id, tmp_path / "pkg")
+        if case.spec.lone_surrogates:
+            await check_job_package(
+                exp.sessions, exp.s3, rs, tenant.tenant_id, job_id, tmp_path / "job"
+            )

@@ -16,6 +16,7 @@ from edisc_connector_slack_export.layout import (
     is_junk,
     nested_metadata,
     relative,
+    storable_key,
 )
 
 
@@ -141,3 +142,19 @@ def test_os_litter() -> None:
     ):
         assert is_junk(junk), junk
     assert not is_junk("general/2026-01-05.json") and not is_junk("MACOSX.json")
+
+
+def test_a_record_naming_a_conversation_with_a_lone_surrogate_is_invalid_not_stored() -> None:
+    """Escaped JSON can hold a lone surrogate (ADR 0018 §23): it names no storable id or zip folder,
+    so the record is invalid (counted in the findings), never inserted, never a crash."""
+    lone = chr(0xDC00)
+    assert conversation_record("channel", {"id": "C" + lone, "name": "general"}) is None
+    assert conversation_record("channel", {"id": "C1", "name": "gen" + lone}) is None
+    rec = conversation_record("channel", {"id": "C1", "name": "general", "team_id": "T" + lone})
+    assert rec is not None and rec.team_id is None  # an unusable team is not taken
+
+
+def test_a_key_with_a_lone_surrogate_is_not_storable() -> None:
+    assert storable_key("1767571200.000100") == "1767571200.000100"
+    assert storable_key("1767571200." + chr(0xD800)) is None
+    assert storable_key(None) is None and storable_key(5) is None

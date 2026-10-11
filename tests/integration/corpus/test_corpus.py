@@ -26,7 +26,14 @@ from ...unit.dummy.conftest import RecordingLimiter
 from ..normalizer.harness import Sessions, Tenant, new_tenant
 from ..renders.conftest import drive, new_render, render_state
 from .cases import CASES, LIVE, Case, real_exports
-from .check import check_against_oracle, check_golden, check_package, stored, stored_natives
+from .check import (
+    check_against_oracle,
+    check_golden,
+    check_job_package,
+    check_package,
+    stored,
+    stored_natives,
+)
 from .oracle import COVERAGE, build
 
 
@@ -105,6 +112,8 @@ async def test_live_case(
     assert all(hashlib.sha256(data).hexdigest() == sha for sha, data in natives.items())
     check_golden(name, manifests)
     await check_package(app_sessions, s3, rs, t.tenant_id, render_id, tmp_path / "pkg")
+    if case.spec.lone_surrogates:
+        await check_job_package(app_sessions, s3, rs, t.tenant_id, job_id, tmp_path / "job")
 
 
 def test_the_corpus_covers_the_matrix() -> None:

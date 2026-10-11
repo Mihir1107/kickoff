@@ -36,6 +36,7 @@ from types_aiobotocore_s3 import S3Client
 
 from edisc_core.settings import Settings
 from edisc_db.session import tenant_tx
+from edisc_renderers.report.html import glyph_set_id
 from edisc_renderers.report.version import REPORT_RENDERER_VERSION
 from edisc_worker.contracts import ReportRef, report_task_queue, report_workflow_id
 from edisc_worker.workflows import ReportWorkflow
@@ -137,7 +138,7 @@ async def _big_report(
     t = await new_tenant(sessions)
     job = await sealed_job(sessions, s3, settings, t, unit_keys(1_001, 2), gap_every=2)
     identity = {"renderer_version": REPORT_RENDERER_VERSION, "toolchain_id": toolchain,
-                "unicode_version": unicodedata.unidata_version}  # fmt: skip
+                "unicode_version": unicodedata.unidata_version, "glyph_set": glyph_set_id()}  # fmt: skip
     return t, job, await new_report(sessions, t, job, identity=identity)
 
 
@@ -190,7 +191,11 @@ async def test_an_oom_of_the_pdf_child_fails_the_attempt_and_the_retry_completes
     image_facts: dict[str, Any], path: str,
 ) -> None:  # fmt: skip
     t, _, report_id = await _big_report(app_sessions, s3, settings, image_facts["toolchain"])
-    queue = f"{report_task_queue(REPORT_RENDERER_VERSION, image_facts['toolchain'], unicodedata.unidata_version)}.t-{uuid.uuid4().hex[:6]}"
+    runtime = report_task_queue(
+        REPORT_RENDERER_VERSION, image_facts["toolchain"], unicodedata.unidata_version,
+        glyph_set_id(),
+    )  # fmt: skip
+    queue = f"{runtime}.t-{uuid.uuid4().hex[:6]}"
     name = f"edisc-report-oom-{path}-{uuid.uuid4().hex[:6]}"
     if path == "rlimit":  # the child's own limit: room to start and render a tiny page, no more
         env = {"EDISC_REPORT_PDF_MEMORY_BYTES": str(image_facts["small_vm_peak"] + 64 * MiB)}
@@ -248,7 +253,7 @@ async def test_heartbeats_flow_while_the_pdf_child_is_held(
     t = await new_tenant(app_sessions)
     job = await sealed_job(app_sessions, s3, settings, t, unit_keys(5))
     identity = {"renderer_version": REPORT_RENDERER_VERSION, "toolchain_id": image_facts["toolchain"],
-                "unicode_version": unicodedata.unidata_version}  # fmt: skip
+                "unicode_version": unicodedata.unidata_version, "glyph_set": glyph_set_id()}  # fmt: skip
     report_id = await new_report(app_sessions, t, job, identity=identity)
     queue = f"{report_task_queue(**identity)}.t-{uuid.uuid4().hex[:6]}"
     hold = str(2.5 * FAST["heartbeat_timeout_seconds"])

@@ -35,8 +35,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
 
 from edisc_connector_slack_export.archive_access import open_archive_entry
-from edisc_core.canonical import canonical_hash
+from edisc_core.canonical import canonical_hash, canonical_source_hash
 from edisc_core.jsonpath import JsonPathError, resolve
+from edisc_core.lone_surrogates import FIELD as LONE_SURROGATES
+from edisc_core.lone_surrogates import restore
 from edisc_core.schemas import ItemType, JobStatus
 from edisc_core.settings import Settings
 from edisc_db.session import tenant_tx
@@ -194,6 +196,20 @@ def _check_derivations(rows: Sequence[Any]) -> None:
             raise RenderInputIntegrityError(f"derivation of item {d.item_id} was altered")
 
 
+def _exact(item_id: uuid.UUID, derived: Mapping[str, Any]) -> dict[str, Any]:
+    """A derivation with its exact strings: those holding a lone surrogate are stored as replacement
+    text plus their code units (ADR 0018 §23); the renderer gets the originals and decides how to
+    write them. A record whose text does not match its code units is an integrity failure."""
+    found = derived.get(LONE_SURROGATES)
+    if not found:
+        return dict(derived)
+    rest = {k: v for k, v in derived.items() if k != LONE_SURROGATES}
+    try:
+        return dict(restore(rest, found))
+    except ValueError as exc:
+        raise RenderInputIntegrityError(f"derivation of item {item_id}: {exc}") from exc
+
+
 def _check_page(data: bytes, items: Sequence[Any]) -> None:
     """Every item's sub-document of a verified page matches its `raw_hash` (pure: runs in a
     thread, so the activity keeps heartbeating while a large page is parsed and hashed)."""
@@ -203,7 +219,7 @@ def _check_page(data: bytes, items: Sequence[Any]) -> None:
             node = resolve(document, item.json_path)
         except JsonPathError as exc:
             raise RenderInputIntegrityError(f"item {item.id}: {exc}") from exc
-        if canonical_hash(node) != item.raw_hash:
+        if canonical_source_hash(node) != item.raw_hash:  # source data: lossless (§23)
             raise RenderInputIntegrityError(
                 f"item {item.id}: sub-document at {item.json_path} does not match raw_hash"
             )
@@ -528,7 +544,7 @@ class RenderLoader:
             for d in found:
                 key = _version_key(d.normalizer_version)
                 if d.item_id not in derived or key > derived[d.item_id][0]:
-                    derived[d.item_id] = (key, d.derived)
+                    derived[d.item_id] = (key, _exact(d.item_id, d.derived))
         out: dict[str, list[Any]] = defaultdict(list)
         for r in sorted(rows, key=lambda r: (r.source_item_id, r.version)):
             if r.id not in derived:

@@ -159,7 +159,7 @@ async def assert_completed(
     want = await expected_files(
         sessions, s3, settings, t, job_id, dict(row.snapshot),
         {"renderer_version": row.renderer_version, "toolchain_id": row.toolchain_id,
-         "unicode_version": row.unicode_version, "paper": row.paper},
+         "unicode_version": row.unicode_version, "glyph_set": row.glyph_set, "paper": row.paper},
         row.image_digest,
     )  # fmt: skip
     if stored != want:  # name the differing section (a mutable input outside the snapshot)

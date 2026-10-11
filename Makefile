@@ -16,12 +16,14 @@ TEST_TMP := $(or $(TMPDIR),/tmp)/edisc-tests
 TEST_RUN := EDISC_ENV_FILE=$(TEST_ENV) EDISC_COMPOSE_PROJECT=edisc-test uv run
 TEST_LOGS := test-stack-logs.txt
 TESTS ?= tests/integration
+# the suite's selection (scripts/ci_shard.py MARKERS: keep in sync); production_install has its own job
+INTEGRATION_MARKERS ?= not elasticsearch and not production_install
 # Exclusive lock on the one edisc-test stack: a second run fails fast instead of sharing it (ADR 0015 §24.6)
 TEST_LOCK := $(or $(EDISC_TEST_STACK_LOCK),$(or $(TMPDIR),/tmp)/edisc-test-stack.lock)
 STACK_LOCK := uv run python scripts/stack_lock.py
 
 .DEFAULT_GOAL := help
-.PHONY: help hooks sync disk-guard test-env-up test-env-down up up-search up-ci down nuke ps logs migrate lint fmt typecheck test test-integration test-all worker api check test-report-pdf
+.PHONY: help hooks sync disk-guard test-env-up test-env-down up up-search up-ci down nuke ps logs migrate lint fmt typecheck test test-integration test-all worker api check test-report-pdf test-production-install
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -106,7 +108,7 @@ test-integration: disk-guard ## Integration tests on a FRESH ephemeral stack, de
 	@rm -rf $(TEST_TMP) && mkdir -p $(TEST_TMP)
 	@status=0; \
 	if $(MAKE) test-env-up LOCK_LABEL=test-integration; then \
-	  $(TEST_RUN) pytest $(TESTS) -m "not elasticsearch" --basetemp=$(TEST_TMP)/pytest $(PYTEST_ARGS) || status=$$?; \
+	  $(TEST_RUN) pytest $(TESTS) -m "$(INTEGRATION_MARKERS)" --basetemp=$(TEST_TMP)/pytest $(PYTEST_ARGS) || status=$$?; \
 	  if [ $$status -ne 0 ]; then $(TEST_COMPOSE) logs --no-color --tail=200 > $(TEST_LOGS) 2>&1 || true; \
 	    echo "test stack logs saved to $(TEST_LOGS)" >&2; fi; \
 	  $(MAKE) test-env-down; \
@@ -116,7 +118,10 @@ test-integration: disk-guard ## Integration tests on a FRESH ephemeral stack, de
 REPORT_IMAGE ?= edisc-report-test:dev
 REPORT_PDF_OUT ?= $(TEST_TMP)/report-pdf
 VERAPDF = verapdf/cli:v1.30.2@sha256:d5ee329657cf9bc4b2400392dd54c7d0a0ce9980ff6fa2da5590eebeec007cdb
-test-report-pdf: ## M16 PDF in the pinned linux/amd64 report image (needs make test-env-up): toolchain, PDF goldens (admission), font isolation, veraPDF, worker OOM + heartbeats
+test-production-install: ## The API and every worker type start from a no-dev, non-editable install (needs make test-env-up)
+	$(MAKE) test-integration-only TESTS=tests/integration/production INTEGRATION_MARKERS=production_install
+
+test-report-pdf: ## M16 PDF in the pinned linux/amd64 report image (needs make test-env-up): toolchain, PDF goldens (admission), font isolation, veraPDF, image mutation breaks, worker OOM + heartbeats
 	docker buildx build --platform linux/amd64 -f deploy/report-image/Dockerfile --target report-test -t $(REPORT_IMAGE) --load .
 	@mkdir -p $(REPORT_PDF_OUT)
 	docker run --rm --platform linux/amd64 -e EDISC_REPORT_PDF_OUT=/out -e EDISC_RECORD_REPORT_PDF -e CI \
@@ -126,13 +131,17 @@ test-report-pdf: ## M16 PDF in the pinned linux/amd64 report image (needs make t
 	  | tee $(REPORT_PDF_OUT)/verapdf.txt
 	@test "$$(grep -c '^PASS' $(REPORT_PDF_OUT)/verapdf.txt)" = "$$(ls $(REPORT_PDF_OUT)/*.pdf | wc -l | tr -d ' ')" \
 	  || { echo "veraPDF: not every report PDF passes PDF/A-2u" >&2; exit 1; }
+	# the breaks only this image can catch (PDF bytes, the child's own RLIMIT_AS, font isolation):
+	# scripts/mutation/run.py --kind image edits the INSTALLED code and must see each test fail
+	docker run --rm --platform linux/amd64 -e CI -v $(CURDIR)/tests/golden:/src/tests/golden:ro \
+	  $(REPORT_IMAGE) python scripts/mutation/run.py --kind image
 	$(MAKE) test-integration-only TESTS=tests/integration/reports/test_report_pdf_worker.py \
 	  PYTEST_ARGS="-p no:randomly -rs" EDISC_REPORT_IMAGE=$(REPORT_IMAGE)
 
 test-integration-only: ## Run integration tests on an ALREADY RUNNING test stack (make test-env-up); keeps it
 	@$(STACK_LOCK) require $(TEST_LOCK)
 	@rm -rf $(TEST_TMP) && mkdir -p $(TEST_TMP)
-	$(TEST_RUN) pytest $(TESTS) -m "not elasticsearch" --basetemp=$(TEST_TMP)/pytest $(PYTEST_ARGS)
+	$(TEST_RUN) pytest $(TESTS) -m "$(INTEGRATION_MARKERS)" --basetemp=$(TEST_TMP)/pytest $(PYTEST_ARGS)
 
 check: lint typecheck test ## Everything CI runs without services
 

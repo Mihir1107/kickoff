@@ -128,7 +128,10 @@ def message(ds: Dataset, m: Msg, epoch: int) -> dict[str, Any]:
 
 def _dump(payload: dict[str, Any]) -> bytes:
     # Raw, not canonical: key order is construction order, like a real API response.
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    # a lone surrogate (spec.lone_surrogates) cannot be UTF-8: written as its `\\uXXXX` JSON escape
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8", "backslashreplace"
+    )
 
 
 def history_page(

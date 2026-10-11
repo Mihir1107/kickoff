@@ -135,4 +135,5 @@ markers = [
     "integration: requires the docker compose services (make up)",
     "slow: long-running acceptance tests",
     "elasticsearch: needs Elasticsearch (not started in CI during Phase 1)",
+    "production_install: starts the API and workers from a no-dev install (own CI job: make test-production-install)",
 ]

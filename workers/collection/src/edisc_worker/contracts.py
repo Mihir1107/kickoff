@@ -43,10 +43,15 @@ def report_workflow_id(report_id: str) -> str:
     return f"report-{report_id}"
 
 
-def report_task_queue(renderer_version: str, toolchain_id: str, unicode_version: str) -> str:
-    """The queue of the report workers of exactly this runtime (ADR 0018 §6):
-    ``reports.r<renderer>.p<toolchain12>.u<unicode>``."""
-    return f"{REPORTS_QUEUE}.r{renderer_version}.p{toolchain_id[:12]}.u{unicode_version}"
+def report_task_queue(
+    renderer_version: str, toolchain_id: str, unicode_version: str, glyph_set: str
+) -> str:
+    """The queue of the report workers of exactly this runtime (ADR 0018 §6, §24):
+    ``reports.r<renderer>.p<toolchain12>.u<unicode>.g<glyphs12>``."""
+    return (
+        f"{REPORTS_QUEUE}.r{renderer_version}.p{toolchain_id[:12]}.u{unicode_version}"
+        f".g{glyph_set[:12]}"
+    )
 
 
 def unit_workflow_id(job_id: str, unit_key: str) -> str:

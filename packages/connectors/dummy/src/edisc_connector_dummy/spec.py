@@ -70,6 +70,9 @@ class DatasetSpec(BaseModel):
     p_broadcast: float = 0.10  # a reply also sent to the channel (subtype thread_broadcast)
     p_me_message: float = 0.03
     p_uninterpretable: float = 0.02  # subtypes the renderer cannot interpret (rendered `unknown`)
+    # hostile strings (0.5.0): lone UTF-16 surrogates, written as `\\uXXXX` escapes in the JSON,
+    # in conversation 0 / day 0 message texts and one user's display name (dataset docstring)
+    lone_surrogates: bool = False
     # evolution per epoch
     p_edit: float = 0.06
     p_hint_only_edit: float = 0.03

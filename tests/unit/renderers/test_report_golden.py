@@ -5,8 +5,9 @@ goldens (step 3): a PDF golden is the PDF of a recorded `report.html` here, so a
 be recorded once the HTML it renders is pinned.
 
 `tests/golden/report/<key>/<case>/` holds `report.json`, `report.html` and `index.json`. The key is
-`<REPORT_RENDERER_VERSION>_unicode-<Unicode version>` (every input to byte identity besides the
-data; the inputs below are fixed literals, not generated). Changing the output bytes without bumping
+`<REPORT_RENDERER_VERSION>_unicode-<Unicode version>_glyphs-<glyph set 12>` (every input to byte
+identity besides the data: the glyph set decides which characters become markers, ADR 0018 §24;
+the inputs below are fixed literals, not generated). Changing the output bytes without bumping
 `REPORT_RENDERER_VERSION` fails here. Record a new generation (old ones stay as history):
 
     EDISC_RECORD_REPORT=1 uv run pytest tests/unit/renderers/test_report_golden.py
@@ -38,8 +39,8 @@ T0 = datetime(2026, 1, 5, 9, 0, tzinfo=UTC)
 SEALED = datetime(2026, 1, 6, 12, 34, 56, tzinfo=UTC)
 
 # names and error texts that exercise the sanitiser (S1's hard strings, the classes of fix 2, and a
-# user string that literally reads like a marker: fix 1); no lone surrogate (RFC 8785 cannot hold
-# one in report.json, which refuses it: test_report_html)
+# user string that literally reads like a marker: fix 1) and lone surrogates (report.json writes
+# them as replacement text plus code units, the HTML as markers: ADR 0018 §23)
 HARD = [
     "张伟（销售部）", "山田太郎・営業", "김민준 팀장", "محمد عبد الله", "שרה כהן",  # noqa: RUF001
     "Report: تقرير 2026 — שלב 3", "🎉 launch 👍🏽 🇮🇳", "👩‍👩‍👧‍👦 family", "é̂ Zalgo z̶a̷l̸",
@@ -47,10 +48,16 @@ HARD = [
     "Linear B \U00010000 and \U00013000", "literal [U+202E] text", "nul\x00 c0\x01 del\x7f c1\x85",
     "nonchar ﷐ ￿ tab\tcr\rlf\n", "<script>alert(1)</script> & \"'",
 ]  # fmt: skip
+# lone surrogates (§23): report.json writes them as replacement text plus code units, the HTML as
+# markers. Not in HARD's rotation (which the PDF tests rely on): the first failed unit's error.
+LONE = "lone \ud83d high, \udc00 low, \ude00\ud83d reversed"
 
 
 def key() -> str:
-    return f"{REPORT_RENDERER_VERSION}_unicode-{unicodedata.unidata_version}"
+    return (
+        f"{REPORT_RENDERER_VERSION}_unicode-{unicodedata.unidata_version}"
+        f"_glyphs-{rhtml.glyph_set_id()[:12]}"
+    )
 
 
 def recording() -> bool:
@@ -98,6 +105,8 @@ def _inputs(*, units: int, conversations: int, status: str = "completed", live: 
         error = (
             (HARD[(i * 7) % len(HARD)] if hard else "HTTP 429 after 6 retries") if failed else None
         )
+        if hard and failed and i == 0:
+            error = LONE
         row = {"unit_key": key_, "kind": "conversation_day", "conversation_id": conv,
                "day": key_[-10:], "zone": "UTC", "scopes": [0], "access_lost_reason": None,
                "divergent": False, "source": "job_chain", "status": "failed" if failed else "done",
@@ -106,7 +115,7 @@ def _inputs(*, units: int, conversations: int, status: str = "completed", live: 
                "file_gaps": None if failed else 0, "no_longer_observed": None if failed else 0,
                "basis": None, "day_anomalies": None, "error_type": "SourceError" if failed else None,
                "error": error}  # fmt: skip
-        units_file.add(m.jsonl_line(row))
+        units_file.row(row)
         status_counts[row["status"]] = status_counts.get(row["status"], 0) + 1
         recon_counts[recon] = recon_counts.get(recon, 0) + 1
         for k in totals:
@@ -165,7 +174,7 @@ CASES: dict[str, Callable[[], m.ReportInputs]] = {
 
 
 def build(name: str) -> dict[str, bytes]:
-    doc = m.report_document(CASES[name]())
+    doc = m.valid_document(m.report_document(CASES[name]()))
     return {"report.json": canonical_json(doc), "report.html": rhtml.report_html(doc)}
 
 
@@ -173,6 +182,7 @@ def _index(files: dict[str, bytes]) -> dict[str, Any]:
     return {
         "renderer_version": REPORT_RENDERER_VERSION,
         "unicode": unicodedata.unidata_version,
+        "glyph_set": rhtml.glyph_set_id(),
         "files": [
             {"name": n, "sha256": hashlib.sha256(b).hexdigest(), "size": len(b)}
             for n, b in sorted(files.items())
