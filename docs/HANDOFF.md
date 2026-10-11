@@ -1,4 +1,4 @@
-# Handoff (2026-10-11: fixes before step 5 done; M16 step 5 (API, job/report packages, verifier recomputation) built; next: M16 step 6 (preview))
+# Handoff (2026-10-11: fixes before step 5 and M16 step 5 done, CI green; next: a set of fixes the user will send, then M16 step 6 (preview))
 
 This file alone is enough to build M16. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (read it in full before any
@@ -12,7 +12,8 @@ M16 **steps 1-5 are built** (model, HTML, PDF, loader, custody stream, API + pac
 steps 6 (preview) and 7 (docs) are not. The step 3 CI run **38052005091 finished green** (lint,
 typecheck, unit, report-pdf, 4 integration shards). This round: `f84d847` (the fixes before step 5;
 CI run **38129918447 green**: lint, typecheck, unit, production-install, report-pdf natively on amd64
-with the image breaks, 4 integration shards) and the step 5 commit after it (check its CI run first).
+with the image breaks, 4 integration shards) and `86f6400` (step 5; CI run **38130947326 green**, all
+9 jobs).
 
 ## Done: the fixes before step 5, then M16 step 5 (2026-10-11; ADR 0018 §23-§27)
 1. **Lone surrogates (§23).** Traced through every stage with the corpus cases `lone_surrogates` and
@@ -47,7 +48,8 @@ all caught. Also found: a latent sanitiser-fuzz expectation bug (CRLF: each CR g
 the page never holds a CRLF pair); the mutation runner treated "no test ran" as caught (now a
 problem).
 
-## Next: M16 step 6 (preview). Stop and report before it.
+## Next: a set of fixes the user will send (wait for them), then M16 step 6 (preview)
+Do the fixes first; stop and report before step 6.
 ADR 0018 §1.2, §10, §16.6: `RenderLoader.day_slice(...)` (day-bounded; `_index` loads a whole
 conversation today), the pure preview renderer (`edisc_renderers.preview`, same sanitiser and
 lone-surrogate rules), the route (`evidence.read`, audit + `anchor_now` before the first byte, the
