@@ -1,4 +1,4 @@
-# Handoff (2026-10-11: fixes before step 5 done; next: M16 step 5 (API, packages, verifier))
+# Handoff (2026-10-11: fixes before step 5 done; M16 step 5 (API, job/report packages, verifier recomputation) built; next: M16 step 6 (preview))
 
 This file alone is enough to build M16. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (read it in full before any
@@ -8,9 +8,11 @@ and `docs/BACKLOG.md`. `docs/plans/m16.md` is the superseded proposal (history o
 ## Current state
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`. Migrations at head: **0032**.
 Renderer **1.3.2**, dummy connector **0.5.0**, normalizer **0.3.0**, report renderer **1.3.0**.
-M16 **steps 1-4 are built**; step 5 (API, packages, verifier) is the next commit. The step 3 CI run **38052005091 finished green** (lint,
-typecheck, unit, report-pdf, 4 integration shards). This round: two commits, the fixes before step 5
-and step 5 (see `git log`; check each one's CI run first: their ids are below once known).
+M16 **steps 1-5 are built** (model, HTML, PDF, loader, custody stream, API + packages + verifier);
+steps 6 (preview) and 7 (docs) are not. The step 3 CI run **38052005091 finished green** (lint,
+typecheck, unit, report-pdf, 4 integration shards). This round: `f84d847` (the fixes before step 5;
+CI run **38129918447 green**: lint, typecheck, unit, production-install, report-pdf natively on amd64
+with the image breaks, 4 integration shards) and the step 5 commit after it (check its CI run first).
 
 ## Done: the fixes before step 5, then M16 step 5 (2026-10-11; ADR 0018 §23-§27)
 1. **Lone surrogates (§23).** Traced through every stage with the corpus cases `lone_surrogates` and

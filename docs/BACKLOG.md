@@ -5,9 +5,6 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - S3 legal-hold flag in addition to per-matter retention (decided: backlog, 2026-09-30).
 - Automate starting render workers of old renderer/Unicode/tzdata triples on an unroutable episode
   (a Job per triple, scale to zero when idle); v1 is a manual runbook (ADR 0017 §3).
-- **[required before production]** Job custody package download endpoint (`edisc-verify --job-package`
-  input for the UI): audited, permissioned like evidence content, streaming raw pages and files from
-  their pinned versions. Deferred from M15 step 5 (2026-10-05); render packages are downloadable.
 - Re-run WORM acceptance tests against real AWS S3 Object Lock before production.
 - **[required before production]** Verify the vendored sRGB2014 ICC profile (SHA-256 `384b832d…c0a`, the copy WeasyPrint 70.0 bundles) byte for byte against the official file from color.org (scripted downloads got HTML in S1; download in a browser), and record the result in the profile's `SOURCE.md` (ADR 0018 §5.6).
 - Report reproductions (ADR 0017 §4 applied to reports, ADR 0018 §6).

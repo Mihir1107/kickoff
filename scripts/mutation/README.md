@@ -45,6 +45,7 @@ broken next to a `<name>.mutation-backup` copy: the runner refuses to start unti
 | `m16-stream` | the report lifecycle, custody stream, stored files, retention, episodes (ADR 0018, M16 step 4) | 13 |
 | `m16-model` | the collection report model, loader and recorded access facts (ADR 0018, M16 step 1) | 21 |
 | `m16-pre5` | lone surrogates, the glyph set in the identity, PDF from stored HTML (tamper), image-only breaks (kind `image`, run in the report image), production install (ADR 0018 §23-§26) | 28 |
+| `m16-api` | job package download, reports API, report package, `edisc-verify` recomputation (ADR 0018 §27) | 17 |
 | `s24-loop` | the event-loop guard, every CPU step of an activity off the loop, the render thread writes nothing (ADR 0015 §24) | 37 |
 
 The `s19-*` rounds were run by hand when they were built and only their categories were written

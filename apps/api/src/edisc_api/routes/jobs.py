@@ -668,8 +668,9 @@ async def evidence_content(
                 {"e": evidence_id},
             )
         ).one_or_none()
-        # render outputs are reachable only through the render endpoints (export.read), never here
-        if row is None or row.matter_id is None or row.kind == "production":
+        # render outputs and report files are reachable only through their own endpoints
+        # (export.read / report.read, ADR 0018 §10), never here
+        if row is None or row.matter_id is None or row.kind in ("production", "report"):
             raise not_found()
         await authorize(s, caller, P.EVIDENCE_READ, Scope("matter", row.matter_id))
         read = await audit.record(

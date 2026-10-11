@@ -374,19 +374,33 @@ def _check_seal(
     seal: dict[str, Any],
     body: bytes | None,
 ) -> None:
+    check_job_seal(report.errors, tenant_id, job_id, reference, seal, body, "render_started")
+
+
+def check_job_seal(
+    errors: list[str],
+    tenant_id: str,
+    job_id: str,
+    reference: dict[str, Any],
+    seal: dict[str, Any],
+    body: bytes | None,
+    started: str,
+) -> None:
+    """The included job seal is the anchor ``started`` references and anchors exactly the referenced
+    head (render and report packages)."""
     ref_seal, ref_head = reference.get("seal", {}), reference.get("head", {})
     if (seal.get("key"), seal.get("version_id")) != (
         ref_seal.get("key"),
         ref_seal.get("version_id"),
     ):
-        report.errors.append("job_seal.json is not the seal anchor render_started references")
+        errors.append(f"job_seal.json is not the seal anchor {started} references")
         return
     try:
         doc = json.loads(body) if body is not None else None
     except ValueError:
         doc = None
     if doc is None:
-        report.errors.append("job_seal.json: the anchor body is not valid")
+        errors.append("job_seal.json: the anchor body is not valid")
         return
     want = {
         "format": ANCHOR_FORMAT,
@@ -396,12 +410,10 @@ def _check_seal(
         "event_hash": ref_head.get("hash"),
     }
     if doc != want:
-        report.errors.append(
-            "the job's seal anchor does not anchor the head render_started references"
-        )
+        errors.append(f"the job's seal anchor does not anchor the head {started} references")
     seq = ref_head.get("seq")
     if not isinstance(seq, int) or seal.get("key") != anchor_key(tenant_id, job_id, seq):
-        report.errors.append("the job's seal anchor key is not the anchor of the referenced head")
+        errors.append("the job's seal anchor key is not the anchor of the referenced head")
 
 
 def _check_outputs(

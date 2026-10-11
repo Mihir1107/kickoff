@@ -907,3 +907,44 @@ and the worker are installed like the images install them (`uv sync --frozen --n
 every worker type (each source, maintenance, exports, renders, reports) start against the test stack
 and keep running. Breaks: a dev-only import in the API and in the worker.
 
+## 27. Implementation notes, step 5: API, packages, verifier (2026-10-11)
+1. **Job custody package download** `GET /v1/jobs/{id}/package` (deferred since M15, now built; off
+   the BACKLOG): `export.read`, sealed jobs only (409), `objects=embed|omit`,
+   `archives=reference|embed`. `edisc_custody.job_export` is ONE generator for the directory export
+   and the stream (plan from the records, no evidence body read, exact `Content-Length`; then each
+   entry regenerated and checked, each object read by pinned version and re-hashed), format
+   **`edisc-custody-package/3`** = /2 with a deterministic manifest (the job's `sealed_at`, no export
+   time; /1 and /2 still verify). `audit.job_package_read` committed and anchored before the first
+   byte; an abort records `audit.job_package_aborted` and alerts `job_package_mismatch`.
+   `edisc-verify` accepts the downloaded zip (entries copied through the hardened zip reader into a
+   temporary directory; the job verifier reads directories).
+2. **Reports API** (`edisc_api.routes.reports`): `report.read` (every role, the collector included)
+   lists every report of a job (all generations, oldest first, with `requested_by` and the manual
+   `request_reason`), reads one, lists its files, downloads a file and the package; `report.create`
+   (tenant admins, matter managers; the recent-sign-in hook) requests one with a required reason
+   (1-2,000) and optional paper, for sealed jobs of open matters, always a NEW report (201: its own
+   `audit.report_requested` moves the audit head, so the snapshot differs). Every content route:
+   completed (sealed) reports only, audit committed AND anchored before the first byte, pinned
+   bytes re-hashed while streaming, exact `Content-Length`, an abort audited
+   (`report_read_aborted` / `report_package_aborted`) and alerted. Fixed on the way:
+   `/v1/evidence/{id}/content` served report rows (kind `report` carries the job id); it now 404s
+   them like productions.
+3. **Report package** `edisc-report-package/1` (`edisc_custody.report_export`, verifier
+   `edisc_custody.report_package`): manifest, the report stream's `events.jsonl`, its anchors LISTED
+   from the bucket, `job_seal.json`, `objects/` (anchor and seal bodies), `outputs/` (every report
+   file, always embedded: bounded). Verified: manifest, strictness, chain and seal, the reference to
+   the job's seal, `report_generated`'s file records (root, manifest, bytes), `report.json`'s own
+   file digests.
+4. **`--job-package` recomputation** (`edisc_renderers.report.recompute`, pure). Deviation from §14,
+   recorded: the FILES cannot be recomputed byte for byte offline, because a `units.jsonl` row also
+   carries database columns (kind, scopes, the access-lost reason). What is recomputed and
+   byte-compared (RFC 8785) is the report's chain-derived CONTENT: every unit's chain fact (from the
+   rows stated from the chain), who started the job, its final status, the unit day zone, scopes,
+   access facts, pauses with who re-authorized, and the custody actors, folded from the job
+   package's verified events with the report's own model. Never from a job package that fails. The
+   rest (database columns, observations, renders, conversations, the snapshot) is checked against
+   its recorded digests only, and the verifier prints that list. Tested: the clean path recomputes
+   identical; a tampered job chain fails (`event_hash mismatch`, even with the manifest fixed); a
+   tampered report file fails (its recorded hash); and a report built to other facts but internally
+   consistent and sealed (a faulty `unit_row`) passes alone and FAILS the recomputation.
+5. Mutation round `m16-api` (17 breaks).

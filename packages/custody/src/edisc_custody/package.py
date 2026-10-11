@@ -29,8 +29,8 @@ from edisc_core.jsonpath import JsonPathError, resolve
 from edisc_custody.chain import BATCH_EVENT, Anchor, ChainVerifier, EventRecord, VerificationReport
 from edisc_custody.package_archives import ArchiveEntries
 
-PACKAGE_FORMAT = "edisc-custody-package/2"
-SUPPORTED_FORMATS = ("edisc-custody-package/1", PACKAGE_FORMAT)
+PACKAGE_FORMAT = "edisc-custody-package/3"  # /2 with a deterministic manifest (seal time, §27)
+SUPPORTED_FORMATS = ("edisc-custody-package/1", "edisc-custody-package/2", PACKAGE_FORMAT)
 FILES = ("events.jsonl", "items.jsonl", "evidence.jsonl", "anchors.jsonl")
 
 

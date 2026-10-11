@@ -157,7 +157,7 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Every manifest is validated against the vendored `rsmf_schema_2_0_0.json` (SHA-256 pinned, format
   checks on). The Relativity validator is not used until the licence is confirmed.
 
-## Collection report and preview (M16, ADR 0018; steps 1-4 built: model, HTML, PDF, loader, stream)
+## Collection report and preview (M16, ADR 0018; steps 1-5 built: model, HTML, PDF, loader, stream, API)
 - Read ADR 0018 in full (and its §19/§20 implementation notes) before changing M16 code;
   `docs/HANDOFF.md` has what is next. The report has its own custody stream (a sealed job chain is
   never appended to); facts come from the verified job chain first, database disagreements are
@@ -201,6 +201,12 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   the real character: build surrogates with `chr()`.
 - The report identity includes `glyph_set` (SHA-256 of the coverage ranges, §24): queue
   `reports.r<renderer>.p<toolchain12>.u<unicode>.g<glyphs12>`, golden key `..._glyphs-<g12>`.
+- API (§27): `report.read` every role, `report.create` tenant_admin + matter_manager; manual requests
+  need a reason and always create a new report; every content route (report file, report package,
+  job package `GET /v1/jobs/{id}/package`, `export.read`) audits + `anchor_now` before the first byte.
+  Packages: job `edisc-custody-package/3` (`edisc_custody.job_export`, deterministic), report
+  `edisc-report-package/1`; `edisc-verify <report pkg> --job-package <job pkg or zip>` recomputes the
+  chain-derived content (`edisc_renderers.report.recompute`).
 - `make test-production-install` (CI job `production-install`): the API and every worker type start
   from a no-dev, non-editable install. A runtime import of a dev-only package fails it.
 

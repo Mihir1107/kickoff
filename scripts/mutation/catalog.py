@@ -24,6 +24,10 @@ Rounds (ADR 0015):
   from the stored HTML (tamper), the production-install smoke job. Its ``image`` entries (tests under
   ``tests/unit/report_image``) run INSIDE the report-test image: ``make test-report-pdf`` runs
   ``scripts/mutation/run.py --kind image`` there (the CI ``report-pdf`` job).
+- ``m16-api``: M16 step 5 (ADR 0018 §27): the job custody package download, the reports API
+  (permissions, manual regeneration with who and why, audited downloads anchored before the first
+  byte, re-hashed streams), the report package and ``edisc-verify`` (strictness, zipped job packages,
+  the recomputation from the job chain).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
   and the blocking-I/O guard ``edisc_core.loopblock``, §24.8), every CPU step moved off the loop, the
   render thread writing nothing (ADR 0015 §24).
@@ -111,6 +115,14 @@ IPG = "tests/unit/report_image/test_pdf_goldens.py"
 IPD = "tests/unit/report_image/test_pdf.py"
 IFI = "tests/unit/report_image/test_font_isolation.py"
 PROD = "tests/integration/production/test_production_install.py"
+JP = "apps/api/src/edisc_api/routes/job_package.py"
+REP = "apps/api/src/edisc_api/routes/reports.py"
+AUTHZ = "apps/api/src/edisc_api/authz.py"
+RPK = "packages/custody/src/edisc_custody/report_package.py"
+CLI = "packages/custody/src/edisc_custody/cli.py"
+JEX = "packages/custody/src/edisc_custody/job_export.py"
+AJP = "tests/integration/api/test_job_package.py"
+ARP = "tests/integration/api/test_reports.py"
 
 
 @dataclass(frozen=True)
@@ -775,4 +787,54 @@ CATALOG: list[Mutation] = [
       "  <dir>/opt/edisc/fonts</dir>\n  <dir>/usr/share/fonts</dir>\n", IFI, "vendored_dir"),
     m("child_env_without_fontconfig", "m16-pre5", RP, '_CHILD_ENV = ("PATH", "FONTCONFIG_FILE", ',
       '_CHILD_ENV = ("PATH", ', IPG, "goldens"),
+    # ------------------------------------------------------------------ M16 step 5: API, packages
+    m("job_package_unsealed_served", "m16-api", JP, "        if job.sealed_at is None:",
+      "        if False:", AJP, "not_sealed"),
+    m("job_package_wrong_permission", "m16-api", JP,
+      '        await authorize(s, caller, P.EXPORT_READ, Scope("matter", job.matter_id))',
+      '        await authorize(s, caller, P.JOB_READ, Scope("matter", job.matter_id))', AJP,
+      "only_matter_managers"),
+    m("job_package_bytes_before_anchor", "m16-api", JP,
+      "    await audit.anchor_now(res.sessions, res.s3, res.settings, caller.tenant_id, read)\n", "",
+      AJP, "first_byte"),
+    m("job_package_not_deterministic", "m16-api", JEX,
+      '        "sealed_at": format_utc(job.sealed_at) if job.sealed_at else None,',
+      '        "sealed_at": str(uuid.uuid4()),', AJP, "byte_identical"),
+    m("job_package_length_wrong", "m16-api", JP, '            "content-length": str(plan.zip_size),',
+      '            "content-length": str(plan.zip_size - 1),', AJP, "byte_identical"),
+    m("job_package_abort_unaudited", "m16-api", JP,
+      "            await _aborted(res, caller, rid, plan, base, exc)\n", "", AJP, "aborts"),
+    m("collector_cannot_read_reports", "m16-api", AUTHZ,
+      '    "collector": frozenset({P.JOB_START, P.JOB_CANCEL, P.REPORT_READ, *_READ_MATTER}),',
+      '    "collector": frozenset({P.JOB_START, P.JOB_CANCEL, *_READ_MATTER}),', ARP,
+      "every_role_reads"),
+    m("reviewer_may_request_reports", "m16-api", AUTHZ,
+      '    "reviewer": frozenset({P.EVIDENCE_READ, P.REPORT_READ, *_READ_MATTER}),',
+      '    "reviewer": frozenset({P.EVIDENCE_READ, P.REPORT_READ, P.REPORT_CREATE, *_READ_MATTER}),',
+      ARP, "every_role_reads"),
+    m("report_reason_not_recorded", "m16-api", REP, "request_reason=body.reason,",
+      "request_reason=None,", ARP, "who_and_why"),
+    m("report_file_bytes_before_anchor", "m16-api", REP,
+      "    await audit.anchor_now(res.sessions, res.s3, res.settings, caller.tenant_id, read)\n"
+      "    writer = EvidenceWriter", "    writer = EvidenceWriter", ARP, "first_byte"),
+    m("report_package_bytes_before_anchor", "m16-api", REP,
+      "    await audit.anchor_now(res.sessions, res.s3, res.settings, caller.tenant_id, read)\n\n"
+      "    async def body()", "\n    async def body()", ARP, "first_byte"),
+    m("report_file_not_rehashed", "m16-api", REP,
+      "        if (digest.hexdigest(), size) != (f.sha256, f.size_bytes):", "        if False:", ARP,
+      "stored_bytes_differ"),
+    m("report_package_abort_unaudited", "m16-api", REP,
+      '            await _aborted(res, caller, rid, row.job_id, "report_package_aborted",',
+      '            None and _aborted(res, caller, rid, row.job_id, "report_package_aborted",', ARP,
+      "package_object_that_differs"),
+    m("evidence_endpoint_serves_reports", "m16-api", JOBS,
+      'row.kind in ("production", "report")', 'row.kind in ("production",)', ARP,
+      "never_served_by_the_evidence"),
+    m("verifier_skips_recomputation", "m16-api", RPK, "    differences = compare(chain, stated)",
+      "    differences: list[str] = []", ARP, "other_facts"),
+    m("verifier_accepts_unlisted_files", "m16-api", RPK,
+      '            report.errors.append(f"{extra}: not part of this package")', "            pass",
+      ARP, "unlisted"),
+    m("verifier_zip_job_package_unread", "m16-api", CLI, "    if path is None or not is_zip(path):",
+      "    if True:", ARP, "recomputes_from_the_job_package"),
 ]  # fmt: skip

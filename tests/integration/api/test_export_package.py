@@ -73,7 +73,13 @@ async def test_embedded_archive_verifies_offline(
     exp, job_id, data = export_job
     pkg = await _package(exp, tenant, job_id, tmp_path / "pkg", "embed")
     manifest = json.loads((pkg / "manifest.json").read_bytes())
-    assert manifest["format"] == "edisc-custody-package/2"
+    assert manifest["format"] == "edisc-custody-package/3"  # /2 with a deterministic manifest
+    older = tmp_path / "older"  # a /2 package (with its export time) still verifies
+    shutil.copytree(pkg, older)
+    (older / "manifest.json").write_text(json.dumps(
+        {**manifest, "format": "edisc-custody-package/2", "exported_at": "2026-10-01T00:00:00Z"}
+    ))  # fmt: skip
+    assert verify(older)[0] == 0
     (archive,) = manifest["archives"]
     assert archive["embedded"] and archive["sha256"] == hashlib.sha256(data).hexdigest()
     assert (pkg / "objects" / archive["sha256"]).read_bytes() == data

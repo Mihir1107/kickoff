@@ -42,6 +42,10 @@ class Permission(StrEnum):
     EVIDENCE_READ = "evidence.read"  # returns evidence content: always audited (decision d)
     EXPORT_CREATE = "export.create"  # create RSMF renders (ADR 0015; phase-2 decision 5)
     EXPORT_READ = "export.read"  # download render output files: always audited
+    REPORT_READ = (
+        "report.read"  # collection reports: files and package, always audited (ADR 0018 §2)
+    )
+    REPORT_CREATE = "report.create"  # request a report (manual regeneration, with a reason)
 
 
 P = Permission
@@ -61,6 +65,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
             P.JOB_RERUN,
             P.CUSTODY_READ,
             P.EVIDENCE_READ,
+            P.REPORT_READ,
             *_READ_MATTER,
         }
     ),
@@ -75,12 +80,14 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
             P.EVIDENCE_READ,
             P.EXPORT_CREATE,
             P.EXPORT_READ,
+            P.REPORT_READ,
+            P.REPORT_CREATE,
             *_READ_MATTER,
         }
     ),
-    "collector": frozenset({P.JOB_START, P.JOB_CANCEL, *_READ_MATTER}),
-    "reviewer": frozenset({P.EVIDENCE_READ, *_READ_MATTER}),
-    "auditor": frozenset({P.CUSTODY_READ, *_READ_MATTER}),
+    "collector": frozenset({P.JOB_START, P.JOB_CANCEL, P.REPORT_READ, *_READ_MATTER}),
+    "reviewer": frozenset({P.EVIDENCE_READ, P.REPORT_READ, *_READ_MATTER}),
+    "auditor": frozenset({P.CUSTODY_READ, P.REPORT_READ, *_READ_MATTER}),
 }
 ROLES = frozenset(ROLE_PERMISSIONS)
 
