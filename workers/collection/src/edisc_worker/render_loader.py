@@ -16,6 +16,11 @@ The loader feeds the pure renderer one slice at a time:
   missing. The renderer refuses anything else.
 - **Memory:** one conversation's link index (subject, ts, version, scope) plus one slice of items.
   Pages are read one at a time; file bytes are never held whole.
+- **One day** (`day_slice`, the preview, ADR 0018 §1.2, §12): the message items of the conversation
+  whose own time is inside the day (a range on the partial index of migration 0034), their links to
+  the job by primary key, and each referenced thread root by its exact id: bounded by the day, never
+  the whole conversation (an item is linked once per job, possibly under another day's unit, so unit
+  days cannot bound it). Verified exactly like a render's slice.
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ import hashlib
 import json
 import uuid
 from collections import defaultdict
-from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
@@ -56,6 +61,7 @@ from edisc_renderers.rsmf import (
     Reactions,
     RenderOptions,
     SliceInput,
+    slice_bounds,
     slice_day,
     subject_digest,
 )
@@ -251,7 +257,9 @@ class RenderLoader:
         return len(self._verified)
 
     # ------------------------------------------------------------------ the job
-    async def load_job(self) -> LoadedJob:
+    async def load_job(self, *, light: bool = False) -> LoadedJob:
+        """The job, sealed. ``light`` (the preview): no conversation list and no whole-job digest of
+        the in-scope subjects (only a render reconciles the whole job)."""
         async with tenant_tx(self._sessions, self._tenant) as s:
             job = (
                 await s.execute(
@@ -278,9 +286,10 @@ class RenderLoader:
                     await s.execute(
                         text(
                             "SELECT DISTINCT conversation_id FROM work_units WHERE job_id = :j"
-                            " AND kind = 'conversation_day' ORDER BY conversation_id"
+                            " AND kind = 'conversation_day' AND NOT CAST(:light AS boolean)"
+                            " ORDER BY conversation_id"
                         ),
-                        {"j": self._job_id},
+                        {"j": self._job_id, "light": light},
                     )
                 ).all()
             )
@@ -299,24 +308,36 @@ class RenderLoader:
                 ),
                 key=_version_key,
             )
-            # the expected side of the reconciliation, from the links alone (never from rendering)
-            subjects = await s.stream(
-                text(
-                    "SELECT DISTINCT i.source_item_id FROM items i WHERE i.id IN"
-                    " (SELECT item_id FROM job_items WHERE job_id = :j AND in_scope)"
-                    " AND i.item_type = 'message'"
-                ),
-                {"j": self._job_id},
-            )
             count, digest_ids = 0, []
             digest = subject_digest([])
-            async for row in subjects:
-                count += 1
-                digest_ids.append(row[0])
-                if len(digest_ids) >= ID_CHUNK:
-                    digest = _add_digests(digest, subject_digest(digest_ids))
-                    digest_ids = []
-            digest = _add_digests(digest, subject_digest(digest_ids))
+            if light:  # the item source, from one link (every connector has one per job)
+                source = (
+                    await s.execute(
+                        text(
+                            "SELECT i.source FROM items i WHERE i.id ="
+                            " (SELECT item_id FROM job_items WHERE job_id = :j LIMIT 1)"
+                        ),
+                        {"j": self._job_id},
+                    )
+                ).scalar_one_or_none()
+                self._source = source or self._source
+            else:
+                # the expected side of the reconciliation, from the links alone (never rendering)
+                subjects = await s.stream(
+                    text(
+                        "SELECT DISTINCT i.source_item_id FROM items i WHERE i.id IN"
+                        " (SELECT item_id FROM job_items WHERE job_id = :j AND in_scope)"
+                        " AND i.item_type = 'message'"
+                    ),
+                    {"j": self._job_id},
+                )
+                async for row in subjects:
+                    count += 1
+                    digest_ids.append(row[0])
+                    if len(digest_ids) >= ID_CHUNK:
+                        digest = _add_digests(digest, subject_digest(digest_ids))
+                        digest_ids = []
+                digest = _add_digests(digest, subject_digest(digest_ids))
         self._connection_id = job.connection_id
         basis = "archive" if job.connection_source == "slack_export" else "source"
         self._job = LoadedJob(
@@ -395,10 +416,98 @@ class RenderLoader:
                 self._source = source or self._source
         return out
 
+    # ------------------------------------------------------------------ one day (the preview)
+    async def day_slice(self, conversation_id: str, day: date) -> SliceInput:
+        """Every in-scope message of one conversation-day (the loader's options give the zone),
+        with its thread roots, identities and files, verified like a render's slice; bounded by the
+        day, never the whole conversation."""
+        job = self._job or await self.load_job(light=True)
+        start, end = slice_bounds(day, self._options.zone())
+        async with tenant_tx(self._sessions, self._tenant) as s:
+            rows = (
+                await s.execute(
+                    text(
+                        "SELECT id, source, source_item_id, version, item_type, sent_at FROM items"
+                        " WHERE tenant_id = :t AND source = :s AND item_type = 'message'"
+                        " AND split_part(source_item_id, '/', 2) = :c"
+                        " AND sent_at >= :a AND sent_at < :b"
+                    ),
+                    {"t": self._tenant, "s": self._source, "c": conversation_id, "a": start,
+                     "b": end},
+                )
+            ).all()  # fmt: skip
+            index = await self._linked(s, rows, conversation_id)
+            workspace = (
+                next(iter(index)).rsplit("/", 2)[0]
+                if index
+                else await self._workspace_of(s, conversation_id)
+            )
+        info = await self._conversation_info(conversation_id, index, workspace)
+        subjects = sorted(k for k, e in index.items() if e.in_scope and start <= e.sent_at < end)
+
+        async def roots(prefix: str, wanted: Sequence[str]) -> dict[str, _Indexed]:
+            async with tenant_tx(self._sessions, self._tenant) as s:
+                found: list[Any] = []
+                for chunk in _chunks([prefix + r for r in wanted]):
+                    found += (
+                        await s.execute(
+                            text(
+                                "SELECT id, source, source_item_id, version, item_type, sent_at"
+                                " FROM items WHERE tenant_id = :t AND source = :s"
+                                " AND source_item_id = ANY(:ids) AND item_type = 'message'"
+                            ),
+                            {"t": self._tenant, "s": self._source, "ids": list(chunk)},
+                        )
+                    ).all()
+                return await self._linked(s, found, conversation_id)
+
+        return await self._slice(job, info, day, subjects, index, more_roots=roots)
+
+    async def _linked(
+        self, s: AsyncSession, rows: Sequence[Any], conversation_id: str
+    ) -> dict[str, _Indexed]:
+        """The rows linked to this job (by primary key), folded into an index."""
+        scope: dict[uuid.UUID, bool] = {}
+        for ids in _chunks(sorted({r.id for r in rows})):
+            scope.update(
+                (r.item_id, r.in_scope)
+                for r in (
+                    await s.execute(
+                        text(
+                            "SELECT item_id, in_scope FROM job_items WHERE job_id = :j"
+                            " AND item_id = ANY(:i)"
+                        ),
+                        {"j": self._job_id, "i": list(ids)},
+                    )
+                ).all()
+            )
+        out: dict[str, _Indexed] = {}
+        linked = [r for r in rows if r.id in scope]
+        if linked:
+            await asyncio.to_thread(_index_rows, linked, scope, conversation_id, out)
+        return out
+
+    async def _workspace_of(self, s: AsyncSession, conversation_id: str) -> str:
+        """The workspace of a conversation with no message on the previewed day: from one of its
+        units' links (bounded), else unknown (empty)."""
+        found = (
+            await s.execute(
+                text(
+                    "SELECT i.source_item_id FROM job_items ji JOIN items i ON i.id = ji.item_id"
+                    " WHERE ji.job_id = :j AND ji.unit_key = (SELECT unit_key FROM work_units"
+                    " WHERE job_id = :j AND conversation_id = :c AND kind = 'conversation_day'"
+                    " AND collected_count > 0 ORDER BY unit_key LIMIT 1) LIMIT 1"
+                ),
+                {"j": self._job_id, "c": conversation_id},
+            )
+        ).scalar_one_or_none()
+        return str(found).split("/", 1)[0] if found else ""
+
     async def _conversation_info(
-        self, conversation_id: str, index: Mapping[str, _Indexed]
+        self, conversation_id: str, index: Mapping[str, _Indexed], workspace: str | None = None
     ) -> ConversationInfo:
-        workspace = next(iter(index)).rsplit("/", 2)[0]
+        if workspace is None:
+            workspace = next(iter(index)).rsplit("/", 2)[0]
         async with tenant_tx(self._sessions, self._tenant) as s:
             meta = (
                 await s.execute(
@@ -477,7 +586,9 @@ class RenderLoader:
         day: date,
         subjects: list[str],
         index: Mapping[str, _Indexed],
+        more_roots: Callable[[str, Sequence[str]], Awaitable[dict[str, _Indexed]]] | None = None,
     ) -> SliceInput:
+        """``more_roots``: looks up thread roots the index does not hold (a day-bounded index)."""
         messages = await self._messages(job, [index[s] for s in subjects])
         prefix = f"{info.workspace_id}/{info.id}/"
         own = {m.ts for m in messages}
@@ -488,6 +599,10 @@ class RenderLoader:
                 if (r := m.current.thread_root) is not None and r != m.ts and r not in own
             }
         )
+        if more_roots is not None:
+            absent = [r for r in wanted if prefix + r not in index]
+            if absent:
+                index = {**index, **await more_roots(prefix, absent)}
         linked_roots = [index[prefix + r] for r in wanted if prefix + r in index]
         roots = {m.ts: m for m in await self._messages(job, linked_roots)}
         missing = frozenset(r for r in wanted if r not in roots)

@@ -1,7 +1,13 @@
-"""Burst of audited evidence downloads against the tenant-wide audit chain (measurement only).
+"""Burst of audited content reads against the tenant-wide audit chain (measurement only).
 
     make test-env-up
     EDISC_ENV_FILE=.env.test uv run python scripts/measure_audit_burst.py --concurrency 50 200
+    EDISC_ENV_FILE=.env.test uv run python scripts/measure_audit_burst.py --target preview \
+        --concurrency 1 10 50
+
+``--target evidence`` (default): ``GET /v1/evidence/{id}/content``; ``--target preview``: ``GET
+/v1/jobs/{id}/preview`` pages of the job's conversation-days (ADR 0018 §10, D14: one FORCED anchor
+per page view). Both commit their audit and call ``audit.anchor_now`` before the first byte.
 
 Every content read appends ``audit.evidence_content_read`` to the tenant's custody stream (one chain per
 tenant, ADR 0013) before streaming. Appends to one stream serialize on its chain-head row lock. This
@@ -10,7 +16,10 @@ runs N concurrent downloads through the real API (in-process ASGI, real Postgres
 - audited (production behaviour);
 - with the audit append replaced by a no-op (baseline: the cost of the download itself);
 
-and reports latency percentiles, wall time, and how long requests waited for the chain head.
+and reports latency percentiles, wall time, and how long requests waited for the chain head. Modes:
+``audited`` (production: append + forced anchor), ``audited_no_anchor`` (the forced anchor replaced by
+a no-op: its cost is the difference), ``audited_unshared_streams`` (no shared chain head, no anchor),
+``baseline_no_audit``.
 """
 
 from __future__ import annotations
@@ -62,6 +71,7 @@ async def main() -> int:
     ap.add_argument("--concurrency", type=int, nargs="+", default=[50])
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--out", type=Path)
+    ap.add_argument("--target", choices=("evidence", "preview"), default="evidence")
     args = ap.parse_args()
     settings = Settings().model_copy(update={"api_dev_idp": True})
     engine = create_engine(settings, "app")  # production pool size (10 + 10 overflow)
@@ -131,15 +141,19 @@ async def main() -> int:
                     )
                 ).scalars()
             )
+        # `run` finalizes and seals the job: the preview serves sealed jobs only
+        days = [(c.id, ds.day(d).isoformat()) for c in ds.conversations()
+                for d in range(ds.n_days(0))]  # fmt: skip
         token = dev_token(settings, subject=admin_sub, audience=AUDIENCE)
         app = create_app(settings, resources)
         wait_for_head: list[float] = []
-        original_record, original_anchor = audit_mod.record, audit_mod.anchor
+        original_record, original_anchor = audit_mod.record, audit_mod.anchor_now
 
-        async def timed_record(*a: Any, **kw: Any) -> None:
+        async def timed_record(*a: Any, **kw: Any) -> Any:
             started = time.perf_counter()
-            await original_record(*a, **kw)  # includes waiting for the chain-head row lock
+            event = await original_record(*a, **kw)  # includes waiting for the chain-head row lock
             wait_for_head.append(time.perf_counter() - started)
+            return event
 
         async def unshared_record(
             session: Any,
@@ -149,15 +163,16 @@ async def main() -> int:
             event_type: str,
             payload: Any,
             request_id: str | None = None,
-        ) -> None:
+        ) -> Any:
             """Same work, but each request appends to its own stream (no shared chain head): separates
             the cost of contention on the tenant's chain head from the cost of appending at all."""
             started = time.perf_counter()
-            await append(session, tenant_id=tenant_id, stream_id=new_id(), event_type=f"audit.{event_type}",
-                         actor=actor, payload=payload)  # fmt: skip
+            event = await append(session, tenant_id=tenant_id, stream_id=new_id(),
+                                 event_type=f"audit.{event_type}", actor=actor, payload=payload)  # fmt: skip
             wait_for_head.append(time.perf_counter() - started)
+            return event
 
-        async def no_record(*_: Any, **__: Any) -> None:
+        async def no_record(*_: Any, **__: Any) -> Any:
             return None
 
         async def no_anchor(*_: Any, **__: Any) -> None:
@@ -171,10 +186,15 @@ async def main() -> int:
 
                 async def one(i: int) -> float:
                     started = time.perf_counter()
-                    r = await c.get(
-                        f"/v1/evidence/{evidence[i % len(evidence)]}/content",
-                        params={"purpose": "preview"},
-                    )
+                    if args.target == "preview":
+                        conv, day = days[i % len(days)]
+                        r = await c.get(f"/v1/jobs/{job}/preview",
+                                        params={"conversation": conv, "day": day})  # fmt: skip
+                    else:
+                        r = await c.get(
+                            f"/v1/evidence/{evidence[i % len(evidence)]}/content",
+                            params={"purpose": "preview"},
+                        )
                     r.raise_for_status()
                     return time.perf_counter() - started
 
@@ -184,13 +204,13 @@ async def main() -> int:
 
         modes: dict[str, tuple[Callable[..., Awaitable[None]], Callable[..., Awaitable[None]]]] = {
             "audited": (timed_record, original_anchor),
-            "audited_shared_stream_no_anchor": (timed_record, no_anchor),
+            "audited_no_anchor": (timed_record, no_anchor),
             "audited_unshared_streams": (unshared_record, no_anchor),
             "baseline_no_audit": (no_record, no_anchor),
         }
         for n in args.concurrency:
             for mode, (rec, anc) in modes.items():
-                audit_mod.record, audit_mod.anchor = rec, anc  # type: ignore[assignment]
+                audit_mod.record, audit_mod.anchor_now = rec, anc  # type: ignore[assignment]
                 lat_all: list[float] = []
                 walls: list[float] = []
                 wait_for_head.clear()
@@ -219,7 +239,7 @@ async def main() -> int:
                         else {}
                     ),
                 }
-        audit_mod.record, audit_mod.anchor = original_record, original_anchor  # type: ignore[assignment]
+        audit_mod.record, audit_mod.anchor_now = original_record, original_anchor  # type: ignore[assignment]
     await http.aclose()
     await redis.aclose()
     await engine.dispose()

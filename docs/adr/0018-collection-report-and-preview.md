@@ -1033,3 +1033,55 @@ and keep running. Breaks: a dev-only import in the API and in the worker.
    `m16-api` entries are retargeted (the temporary-directory copy is gone). Not mutated: the "C"
    collation (a migration; its test reads the column collations, since musl orders code points
    anyway).
+
+## 29. Implementation notes, step 6: the preview (2026-10-12), preview renderer 1.0.0, migration 0034
+1. **Day-bounded loader** `RenderLoader.day_slice(conversation, day)` (zone from the loader's
+   options): the conversation's message items whose own time is inside the day (migration 0034: a
+   partial expression index on `items (tenant_id, source, split_part(source_item_id, '/', 2),
+   sent_at) WHERE item_type = 'message'`), their links to the job by primary key, then the slice
+   exactly as a render builds it (`_slice`: messages, files, identities, every page or archive entry
+   read by pinned version and checked), with each thread root the day's replies reference fetched
+   by its exact id (`more_roots`). Why not the unit days: an item is linked ONCE per job, to
+   whichever unit linked it first (a reply fetched as thread context lands under another day's
+   unit), so the unit day does not bound where a message is linked; its own time does. `load_job(light=True)`
+   skips the whole-job conversation list and subject digest (only a render reconciles a whole job).
+   Tested: the same day of a 2-day and a 12-day conversation is read with the same 37 statements and
+   never the whole conversation's links. Renders still use `_index` (BACKLOG).
+2. **Pure renderer** `edisc_renderers.preview` (the purity test covers it): `plan_pages` splits the
+   day's messages in event order into pages of at most `PREVIEW_PAGE_EVENTS` (1,000) events, thread
+   context counted (the RSMF part split), and checks every message is on exactly one page (the
+   preview's reconciliation); `render_preview` builds one page. The report's sanitiser rules (bidi
+   controls and HTML-invalid code points replaced by the marker element, other Cf/Cc/Zl/Zp kept with
+   it, escaped, `<bdi>`), without the glyph coverage (it exists for the PDF). The only links:
+   attachments to `/v1/evidence/<uuid>/content?purpose=preview` (a handle that is not an evidence id
+   is never linked) and fragment links to events of the same page; URLs in text stay text. The page
+   states the job status verbatim, the archive caveat, every unit covering the day (UTC unit days)
+   with its reasons, a NOT COMPLETE banner ("Expected 120, collected 117"), "0 messages (unit status:
+   ...)" for an empty day, edits, tombstones with the text before deletion, a deleted message's
+   reactions as history, unavailable files with their reason, context marked, and the page identity
+   (slice source hash = RFC 6962 root over the page's items, preview renderer version). Byte-identical
+   per input and version (+ Unicode, + tzdata for a zone day). Rendered in a worker thread (`OFF_LOOP`).
+3. **Route** `GET /v1/jobs/{id}/preview?conversation=&day=&zone=&page=` (`edisc_api.routes.preview`,
+   `edisc_worker.preview.build_preview`): `evidence.read`; 409 `job_not_sealed`, 404 `not_in_scope`
+   (no scope covering the conversation overlaps the day: never an empty page), 404 `page_not_found`,
+   422 `unknown_time_zone`, 500 `preview_integrity` (+ alert `preview_integrity`), each recorded as
+   `audit.preview_refused` with its code; on success `audit.preview_read` (job, conversation, day,
+   zone, page, pages, events, slice source hash, identity, output SHA-256 and size) committed and
+   force-anchored before the first byte. Headers: the CSP of §10 (the `<meta>` copy omits
+   `frame-ancestors` and `sandbox`, which a meta policy ignores), nosniff, no-store, no-referrer,
+   `x-preview-sha256`.
+4. **No remote fetch** (`tests/integration/api/test_preview_browser.py`, Playwright 1.63.0 pinned in
+   `uv.lock`, Chromium installed by the CI integration job): a day holding remote URLs, `<img>`,
+   `<link>`, `<iframe>`, `<script>`, CSS `url()` / `@import` and `//host` forms, served by the real
+   API (uvicorn) with every host name resolved to a local trap server: the browser requests only the
+   page, the trap receives nothing, the console shows no CSP violation.
+5. **Cost (D14):** one forced anchor per page view adds about 24 ms to a single view and about 20 %
+   at 50 concurrent views (docs/runs/2026-10-12-preview-audit-burst.md): kept; group commit not
+   needed. `scripts/measure_audit_burst.py` gained `--target preview` and was fixed (it patched the
+   unforced `anchor`, which no content route calls any more).
+6. Tests: unit (`tests/unit/renderers/test_preview.py`: strict html5lib parse, an allow-list of
+   elements, attributes and URLs, markers, pages at N and N+1, banners, a +05:45 day, a hypothesis
+   fuzz); integration (`tests/integration/api/test_preview.py`: every message of every day once
+   against the dataset with 5-event pages, every reply's thread root on its page, the permission
+   matrix, the first byte, headers, determinism, refusals audited, attachment links resolving to file
+   evidence, a Kathmandu day, bounded queries). Mutation round `m16-preview` (11, all caught).

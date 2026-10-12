@@ -157,7 +157,7 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Every manifest is validated against the vendored `rsmf_schema_2_0_0.json` (SHA-256 pinned, format
   checks on). The Relativity validator is not used until the licence is confirmed.
 
-## Collection report and preview (M16, ADR 0018; steps 1-5 built: model, HTML, PDF, loader, stream, API)
+## Collection report and preview (M16, ADR 0018; steps 1-6 built: model, HTML, PDF, loader, stream, API, preview)
 - Read ADR 0018 in full (and its §19/§20 implementation notes) before changing M16 code;
   `docs/HANDOFF.md` has what is next. The report has its own custody stream (a sealed job chain is
   never appended to); facts come from the verified job chain first, database disagreements are
@@ -217,6 +217,13 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   package (`edisc_renderers.report.recompute`): a new column the report states goes into the unit
   events first. Report order columns are COLLATE "C" (never depend on the DB locale). The job
   package verifier is strict and reads zips in place, like the render and report verifiers.
+- Preview (§29): `GET /v1/jobs/{id}/preview` (`evidence.read`) loads ONE day through
+  `RenderLoader.day_slice` (items by their own time on the 0034 index, links by primary key, roots by
+  exact id; never the whole conversation), renders with the pure `edisc_renderers.preview` (same
+  sanitiser rules as the report, no glyph coverage; links only to `/v1/evidence/<uuid>/content?
+  purpose=preview` and same-page fragments), audits `preview_read` with the output SHA-256 and
+  anchors before the first byte; every refusal is `audit.preview_refused`. The no-remote-fetch test
+  drives Chromium through Playwright (pinned; CI installs Chromium in the integration job).
 - `make test-production-install` (CI job `production-install`): the API and every worker type start
   from a no-dev, non-editable install. A runtime import of a dev-only package fails it.
 

@@ -345,6 +345,15 @@ class Item(Base):
     __tablename__ = "items"
     __table_args__ = (
         Index(None, "tenant_id", "source", "sent_at"),
+        # one conversation-day of messages (the preview, ADR 0018 §29; migration 0034)
+        Index(
+            "ix_items_message_conversation_sent_at",
+            "tenant_id",
+            "source",
+            text("split_part(source_item_id, '/'::text, 2)"),
+            "sent_at",
+            postgresql_where=text("item_type = 'message'::text"),
+        ),
         UniqueConstraint("tenant_id", "id"),
         UniqueConstraint("tenant_id", "idempotency_key"),
         UniqueConstraint("tenant_id", "source", "source_item_id", "version"),

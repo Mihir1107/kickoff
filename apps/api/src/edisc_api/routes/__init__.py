@@ -15,6 +15,7 @@ def register(app: FastAPI) -> None:
         job_package,
         jobs,
         me,
+        preview,
         renders,
         reports,
     )
@@ -28,3 +29,4 @@ def register(app: FastAPI) -> None:
     app.include_router(renders.router)
     app.include_router(reports.router)
     app.include_router(job_package.router)
+    app.include_router(preview.router)

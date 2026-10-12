@@ -33,6 +33,10 @@ Rounds (ADR 0015):
   lone surrogate makes its units gaps with the reason), every unit fact in the job chain (details in
   unit events, unsettled units, the format decided per job) and ``units.jsonl`` recomputed byte for
   byte, the job package verifier strict and reading zips in place.
+- ``m16-preview``: M16 step 6 (ADR 0018 §1.2, §10, §29): the preview route audited and anchored
+  before the first byte with its CSP, refusals audited, nothing outside a scope served, the pure
+  renderer's sanitiser and link allow-list, every message of the day on one page, the day-bounded
+  loader and its thread roots, the renderer off the event loop.
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
   and the blocking-I/O guard ``edisc_core.loopblock``, §24.8), every CPU step moved off the loop, the
   render thread writing nothing (ADR 0015 §24).
@@ -139,6 +143,11 @@ AEC = "tests/integration/api/test_export_collection.py"
 ACE = "tests/integration/api/test_corpus_export.py"
 RUF = "tests/integration/report/test_unit_facts.py"
 URC = "tests/unit/renderers/test_report_recompute.py"
+PRV = "apps/api/src/edisc_api/routes/preview.py"
+PVH = "packages/renderers/src/edisc_renderers/preview/html.py"
+PVW = "workers/collection/src/edisc_worker/preview.py"
+APV = "tests/integration/api/test_preview.py"
+UPV = "tests/unit/renderers/test_preview.py"
 
 
 @dataclass(frozen=True)
@@ -921,4 +930,38 @@ CATALOG: list[Mutation] = [
     m("embedded_archive_not_read_in_zip", "m16-pre6", PA,
       "        return lambda: EntrySource(source.stored_range(name))",
       "        raise TypeError(name)", AEP, "inside_a_zip"),
+    # ------------------------------------------------------------------ M16 step 6: the preview
+    m("preview_not_anchored", "m16-preview", PRV,
+      "    await audit.anchor_now(res.sessions, res.s3, res.settings, caller.tenant_id, read)\n",
+      "", APV, "first_byte"),
+    m("preview_without_csp", "m16-preview", PRV, '    "content-security-policy": CSP_HEADER,\n',
+      "", APV, "first_byte"),
+    m("preview_refusal_not_audited", "m16-preview", PRV,
+      "        await _refused(res, caller, rid, job_id, request, exc.code, exc.detail,"
+      " integrity=False)\n", "", APV, "refusals"),
+    m("preview_outside_scope_served", "m16-preview", PVW,
+      "        if not any(r.date_from < end and r.date_to > start for r in ranges):",
+      "        if False:", APV, "refusals"),
+    m("preview_bidi_kept", "m16-preview", PVH,
+      "    return cp in BIDI_CONTROLS or invalid_in_html(cp)", "    return invalid_in_html(cp)",
+      UPV, "safe"),
+    m("preview_text_not_escaped", "m16-preview", PVH,
+      "    return f\"<bdi>{reveal('' if value is None else str(value))}</bdi>\"",
+      "    return f\"<bdi>{'' if value is None else str(value)}</bdi>\"", UPV, "safe"),
+    m("preview_any_handle_linked", "m16-preview", PVH, "            if _UUID.match(f.handle):",
+      "            if True:", UPV, "safe"),
+    m("preview_drops_a_page", "m16-preview", PVH,
+      "    pages = split_parts(primaries, context_root, cap) if primaries else [[]]",
+      "    pages = split_parts(primaries, context_root, cap)[:1] if primaries else [[]]", UPV,
+      "n_plus_one"),
+    m("day_slice_reads_the_whole_conversation", "m16-preview", RLO,
+      "            index = await self._linked(s, rows, conversation_id)",
+      "            index = await self._index(conversation_id)", APV, "bounded"),
+    m("day_slice_roots_not_looked_up", "m16-preview", RLO, "            if absent:",
+      "            if False:", APV, "every_page"),
+    m("preview_render_on_event_loop", "m16-preview", PVW,
+      "        rendered = await asyncio.to_thread(\n"
+      "            preview_html.render_preview, inp, page, preview_html.PREVIEW_PAGE_EVENTS\n"
+      "        )", "        rendered = preview_html.render_preview(inp, page,"
+      " preview_html.PREVIEW_PAGE_EVENTS)", APV, "first_byte"),
 ]  # fmt: skip

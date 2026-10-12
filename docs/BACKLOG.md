@@ -93,8 +93,11 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
   that are dropped with the connection, or a multi-pattern matcher) before a worker serves many
   tenants.
 - The render loader's `_index` still fetches every `job_items` link of a conversation in one query
-  (decoded on the event loop by asyncpg): bounded only by the conversation's size. The day-bounded
-  loader of ADR 0018 step 6 (`RenderLoader.day_slice`) should be used for renders too.
+  (decoded on the event loop by asyncpg): bounded only by the conversation's size. Renders should
+  walk the conversation day by day through `RenderLoader.day_slice` (built for the preview, ADR 0018
+  §29) once the render's whole-job reconciliation is fed per day.
+- Re-measure the preview's forced anchor per page view on the cloud VM with production S3 latencies
+  (docs/runs/2026-10-12-preview-audit-burst.md; group commit is the fallback of ADR 0018 §10).
 - **[open; paired with the loop-guard exemption]** Fix the SCRAM connection bursts. asyncpg
   authenticates every NEW connection with SCRAM-SHA-256 on the event loop (4,096 PBKDF2 iterations in
   Python-level HMAC calls: tens of ms each, 285 ms seen during a burst of new connections under

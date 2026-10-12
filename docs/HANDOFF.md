@@ -1,4 +1,4 @@
-# Handoff (2026-10-11: the fixes before step 6 done (ADR 0018 §28); next: M16 step 6 (preview))
+# Handoff (2026-10-12: the fixes before step 6 and M16 step 6 (preview) done; next: M16 step 7 (docs))
 
 This file alone is enough to build M16. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (read it in full before any
@@ -6,11 +6,23 @@ code); the rest of the plan of record is `docs/ARCHITECTURE.md`, `docs/adr/`, `d
 and `docs/BACKLOG.md`. `docs/plans/m16.md` is the superseded proposal (history only).
 
 ## Current state
-**Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`. Migrations at head: **0033**.
-Renderer **1.3.2**, dummy connector **0.5.0**, normalizer **0.3.0**, report renderer **1.4.0**.
-M16 **steps 1-5 are built** (model, HTML, PDF, loader, custody stream, API + packages + verifier)
-and the fixes before step 6 (§28); steps 6 (preview) and 7 (docs) are not. Earlier rounds: `f84d847`
-(CI 38129918447 green), `86f6400` (step 5, CI 38130947326 green).
+**Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`. Migrations at head: **0034**.
+Renderer **1.3.2**, dummy connector **0.5.0**, normalizer **0.3.0**, report renderer **1.4.0**,
+preview renderer **1.0.0**. M16 **steps 1-6 are built**; step 7 (docs) is next. Commits: `21a71e9`
+(the fixes before step 6, ADR 0018 §28; CI run 38215193217) and the step 6 commit after it (ADR 0018
+§29; see `git log` and its CI run).
+
+## Done: M16 step 6, the preview (2026-10-12; ADR 0018 §29; mutation round `m16-preview`, 11/11)
+`RenderLoader.day_slice` (day-bounded: items by their own time on the 0034 partial expression index,
+links by primary key, roots by exact id; 37 statements for one day of a 2-day or a 12-day
+conversation), the pure `edisc_renderers.preview` (pages of 1,000 events with context, every message
+on one page, the report's sanitiser rules, links only to pinned evidence and same-page fragments,
+banners for incomplete/empty days, archive caveat), `edisc_worker.preview.build_preview`, the route
+`GET /v1/jobs/{id}/preview` (`evidence.read`; audit + forced anchor before the first byte, CSP of
+§10, refusals audited, integrity alert), the Playwright no-remote-fetch test (Playwright 1.63.0, CI
+installs Chromium), the D14 measurement (docs/runs/2026-10-12-preview-audit-burst.md: +24 ms per
+single view, ~20 % at 50 concurrent; kept, no group commit). `scripts/measure_audit_burst.py` fixed
+(it patched the unforced `anchor`; content routes call `anchor_now`) and gained `--target preview`.
 
 ## Done: the fixes before step 6 (2026-10-11; ADR 0018 §28; mutation round `m16-pre6`, 24/24)
 1. **Hostile export values never drop data.** Names (channel/user/file/workspace) are text: stored
@@ -73,18 +85,17 @@ all caught. Also found: a latent sanitiser-fuzz expectation bug (CRLF: each CR g
 the page never holds a CRLF pair); the mutation runner treated "no test ran" as caught (now a
 problem).
 
-## Next: M16 step 6 (preview)
-ADR 0018 §1.2, §10, §16.6: `RenderLoader.day_slice(...)` (day-bounded; `_index` loads a whole
-conversation today), the pure preview renderer (`edisc_renderers.preview`, same sanitiser and
-lone-surrogate rules), the route (`evidence.read`, audit + `anchor_now` before the first byte, the
-CSP of §10, `audit.preview_refused` on failure), the no-remote-fetch test (Playwright), the
-audit-burst measurement (D14). Production report creators need `EDISC_REPORT_TOOLCHAIN_ID` (the
-admitted image id) once reports carry PDFs outside test stacks. Local PDF work: `MIN_FREE_GB=9 make
-test-env-up` then `make test-report-pdf` (Docker Desktop, amd64 emulation: ~10 min with the image
-breaks; record new PDF goldens with `EDISC_RECORD_REPORT_PDF=1` after a report renderer bump; the
-image copies `tests/`, so do not edit the tree during its build step). Undiagnosed: one 265 ms loop block in the API middleware during the
-first `export_lone_surrogates` run (not reproduced in 11 later runs, 8 of them under 4-core CPU
-contention; see "Gotchas").
+## Next: M16 step 7 (docs), then wait for the user
+ADR 0018 §16.7: a CLAUDE.md section for M16 (mostly done incrementally; consolidate), this file, the
+ADR 0017 amendment (runtime identities per output kind: the report queue
+`reports.r<renderer>.p<toolchain12>.u<unicode>.g<glyphs12>`), BACKLOG (report reproductions are
+listed). Production report creators need `EDISC_REPORT_TOOLCHAIN_ID` (the admitted image id) once
+reports carry PDFs outside test stacks. Local PDF work: `MIN_FREE_GB=9 make test-env-up` then
+`make test-report-pdf` (amd64 emulation, ~10 min; record new PDF goldens with
+`EDISC_RECORD_REPORT_PDF=1` after a report renderer bump; the image copies `tests/`, so do not edit the
+tree during its build). Undiagnosed: one 265 ms loop block in the API middleware during the first
+`export_lone_surrogates` run (see "Gotchas"). Disk on this laptop swings between 2 and 15 GB free; a
+report image rebuild costs ~1.5 GB of Docker VM space.
 
 ## Done: six fixes before step 3, then M16 step 3 (2026-10-10; ADR 0018 §21, §22; ADR 0015 §24.10)
 Fixes (`42951ba`): markers are ELEMENTS (`<span class="cp">`), so literal "[U+202E]" text differs

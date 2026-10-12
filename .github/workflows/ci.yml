@@ -75,6 +75,8 @@ jobs:
           enable-cache: true
       - run: uv sync --all-packages --locked
       - run: command -v 7z && command -v unzip || (sudo apt-get update && sudo apt-get install -y p7zip-full unzip)
+      # the preview's no-remote-fetch test drives a headless Chromium (Playwright pinned in uv.lock)
+      - run: uv run playwright install --with-deps chromium
       # fresh ephemeral stack (project edisc-test, EDISC_ENV=test), destroyed after the run;
       # hosted runners have ~14 GB free, enough for the CI service subset. The conftest deselects every
       # test not in this shard (EDISC_CI_SHARDS/EDISC_CI_SHARD). A failing test leaves its worker logs,
