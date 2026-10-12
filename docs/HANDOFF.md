@@ -1,18 +1,53 @@
-# Handoff (2026-10-12: the fixes before step 7 and M16 step 7 (docs) done: M16 COMPLETE; next: wait for the user)
+# Handoff (2026-10-12: the export in the report, an export case on the tailored collation, the standalone verifier in the BACKLOG; M17 planned (not built); next: the user's decisions on docs/plans/m17.md)
 
 This file alone is enough to continue. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisions §1-§18, notes
-§19-§30, **every deviation in §31**); the rest of the plan of record is `docs/ARCHITECTURE.md`,
+§19-§30 and §32, **every deviation in §31**); the rest of the plan of record is `docs/ARCHITECTURE.md`,
 `docs/adr/`, `docs/plans/phase-2.md` and `docs/BACKLOG.md`. M16 summary:
 `docs/runs/2026-10-12-m16-complete.md`. Expert guide: `docs/VERIFYING.md`. Demo: `docs/DEMO.md`.
+**M17 proposal: `docs/plans/m17.md`** (plan only, nothing built; 14 decisions in its §12).
 
 ## Current state
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`. Migrations at head: **0035**.
-Renderer **1.3.2**, dummy connector **0.5.0**, normalizer **0.3.0**, report renderer **1.4.0**,
-preview renderer **1.0.0**. **M16 is complete** (steps 1-7). Commits this session: `1c3cc59` (the
-fixes before step 7, ADR 0018 §30), then the step 7 docs commit (see `git log`). CI run **38234557526 green** on `1c3cc59`
-(lint, typecheck, unit, production-install, report-pdf, 4 integration shards); the step 7 commit is
-docs and demo scripts only (its CI run: see `gh run list`).
+Renderer **1.3.2**, dummy connector **0.5.0**, normalizer **0.3.0**, report renderer **1.5.0**,
+preview renderer **1.0.0**. M16 is complete; the items before M17 are done (below). CI: see
+`gh run list`; run 38249757099 green on `a755e8e` (every job, report-pdf included).
+
+## Done: before M17 (2026-10-12; ADR 0018 §32; mutation round `m16-export`, 8/8)
+1. **The export in the report.** `job_started.export` (new jobs) records the export's size, entry
+   count, declared plan, detected tier, tier confirmation, blind spots, tier warnings and validation
+   findings (`pipeline.export_record`, from the `slack_exports` row). `report.json`
+   `access.export` states them from the chain (`model.export_section`; UNKNOWN for jobs started
+   before; a recorded null plan stays "not declared"); the HTML has an Export section ("What this
+   export cannot contain"); `edisc-verify --job-package` recomputes it (a forged tier fails).
+   Report renderer 1.5.0: report goldens and PDF goldens (`..._toolchain-e24aecbb3dd4`, recorded in
+   the image under emulation, verified again without recording; veraPDF 12/12; image breaks 4/4;
+   worker OOM/heartbeat tests pass). Corpus: one export case per tier with a declared plan
+   (`export_full` Business+, `export_public_only` free, new `export_grid` Enterprise Grid via the
+   dummy writer's new `grid` tier = `org_users.json`; default writer output unchanged, so no dummy
+   bump; `export_grid` has its own corpus golden).
+2. **Export on the tailored collation.** `tests/integration/corpus/test_collation.py` runs
+   `export_full` through the API on the ICU database and the default one (`api.conftest.make_api`
+   builds the API over any database). The export carries orphan day-file folders
+   (`ExportOptions.orphan_folders`) named so the tailored rules reorder the finding's sample; the
+   stated export section must be identical on both. The break "export entries' folder order left to
+   the database" (migration 0035) is caught only by this test.
+3. **BACKLOG:** the standalone `edisc-verify` package that installs without the rest of the codebase
+   is now marked required before production, with what it needs (own distribution, import boundary,
+   empty-venv CI job, reproducible build, format versions).
+
+## Found while planning M17 (not fixed: plan only)
+- **The API reflects request values in 422 bodies, credentials included** (FastAPI's default
+  `input` field): a token sent in a misplaced field or with the wrong type comes back in the response.
+  Reproduced with the connections route's model shape. Plan step 0 (`docs/plans/m17.md` §0) fixes it
+  globally with canary tests; decision D11 asks to do it first.
+- ADR 0016 needs an amendment before M17 code (plan §11): Strict cookies are not sent after a
+  cross-site redirect (callbacks need a same-site bounce page; installs need a Lax handle cookie); a
+  single OAuth relay host; **Teams admin consent must bind the signed ID token's `tid`, never the
+  callback's `tenant` parameter** (otherwise one customer can bind another customer's consented Entra
+  tenant); revocation cuts in-flight downloads; revoked tokens end as `access_lost` units.
+
+## Next: the user's decisions on `docs/plans/m17.md` §12, then the ADR 0016 amendment, then step 0
 
 ## Done: the fixes before step 7 (2026-10-12; ADR 0018 §30; mutation round `m16-pre7`, 15/15)
 1. **Collation.** Every ORDER BY reaching output bytes reviewed; migration 0035: the remaining
@@ -66,12 +101,12 @@ docs and demo scripts only (its CI run: see `gh run list`).
 - `docs/runs/2026-10-12-m16-complete.md`: what was built, test and mutation counts, measurements,
   open items.
 
-## Next: wait for the user
-Open items (details in the M16 summary and ADR 0018 §31): mentor questions (paper default, name
-visibility); before production: report image in a registry + `deploy/render-images.json` + report
-worker deployment files, ICC check against color.org; not built: export findings/tier in the
-report's access section, per-scope unit counts, 1M-unit measurement (cloud VM), report
-reproductions, standalone verifier, hostile ids collected under stand-in keys.
+## Open items after M16
+Details in the M16 summary and ADR 0018 §31: mentor questions (paper default, name visibility);
+before production: report image in a registry + `deploy/render-images.json` + report worker
+deployment files, ICC check against color.org, the standalone verifier; not built: per-scope unit
+counts, 1M-unit measurement (cloud VM), report reproductions, hostile ids collected under stand-in
+keys.
 
 ## Done: M16 step 6, the preview (2026-10-12; ADR 0018 §29; mutation round `m16-preview`, 11/11)
 `RenderLoader.day_slice` (day-bounded: items by their own time on the 0034 partial expression index,

@@ -206,6 +206,8 @@ report → download, with the audit trail checked. Plus accessibility checks (ax
 Out of scope for M17 (backlog): admin screens for IdPs and roles (API-only for now), theming, i18n.
 
 ### M17 backend (PROPOSED 2026-10-03, amended after review; not implemented)
+Detailed plan (2026-10-12, proposal): `docs/plans/m17.md`; where they differ, that plan wins once
+accepted.
 The frontend now exists as a Vite + React single-page app (`apps/web`, built elsewhere, on its own
 branch), not Next.js. So there is no separate BFF server: **the API itself holds the session**, which
 keeps decision 7 (server-side sessions, httpOnly cookies, CSRF, revocation, no tokens in the browser).
