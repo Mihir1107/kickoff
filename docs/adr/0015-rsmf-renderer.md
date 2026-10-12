@@ -1200,3 +1200,21 @@ what was done and why.
    new tests) gets the median and lands in exactly one shard; a stale entry is ignored.
    `test_verify_uses_the_collected_set_and_places_an_unrecorded_test_in_exactly_one_shard`;
    mutations `shard_before_deselection`, `verify_from_durations`.
+11. **Two simultaneous stalls in the 50k soak on a starved host (2026-10-12, diagnosed, no product
+    change).** The full local run before M16 step 7 (1,123 passed) failed
+    `test_50k_messages_survive_sigkills_and_a_full_restart_exactly` at teardown: TWO worker
+    processes (pids 27594, 27595) each blocked once, 288 ms and 292 ms, at the same moment, in
+    unrelated library code just after the test's full restart: SQLAlchemy generating a statement's
+    cache key, and the Temporal SDK creating a workflow sandbox instance. Neither passes through our
+    code. Reproduction: the test alone, unloaded, logging every block over 50 ms: worst worker block
+    55 ms, neither frame over 50 ms; three runs with all 8 cores taken by busy loops: passed, worst
+    worker blocks 246, 188 and 192 ms, each at another arbitrary library frame (`os.replace`,
+    `SSLContext.__new__`, `re` compile). Cause: host CPU starvation. During the failing run macOS
+    was reclaiming disk space and re-indexing (StorageManagementService, corespotlightd and the
+    Docker VM on top; load average 72 right after the busy loops stopped). A stall that hits two
+    processes at once, at random frames, scales with load, not with a code site. The CPU rule
+    (item 7) counted them because the loop threads still got more than 25 % of the CPU. No product
+    fix: there is no CPU-bound site of ours to move off the loop, and the threshold is not loosened
+    (CLAUDE.md). If it recurs on CI (a dedicated runner, not this laptop), the frames must be
+    examined again; the candidate mitigation is warming the workflow sandbox at worker start (one
+    throwaway instance), like `warm_routes` for the API.

@@ -57,6 +57,7 @@ from edisc_custody.recovery import recover_job_evidence
 from edisc_db.session import tenant_tx
 from edisc_evidence.writer import EvidenceIntegrityError, EvidenceWriter
 from edisc_normalizer.model import (
+    NORMALIZER_VERSION,
     Derived,
     EvidenceRef,
     FileEvidence,
@@ -87,7 +88,8 @@ DIRECTORY_UNIT = "directory"
 # day's unit (job_items holds one link per item), and it still counts for this day.
 # gap_reasons := sorted distinct union with :gr (text[])
 _ADD_GAP_REASONS = (
-    "(SELECT coalesce(array_agg(DISTINCT r ORDER BY r), '{}') FROM"
+    # code-point order whatever the database's collation (ADR 0018 §30): the array is in the chain
+    """(SELECT coalesce(array_agg(DISTINCT r COLLATE "C" ORDER BY r COLLATE "C"), '{}') FROM"""
     " unnest(gap_reasons || CAST(:gr AS text[])) AS r)"
 )
 _UNIT_LINKED_ITEMS = (
@@ -358,6 +360,9 @@ class Pipeline:
                 "blind_spots": None if access.blind_spots is None else list(access.blind_spots),
                 "unit_day_zone": "UTC",
                 "unit_event_format": UNIT_EVENT_FORMAT,
+                # the normalizer this worker runs; each batch records its own too (a job resumed
+                # by an upgraded worker), so the report states them from the chain (ADR 0018 §30)
+                "normalizer_versions": [NORMALIZER_VERSION],
                 **(
                     {"export": {"id": str(access.export_id), "sha256": access.export_sha256}}
                     if access.export_id is not None
@@ -988,6 +993,7 @@ class Pipeline:
             actor=ACTOR,
             anchor_every=self.anchor_every,
             event_id=event_id,
+            normalizer_version=NORMALIZER_VERSION,
         )
 
     async def _record_access_lost(

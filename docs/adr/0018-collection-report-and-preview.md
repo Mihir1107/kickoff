@@ -1,10 +1,12 @@
 # ADR 0018: Collection report (JSON, HTML, reproducible PDF) and HTML preview (M16)
 
-Status: **Accepted** (2026-10-06), not implemented. Built from `docs/plans/m16.md` (the proposal,
-kept as history) with the review decisions D1-D14 of 2026-10-06 folded in, and the PDF spike S1
-(§5.10) passed. **Amended 2026-10-06** (§18): compressed streams, no Japanese font, report worker
-limits and an OOM crash point, admission by PDF goldens, the ICC licence, the spike as evidence,
-and (amendment 7) the PDF render in a child process with its own memory limit. Two points wait for the mentor (§17); neither blocks the build.
+Status: **Accepted** (2026-10-06), **implemented** (M16 steps 1-7, 2026-10-06 to 2026-10-12). Built
+from `docs/plans/m16.md` (the proposal, kept as history) with the review decisions D1-D14 of
+2026-10-06 folded in, and the PDF spike S1 (§5.10) passed. **Amended 2026-10-06** (§18): compressed
+streams, no Japanese font, report worker limits and an OOM crash point, admission by PDF goldens, the
+ICC licence, the spike as evidence, and (amendment 7) the PDF render in a child process with its own
+memory limit. Implementation notes per step: §19-§30. **Every place where the build differs from
+the decision above is listed in §31.** Two points still wait for the mentor (§17).
 Builds on ADR 0005 (units, statuses), 0014 §4 (archive caveat), 0015 (render custody stream, loader,
 determinism, packages, first-byte rule), 0017 (worker images per runtime identity, generalised here).
 
@@ -1085,3 +1087,107 @@ and keep running. Breaks: a dev-only import in the API and in the worker.
    against the dataset with 5-event pages, every reply's thread root on its page, the permission
    matrix, the first byte, headers, determinism, refusals audited, attachment links resolving to file
    evidence, a Kathmandu day, bounded queries). Mutation round `m16-preview` (11, all caught).
+
+## 30. Fixes before step 7 (2026-10-12): code-point order under any collation, the verdict from the chain, normalizer versions in the chain; migration 0035
+1. **Collation sweep.** §28 made the report's order columns COLLATE "C" after `units.jsonl` was
+   found to depend on the database's locale. Every `ORDER BY` in the product (packages, apps,
+   workers, migrations) was then reviewed for text that reaches output bytes or output order.
+   Found and fixed (migration 0035, column level): `items.idempotency_key` (the job package's
+   `items.jsonl` order; /3 promises byte-identical downloads, and the same job restored on another
+   host must give the same bytes), `evidence_objects.storage_key` (the package's evidence order,
+   keyset pages), `collection_scopes.external_id` (a job's scopes in the jobs API and the planning
+   order; `job_started` lists scopes in the caller's order and unit events index them by creation
+   order, so the chain never depended on it), `items.source_item_id` (the normalizer's prior state),
+   `export_conversations.conversation_id` / `folder`, `export_entries.folder`,
+   `export_threads.conversation_id` (the export connector's unit order and the findings' capped
+   samples: another order is another sample of 100), and the same names in other tables
+   (`items.storage_key`, `render_natives.storage_key`, `renders.idempotency_key`,
+   `groups.external_id`) so that ONE rule holds: a column name the product orders by is C in every
+   table. Query level: the gap-reason union (`array_agg(DISTINCT r COLLATE "C" ...)`, the array is
+   in the unit events) and the latest derivation's tie-break (`normalizer_version COLLATE "C"`).
+   Python-side sorts are code-point sorts already.
+   **Why columns, not the database default:** a database's collation is fixed at `CREATE DATABASE`
+   (managed Postgres defaults to `en_US.UTF-8` and cannot alter it), while a column's collation is
+   in the schema (the drift test sees it) and travels with a dump into whatever database restores
+   it. A database created `C` would also hide a missing column collation from the tests.
+   **Tests.** `tests/integration/db/test_collation.py` (static): every `ORDER BY` term in the
+   product's string literals is `COLLATE "C"`, a column that is C in every table of a database
+   migrated from scratch in the test, not text anywhere, or a listed non-text expression.
+   `tests/integration/corpus/test_collation.py` (dynamic): a database created with a TAILORED ICU
+   collation (`en-US` + `&C < G < D`, digits reversed; a precondition test proves it orders the
+   dummy ids otherwise than code points, so the test cannot pass vacuously), migrated from scratch;
+   the `custodians` and `slack_three_epochs` cases run on it AND on the default database through
+   collection, render, report and job package: the RSMF equals the recorded golden on both,
+   `units.jsonl` and the counts, unit exceptions and conversations sections are byte-identical
+   between the two, the report recomputes from the job package on the tailored one, observations,
+   the package's items and evidence are in code-point order. Not covered by the dynamic test: export
+   ingestion on the tailored database (the export path runs through the API fixtures, which are
+   bound to the main database); the export columns are covered by the static test only.
+   The Alpine test images order code points even for `en_US` (musl), which is why the dynamic test
+   needs ICU rules rather than a glibc locale.
+2. **The clean verdict from the chain alone** (`edisc_renderers.report.recompute.chain_verdict`,
+   run by `edisc-verify --job-package`). Clean by the chain: exactly one `job_started` and one final
+   event, `job_finished` with status `completed` (an archive job never is), no `cancel_requested` /
+   `job_failed` recorded, and every conversation-day unit the chain states settled, reconciled and
+   none of `gap`, `surplus`, `access_lost`, `unverifiable`, `failed` (the pipeline's own rule for
+   the final status, so a chain that contradicts its own status is not clean either). The report
+   states clean when `job.clean` is true OR its banner carries the clean line (the HTML and PDF print
+   the banner). A report stating clean for a chain that does not give clean FAILS, naming the
+   chain's reasons; a report stating NOT clean for a chain that gives clean PASSES (the report's
+   verdict also needs what only the database and the bucket know: no divergence, no retention gap,
+   custody verified when it was made) and the verifier prints the reasons the report states.
+   Tests: unit (`tests/unit/renderers/test_report_verdict.py`: both directions, a forged clean
+   report whose rows and sections all match the chain, every reason) and end to end through the API
+   and real packages (`tests/integration/api/test_reports.py`: a report made by code that calls
+   every job clean, of a job with gaps, passes alone and fails with `--job-package` on the verdict
+   ONLY; a clean job with a retention gap on its evidence states not clean and passes, printing
+   `1 retention gap(s)`).
+3. **Normalizer versions in the chain** (new jobs). `job_started.normalizer_versions` (the starting
+   worker's) and `items_collected.normalizer_version` (each batch's, so a job resumed by an upgraded
+   worker states both). The report states the chain's set when `job_started` records it, otherwise
+   the derivations' versions as before; `edisc-verify --job-package` recomputes the set (section
+   `versions`) and says when a job predates it. No report renderer bump: for the same inputs the
+   model's output is unchanged (only the loader's source of the value changed). Deviation from the
+   previous meaning: for new jobs the report states the normalizers that derived THIS job's batches,
+   not every derivation version its items carry (an item first collected by an earlier job, or
+   re-derived later, may carry others).
+4. BACKLOG: collecting the messages of a conversation with a hostile id under its stand-in key.
+5. Mutation round `m16-pre7` (15 breaks, all caught). The collation breaks edit the migrations: the
+   static test migrates its own scratch database, so a migration break is visible to it.
+
+## 31. Built vs decided: every deviation, in one place (2026-10-12)
+The decision sections (§1-§18) are kept as written; where the build differs, this is the list. Each
+line names the section it amends and the implementation note that records why.
+
+| # | Decided | Built | Why / where |
+|---|---|---|---|
+| 1 | §16: migration 0030 holds the report tables | 0030 = `connections.blind_spots` + the units order index; reports = **0031**; then 0032 (glyph set), 0033 (unit facts, collations), 0034 (preview index), 0035 (code-point order) | Blind spots had to be recorded first (§19.4) |
+| 2 | §16: steps in order 1-7 | Step 4 (custody stream) built right after step 1, before HTML and PDF | The user asked to review the stored, sealed stream first (§20) |
+| 3 | §1, §7.1, §19.2: kind, conversation, scopes, access-lost reason of a unit are database facts | For jobs started since §28 (`unit_event_format` 2) every unit fact is in the chain (and unsettled units in `units_unsettled`); the database row is the cross-check | So `units.jsonl` is recomputable byte for byte (§28.2) |
+| 4 | §1: `renders.jsonl` lists every external native as `{file_id}_EXTERNAL.txt` | Lists each native's custody-anchored record (ord, SHA-256, size, referencing files); the `_EXTERNAL.txt` names live only inside the `.rsmf` zips | Reading every render file to list names is not done; the record is what custody anchors (§19.5) |
+| 5 | §1.1.3: for exports, size, validation findings and tier detection in the access section | The access section states the export id and SHA-256 and the blind spots from `job_started`, plus the connection's database facts; the export's size, findings and tier detection are NOT in the report | Not built; they are on the export record (`GET /v1/exports/{id}`). Open item |
+| 6 | §1.1.2: units per scope | Each unit row carries the indexes of the scopes covering it; no per-scope unit count is stated | Derivable from `units.jsonl`; not stated separately. Open item |
+| 7 | §3.2: markers are ASCII text `[U+XXXX]` | Markers are ELEMENTS (`<span class="cp">U+XXXX</span>`); HTML-invalid code points are replaced too | A literal "[U+202E]" in a name was indistinguishable from a replaced U+202E (§21.1, §21.2) |
+| 8 | §5.5: the glyph-coverage pass runs "before HTML for the PDF is built" | Coverage is applied in the ONE stored `report.html`, from the committed `fonts/coverage.txt` | §10 renders the PDF from the stored HTML; both hold this way (§22.4) |
+| 9 | §5.7, §9: identity = (job, snapshot digest, renderer, toolchain id, Unicode, paper) | + `glyph_set` (SHA-256 of the coverage ranges), also in the queue name and the golden key | The glyph set changes HTML bytes and was named nowhere outside the image (§24) |
+| 10 | §6: report queue `reports.r<renderer>.p<toolchain12>.u<unicode>` | `reports.r<renderer>.p<toolchain12>.u<unicode>.g<glyphs12>` | §24 |
+| 11 | §6: `deploy/render-images.json` records per image digest the identities it serves | Not written; the image is not pushed to a registry. The admission gate (PDF + HTML goldens, veraPDF, image-only mutation breaks) runs in the CI `report-pdf` job on amd64 | Needs a registry (cloud); BACKLOG, required before production (§22.8) |
+| 12 | §6 admission (a): the report oracle cases pass INSIDE the image | Inside the image: HTML and PDF goldens, the toolchain and structure tests, font isolation, veraPDF, image mutation breaks. The integration oracle cases run on the host suite against the same code, not in the image | The oracle cases need the full stack; the image's admission checks the bytes the image adds (fonts, layout, zlib) |
+| 13 | §6: the image digest goes in `report_started` | Recorded from `EDISC_IMAGE_DIGEST` when set (deployment), else null and the report prints UNKNOWN | No registry or deployment files yet (item 11) |
+| 14 | §7.1: normalizer versions from the items' derivations | For jobs started since §30: from the chain (`job_started.normalizer_versions` + each batch's `normalizer_version`): the normalizers that derived THIS job's batches; older jobs: the derivations as before | Recomputable offline (§30.3) |
+| 15 | §9: a manual request with an identity equal to a live report returns it (200) | Every manual request creates a NEW report (201) | Its own `audit.report_requested` moves the audit head inside the snapshot, so the identity always differs (§27.2) |
+| 16 | §9: `ensure-job-reports` gives every sealed job a report | Once; a job whose report failed or was refused is not retried automatically (its `report_missing` episode asks a human) | A deterministic failure would loop (§20.6) |
+| 17 | §10: D14 measured in step 7 | Measured in step 6 (docs/runs/2026-10-12-preview-audit-burst.md): +24 ms per view, ~20 % at 50 concurrent; one forced anchor per view kept, no group commit | Built with the route (§29.5) |
+| 18 | §12: `RenderLoader.day_slice(conversation, window, page)` | `day_slice(conversation, day)` (zone from the loader's options); pages are split by the pure renderer (`plan_pages`) | Paging needs the whole day's messages to keep every message on one page (§29.1, §29.2) |
+| 19 | §12: `measure_report.py` at 10k, 100k, 1M units | 10k and 100k measured (memory flat, docs/runs/2026-10-06-report-scale.md); 1M not run | Needs a cloud VM (BACKLOG) |
+| 20 | §14: `--job-package` recomputes `units.jsonl`, `observations.jsonl` and the chain-derived sections | `units.jsonl` byte for byte (since §28; at §27 only its chain content), counts, exceptions, conversations, job, scopes, access, pauses, actors, normalizer versions (§30), and the clean verdict ONE WAY (a report may not state clean when the chain does not, §30.2). NOT recomputed: `observations.jsonl` (the chain covers items by content hash, not their derived fields), renders, the snapshot, divergences, the banner. All listed by the verifier and in docs/VERIFYING.md | §27.4, §28.2, §30 |
+| 21 | §3.1, §1: file orders by key | Orders are code-point orders whatever the database's collation (COLLATE "C" columns, 0033 and 0035) | The order depended on the database host's locale (§28.2, §30.1) |
+| 22 | §8: a chain that fails verification still gets a report | As decided; plus hostile source values (lone surrogates) never fail a report: replacement text + exact code units | §23 |
+| 23 | §1.2: preview header shows the job's clean flag | The page shows the status verbatim and whether the STATUS is clean; custody-level cleanliness (divergences, retention gaps) is the report's | The preview does not verify the chain or read the snapshot (§29.2) |
+| 24 | §17 | Both mentor questions still open: paper default `letter`; names shown to every role allowed to read | Waiting |
+
+Also built beyond the decision: the job custody package download `GET /v1/jobs/{id}/package`
+(`edisc-custody-package/3`, deterministic; §27.1), the strict job package verifier reading zips in
+place (§28.3), the production-install smoke job (§26), the PDF-from-stored-HTML tamper test and the
+image mutation kind (§25), hostile export ids reported as gap units (§28.1; collecting them under the
+stand-in key is BACKLOG).

@@ -762,7 +762,10 @@ class ReportLoader:
             unit_status_counts=units.status_counts, recon_counts=units.recon_counts,
             totals=units.totals, exceptions=exceptions, observation_counts=obs_counts,
             pauses_db=await self._pauses_db(), divergences=divergences,
-            normalizer_versions=await self._normalizer_versions(),
+            # from the chain for jobs that record them (ADR 0018 §30), else the derivations
+            normalizer_versions=chain.normalizer_versions
+            if chain.normalizer_versions is not None
+            else await self._normalizer_versions(),
             versions={"report_renderer": REPORT_RENDERER_VERSION,
                       "unicode": unicodedata.unidata_version,
                       "pdf_toolchain": dict(identity or {}).get("toolchain_id"),

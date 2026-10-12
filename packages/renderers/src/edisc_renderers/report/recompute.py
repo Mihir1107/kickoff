@@ -19,7 +19,14 @@ own model (`ChainFold`, `unit_row`, `jsonl_line`) and rebuilds, then byte-compar
   the totals, the capped unit exceptions, the conversations section and ``conversations.jsonl``;
 - ``job``: who started it, the final status (when the chain has a final event), the unit day zone;
   ``scopes``, ``access`` as `job_started` recorded them; ``pauses`` (with who re-authorized) and the
-  count never resumed; ``actors``: every custody event's actor by type.
+  count never resumed; ``actors``: every custody event's actor by type; ``versions``: the normalizer
+  versions `job_started` and each batch recorded (jobs started since ADR 0018 §30; older jobs: not
+  recomputed);
+- the clean VERDICT from the chain alone (`chain_verdict`, §30): the report may never state clean
+  when the chain does not give clean (a difference: the package FAILS). The other way round is
+  allowed, because the report's verdict also needs what only the database and the bucket know (no
+  divergence, no retention gap): the package passes and the reasons the report states are listed
+  (``Recomputation.stated_not_clean``).
 
 Not recomputable offline (checked against the digests recorded in `report.json` and
 `report_generated` only; ``NOT_RECOMPUTED``): see the constant.
@@ -36,8 +43,9 @@ from datetime import datetime
 from typing import Any
 
 from edisc_core.canonical import canonical_json
-from edisc_core.schemas import ReconStatus, UnitStatus
+from edisc_core.schemas import JobStatus, ReconStatus, UnitStatus
 from edisc_renderers.report.model import (
+    CLEAN_BANNER,
     EXCEPTION_RECON,
     UNKNOWN,
     ZONE_NOT_RECORDED,
@@ -50,6 +58,7 @@ from edisc_renderers.report.model import (
     conversations_section,
     exact_document,
     jsonl_line,
+    kind_of,
     or_unknown,
     unit_order,
     unit_row,
@@ -57,8 +66,8 @@ from edisc_renderers.report.model import (
     zero_rows,
 )
 
-SECTIONS = ("job", "scopes", "access", "pauses", "actors", "counts", "exceptions.units",
-            "conversations")  # fmt: skip
+SECTIONS = ("job", "scopes", "access", "pauses", "actors", "versions", "counts",
+            "exceptions.units", "conversations")  # fmt: skip
 UNIT_DIVERGENCES = (
     "duplicate_unit_event", "unit_unsettled_in_database", "unit_missing_from_chain", "unit_differs",
 )  # fmt: skip
@@ -69,9 +78,18 @@ NOT_RECOMPUTED = (
     "the snapshot: retention gaps, evidence lock settings and the S3 observation, the job's evidence"
     " statistics, the tenant audit events",
     "the divergences and the divergent flag of a unit row (a comparison with the database)",
-    "the banner and the clean verdict (they depend on the divergences and retention gaps)",
-    "normalizer versions (the items' derivations), the report identity, versions and integrity",
+    "the banner (it depends on the divergences and retention gaps); the clean verdict is checked one"
+    " way only: a report stating clean must be clean by the chain",
+    "the report identity, renderer versions and the integrity section (the files' digests are"
+    " checked)",
 )
+NORMALIZERS_NOT_RECORDED = (
+    "the normalizer versions (the job was started before job_started recorded them: they come from"
+    " the items' derivations)"
+)
+# the recon statuses that make a conversation-day unit unclean: exactly the pipeline's rule for the
+# final status (`Pipeline.finalize`), so a clean job is never contradicted
+UNCLEAN_RECON = ("gap", "surplus", "access_lost", "unverifiable", "failed")
 
 
 def _when(value: Any) -> datetime:
@@ -84,6 +102,12 @@ class Recomputation:
     database_rows: int = 0  # unit rows the report states from the database (taken as written)
     units_rows: int = 0
     conversations_file: bool = False  # conversations.jsonl recomputed (present above the cap)
+    chain_clean: bool = False  # the clean verdict from the chain alone
+    chain_not_clean: list[str] = field(default_factory=list)  # why the chain does not give clean
+    stated_clean: bool = False
+    # the report states not clean although the chain gives clean: the reasons it states (allowed)
+    stated_not_clean: list[str] = field(default_factory=list)
+    normalizers_recorded: bool = False  # `job_started` recorded the normalizer versions
 
     @property
     def ok(self) -> bool:
@@ -98,7 +122,64 @@ class Recomputation:
             if self.database_rows
             else ()
         )
-        return extra + NOT_RECOMPUTED
+        older = () if self.normalizers_recorded else (NORMALIZERS_NOT_RECORDED,)
+        return extra + NOT_RECOMPUTED + older
+
+
+def chain_verdict(fold: ChainFold, facts: Mapping[str, UnitFact]) -> list[str]:
+    """Why the VERIFIED job chain alone does not give a clean job (empty: it does). Clean by the
+    chain: one `job_started`, one final event, `job_finished` with status `completed` (an archive
+    job never is, ADR 0014), no stop recorded, and every conversation-day unit the chain states
+    settled, reconciled and none of `UNCLEAN_RECON` (the pipeline's own rule for the status, so a
+    chain contradicting its final status is not clean either). Custody is verified before this
+    runs (never from a package that fails)."""
+    out: list[str] = []
+    if fold.started is None or fold.duplicate_starts:
+        out.append("the chain does not hold exactly one job_started")
+    if fold.final is None or fold.duplicate_finals:
+        out.append("the chain does not hold exactly one final event")
+    elif fold.final.event_type != "job_finished" or fold.final_status != JobStatus.COMPLETED.value:
+        out.append(f"final status {fold.final_status} ({fold.final.event_type})")
+    out += [f"{stop.event_type} recorded (seq {stop.seq})" for stop in fold.stops]
+    unclean: Counter[str] = Counter()
+    for key, fact in facts.items():
+        kind = fact.detail.kind if fact.detail is not None else kind_of(key)
+        if kind != "conversation_day":
+            continue
+        if fact.outcome != "reconciled":
+            unclean[fact.outcome] += 1
+        elif fact.recon_status in UNCLEAN_RECON:
+            unclean[fact.recon_status] += 1
+    out += [f"{n} unit(s) {what}" for what, n in sorted(unclean.items())]
+    return out
+
+
+def stated_clean(doc: Mapping[str, Any]) -> bool:
+    """The report states clean when `job.clean` says so OR its banner carries the clean line (the
+    HTML and PDF print the banner)."""
+    return doc.get("job", {}).get("clean") is True or CLEAN_BANNER in (doc.get("banner") or [])
+
+
+def stated_reasons(doc: Mapping[str, Any]) -> list[str]:
+    """The reasons a report states for not being clean, in words (divergences, retention gaps, a
+    custody verification failure, the status)."""
+    out: list[str] = []
+    job = doc.get("job", {})
+    if job.get("status") != JobStatus.COMPLETED.value:
+        out.append(f"status {job.get('status')}")
+    if doc.get("custody_verification", {}).get("ok") is not True:
+        out.append("custody verification not ok when the report was made")
+    divergences = doc.get("divergences", {}).get("divergences", [])
+    if divergences:
+        kinds = Counter(str(d.get("kind")) for d in divergences)
+        out.append(
+            f"{len(divergences)} divergence(s) between the chain and the database: "
+            + ", ".join(f"{k} {n}" for k, n in sorted(kinds.items()))
+        )
+    gaps = doc.get("evidence_store", {}).get("retention_gaps", [])
+    if gaps:
+        out.append(f"{len(gaps)} retention gap(s) touching the job's evidence")
+    return out or ["none stated"]
 
 
 def fold_chain(events: Iterable[Mapping[str, Any]]) -> tuple[ChainFold, dict[str, UnitFact]]:
@@ -147,10 +228,18 @@ def _job_sections(fold: ChainFold) -> dict[str, Any]:
         "actors": [
             {"event_type": t, "actor": a, "events": n} for (t, a), n in sorted(fold.actors.items())
         ],
+        "versions": _versions(fold),
     }
 
 
-def _stated_job_sections(doc: Mapping[str, Any]) -> dict[str, Any]:
+def _versions(fold: ChainFold) -> list[str] | None:
+    """The normalizer versions the chain records (`job_started` + each batch, §30), or None for a
+    job started before they were recorded (not recomputable: the report read the derivations)."""
+    versions = fold.normalizer_versions
+    return None if versions is None else versions or [UNKNOWN]
+
+
+def _stated_job_sections(doc: Mapping[str, Any], *, recorded: bool) -> dict[str, Any]:
     job = doc.get("job", {})
     missing_final = any(
         d.get("kind") == "job_final_event_missing"
@@ -158,6 +247,7 @@ def _stated_job_sections(doc: Mapping[str, Any]) -> dict[str, Any]:
     )
     access = doc.get("access", {})
     pauses = doc.get("pauses", {})
+    versions = doc.get("versions", {})
     return {
         "job": {
             "requested_by": job.get("requested_by"),
@@ -173,7 +263,15 @@ def _stated_job_sections(doc: Mapping[str, Any]) -> dict[str, Any]:
             "never_resumed": pauses.get("never_resumed"),
         },
         "actors": list(doc.get("actors", {}).get("custody", [])),
+        "versions": _stated_versions(versions, recorded),
     }
+
+
+def _stated_versions(versions: Mapping[str, Any], recorded: bool) -> list[str] | None:
+    if not recorded:
+        return None
+    stated = versions.get("normalizer_versions")
+    return list(stated) if isinstance(stated, list) else [str(stated)]
 
 
 def _rows_sections(rows: Sequence[Mapping[str, Any]], units_file: Mapping[str, Any]) -> tuple[
@@ -265,7 +363,7 @@ def recompute(
     derived, conv_file = _rows_sections(rows, units_file)
     mine = {**_job_sections(fold), **derived}
     stated = {
-        **_stated_job_sections(doc),
+        **_stated_job_sections(doc, recorded=fold.normalizer_versions is not None),
         "counts": doc.get("counts"),
         "exceptions.units": doc.get("exceptions", {}).get("units"),
         "conversations": doc.get("conversations"),
@@ -276,6 +374,19 @@ def recompute(
                 f"{section}: the report states {_short(stated[section])}, the chain gives"
                 f" {_short(mine[section])}"
             )
+    out.normalizers_recorded = fold.normalizer_versions is not None
+
+    # the clean verdict: never clean in the report when the chain does not give clean
+    out.chain_not_clean = chain_verdict(fold, facts)
+    out.chain_clean = not out.chain_not_clean
+    out.stated_clean = stated_clean(doc)
+    if out.stated_clean and not out.chain_clean:
+        out.differences.append(
+            "verdict: the report states clean, the chain does not give clean: "
+            + "; ".join(out.chain_not_clean)
+        )
+    elif out.chain_clean and not out.stated_clean:
+        out.stated_not_clean = stated_reasons(doc)
     if conv_file is not None or conversations_jsonl is not None:
         out.conversations_file = True
         if conv_file != conversations_jsonl:

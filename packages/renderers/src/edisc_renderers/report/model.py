@@ -52,6 +52,7 @@ UNIT_EVENTS = ("unit_reconciled", "unit_failed", "units_unsettled")
 DETAILED_FORMAT = 2
 DIRECTORY_UNIT_KEY = "directory"  # `edisc_worker.pipeline.DIRECTORY_UNIT` (a unit test ties them)
 FINAL_EVENTS = ("job_finished", "job_cancelled")
+CLEAN_BANNER = "Complete: every unit reconciled against the source"
 OBSERVATION_KINDS = (
     "file_unavailable", "file_became_available", "access_lost", "access_restored",
     "no_longer_observed", "observed_again",
@@ -389,6 +390,8 @@ class ChainFold:
     # unit facts whose error the chain recorded with its exact code units (`error_utf16`, §23): the
     # database holds the valid text only, so these are stated from the chain. Memory: O(such units)
     exact_errors: dict[str, UnitFact] = field(default_factory=dict)
+    # normalizer versions the chain records (`job_started` and each batch, ADR 0018 §30)
+    normalizers: set[str] = field(default_factory=set)
 
     def add(self, e: ChainEvent) -> list[UnitFact]:
         """Fold one event; returns its unit facts (several for `units_unsettled`)."""
@@ -397,6 +400,7 @@ class ChainFold:
         if e.event_type == "job_started":
             if self.started is None:
                 self.started = e
+                self.normalizers.update(str(v) for v in e.payload.get("normalizer_versions") or ())
             else:
                 self.duplicate_starts += 1
         elif e.event_type in FINAL_EVENTS:
@@ -416,6 +420,8 @@ class ChainFold:
                     p.resumed_at, p.resumed_by = e.created_at, e.actor
         elif e.event_type == "items_collected":
             self.batches += 1
+            if e.payload.get("normalizer_version"):
+                self.normalizers.add(str(e.payload["normalizer_version"]))
         elif e.event_type in UNIT_EVENTS:
             facts = facts_for_format(unit_facts_from_event(e.event_type, e.payload), self.detailed)
             for fact in facts:
@@ -433,6 +439,14 @@ class ChainFold:
             self.started is not None
             and self.started.payload.get("unit_event_format") == DETAILED_FORMAT
         )
+
+    @property
+    def normalizer_versions(self) -> list[str] | None:
+        """The normalizer versions the chain states (code-point order), or None for a job started
+        before `job_started` recorded them (its report reads the items' derivations instead)."""
+        if self.started is None or "normalizer_versions" not in self.started.payload:
+            return None
+        return sorted(self.normalizers)
 
     @property
     def final_status(self) -> str | None:
@@ -696,7 +710,7 @@ def banner(status: str, *, custody_ok: bool, divergences: int, units: Mapping[st
             f"RECORDS DISAGREE: {divergences} divergence(s) between the chain and the database"
         )
     if is_clean:
-        lines.append("Complete: every unit reconciled against the source")
+        lines.append(CLEAN_BANNER)
     elif status == JobStatus.COMPLETED_AGAINST_ARCHIVE.value:
         lines.append("COMPLETE RELATIVE TO THE PROVIDED EXPORT ONLY")
         lines.append(ARCHIVE_CAVEAT)

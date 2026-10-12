@@ -167,8 +167,10 @@ async def append_batch(
     actor: str,
     anchor_every: int = 8,
     event_id: uuid.UUID | None = None,
+    normalizer_version: str | None = None,
 ) -> AppendedEvent:
     """One ``items_collected`` event per committed batch, Merkle root over (idempotency_key, content_hash).
+    ``normalizer_version``: the normalizer that derived the batch's items (ADR 0018 §30).
 
     ``items`` must be exactly the job links created with this event's id in the same transaction;
     ``verify_chain`` recomputes the root from those links. Pass the pre-allocated ``event_id`` when the
@@ -187,6 +189,7 @@ async def append_batch(
             "page_sha256": page_sha256,
             "item_count": len(items),
             "merkle_root": batch_root(items),
+            **({"normalizer_version": normalizer_version} if normalizer_version else {}),
         },
         anchor_every=anchor_every,
         event_id=event_id,

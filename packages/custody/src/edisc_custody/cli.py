@@ -196,11 +196,23 @@ def _report(package: Path, job: Path | None, *, as_json: bool, tolerate: bool) -
             sys.stdout.write(
                 f"  RECOMPUTED from the job chain, identical: units.jsonl byte for byte"
                 f" ({report.recomputed_rows} rows), the unit counts, exceptions and conversations,"
-                " the job, scope, access, pause and actor sections\n"
+                " the job, scope, access, pause, actor and normalizer-version sections\n"
                 "  checked against recorded digests only (not recomputable offline): "
                 + "; ".join(report.not_recomputed)
                 + "\n"
             )
+        if report.chain_clean is not None:
+            verdict = "clean" if report.chain_clean else "NOT clean"
+            sys.stdout.write(f"  VERDICT from the job chain alone: {verdict}\n")
+            for reason in report.chain_not_clean:
+                sys.stdout.write(f"    chain: {reason}\n")
+            if report.stated_not_clean:
+                sys.stdout.write(
+                    "  the report states NOT clean although the chain gives clean (allowed: the"
+                    " report also weighs what only the database and the bucket know); it states:\n"
+                )
+                for reason in report.stated_not_clean:
+                    sys.stdout.write(f"    report: {reason}\n")
     else:
         sys.stdout.write("  chain-derived content not recomputed (no --job-package given)\n")
     errors = report.errors + (chain.errors if chain else [])

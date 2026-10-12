@@ -22,6 +22,11 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - Stronger tenant binding than a settable GUC (per-tenant DB roles or signed tenant context), see ADR 0007 residual risk.
 - RFC 3161 trusted timestamping of custody anchors (TSA token stored next to each anchor) for court-grade proof of time.
 - **[required before production]** Bucket policy denying `s3:PutObject` without `If-None-Match` on anchor/evidence prefixes, and denying `s3:DeleteObject` (delete markers) for the app identity.
+- A standalone `edisc-verify` distribution for third-party experts (docs/VERIFYING.md): a wheel (or
+  zipapp) with only the offline modules and their dependencies (stdlib, `rfc8785`, `pydantic`), built
+  reproducibly per release and published with its SHA-256, so an air-gapped install does not need
+  the whole workspace (today `uv sync --frozen --no-dev --package edisc-renderers` also installs the
+  database and S3 client libraries, unused by the verifier).
 - Anchor the exported package manifest to WORM at export time so the manifest hash itself is attested.
 - **[with Phase 2 bulk export ingestion]** Custody lock-narrowing reorder (deferred FK, `append_batch` last), then re-measure. Per-unit chains stay deferred (docs/runs/2026-09-30-custody-contention.md).
 - **[required before production]** Post-close destruction workflow: after a matter (or client) is closed
@@ -69,6 +74,16 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
   matter or client owner): extend while the tenant is active, or re-anchor periodically (ADR 0002).
 - Retention extension cost: the matter query walks every link of an active matter's jobs on each run;
   for very large matters, track a per-matter "next extension due" date instead.
+- Slack exports, hostile conversation ids (ADR 0018 §28.1, §30): collect the messages of a
+  conversation whose id (or team, or the export's workspace) holds a lone surrogate under its
+  deterministic stand-in key (`lone-surrogate:<hex code units>`, `substitute_key`) instead of
+  leaving every day file a gap. Today none of its messages becomes an item (they stay in the locked
+  export, each unit a gap with `conversation_id_lone_surrogate`). Needs: item identities and
+  idempotency keys built from the stand-in (it is ASCII, lossless and never equal to a source id),
+  the exact id kept beside it (`export_conversations.exact`), the RSMF conversation id written valid
+  with `edisc.lone_surrogates`, a live-API counterpart decision (the same id from the Slack API must
+  map to the same stand-in), and the corpus case `export_hostile_channel_id` turned from "every day
+  file a gap" into "every message collected and rendered".
 - Per-tenant export upload quota (bytes in flight and stored) and a limit on concurrent export uploads
   per tenant (ADR 0014).
 - Slack exports: a 5 GB streaming archive ingestion run with memory measured (ADR 0014 section 3), on the

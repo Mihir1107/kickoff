@@ -11,8 +11,9 @@ names the same SHA-256 and size for each JSONL file. With the job's custody pack
 (``--job-package``): the job package verifies, its head and seal are the referenced ones, and the
 report's chain-derived content is RECOMPUTED from the job's events with the report model
 (``edisc_renderers.report.recompute``) and byte-compared: ``units.jsonl`` byte for byte, the unit
-counts, exceptions and conversations (and ``conversations.jsonl``), the job, scope, access, pause and
-actor sections; what cannot be recomputed offline (observations, renders, the snapshot, the
+counts, exceptions and conversations (and ``conversations.jsonl``), the job, scope, access, pause,
+actor and normalizer-version sections, and the clean verdict from the chain alone (a report stating
+clean when the chain does not give clean fails; §30); what cannot be recomputed offline (observations, renders, the snapshot, the
 divergences) is checked against its recorded digests only, and the report says so
 (``not_recomputed``).
 """
@@ -66,6 +67,11 @@ class ReportPackageReport:
     recomputed: bool = False  # the chain-derived content was recomputed and matched
     recomputed_rows: int = 0  # units.jsonl rows rebuilt from the chain (and compared byte for byte)
     not_recomputed: tuple[str, ...] = ()
+    # the clean verdict from the job chain alone (§30): None when not recomputed
+    chain_clean: bool | None = None
+    chain_not_clean: list[str] = field(default_factory=list)
+    # the report states not clean although the chain gives clean (allowed): its stated reasons
+    stated_not_clean: list[str] = field(default_factory=list)
     tolerated: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -86,6 +92,9 @@ class ReportPackageReport:
             "recomputed": self.recomputed,
             "recomputed_rows": self.recomputed_rows,
             "not_recomputed": list(self.not_recomputed),
+            "chain_clean": self.chain_clean,
+            "chain_not_clean": self.chain_not_clean,
+            "stated_not_clean": self.stated_not_clean,
             "errors": self.errors,
             "tolerated": self.tolerated,
             "chain": self.chain.as_dict() if self.chain else None,
@@ -342,3 +351,6 @@ def _with_job(
     report.recomputed = done.ok
     report.recomputed_rows = done.units_rows
     report.not_recomputed = done.not_recomputed()
+    report.chain_clean = done.chain_clean
+    report.chain_not_clean = done.chain_not_clean
+    report.stated_not_clean = done.stated_not_clean

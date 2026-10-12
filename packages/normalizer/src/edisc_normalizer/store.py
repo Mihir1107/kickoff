@@ -50,7 +50,8 @@ async def load_prior(
             text(
                 "SELECT i.source_item_id, i.version, i.content_hash, i.change_hints, d.derived"
                 " FROM items i LEFT JOIN LATERAL (SELECT derived FROM item_derivations x"
-                "   WHERE x.item_id = i.id ORDER BY x.created_at DESC, x.normalizer_version DESC LIMIT 1) d ON true"
+                "   WHERE x.item_id = i.id ORDER BY x.created_at DESC,"
+                ' x.normalizer_version COLLATE "C" DESC LIMIT 1) d ON true'
                 " WHERE i.tenant_id = :t AND i.source = :s AND i.source_item_id = ANY(:ids)"
                 " ORDER BY i.source_item_id, i.version"
             ),

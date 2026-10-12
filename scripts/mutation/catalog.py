@@ -37,6 +37,10 @@ Rounds (ADR 0015):
   before the first byte with its CSP, refusals audited, nothing outside a scope served, the pure
   renderer's sanitiser and link allow-list, every message of the day on one page, the day-bounded
   loader and its thread roots, the renderer off the event loop.
+- ``m16-pre7``: the fixes before M16 step 7 (ADR 0018 §30): code-point order whatever the
+  database's collation (the corpus run on a tailored ICU database, every ordered text column C),
+  the clean verdict recomputed from the chain alone (a report may never state clean when the chain
+  does not give clean), normalizer versions recorded in `job_started` and each batch, recomputed.
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
   and the blocking-I/O guard ``edisc_core.loopblock``, §24.8), every CPU step moved off the loop, the
   render thread writing nothing (ADR 0015 §24).
@@ -148,6 +152,13 @@ PVH = "packages/renderers/src/edisc_renderers/preview/html.py"
 PVW = "workers/collection/src/edisc_worker/preview.py"
 APV = "tests/integration/api/test_preview.py"
 UPV = "tests/unit/renderers/test_preview.py"
+M33 = "packages/db/migrations/versions/0033_unit_facts_and_hostile_ids.py"
+M35 = "packages/db/migrations/versions/0035_code_point_order.py"
+NST = "packages/normalizer/src/edisc_normalizer/store.py"
+CLI = "packages/custody/src/edisc_custody/cli.py"
+CCO = "tests/integration/corpus/test_collation.py"
+DCO = "tests/integration/db/test_collation.py"
+URV = "tests/unit/renderers/test_report_verdict.py"
 
 
 @dataclass(frozen=True)
@@ -964,4 +975,41 @@ CATALOG: list[Mutation] = [
       "            preview_html.render_preview, inp, page, preview_html.PREVIEW_PAGE_EVENTS\n"
       "        )", "        rendered = preview_html.render_preview(inp, page,"
       " preview_html.PREVIEW_PAGE_EVENTS)", APV, "first_byte"),
+    # ------------------------------------------------------------------ fixes before step 7 (§30)
+    m("scope_order_by_locale", "m16-pre7", M35, '    ("collection_scopes", "external_id"),\n', "",
+      DCO),
+    m("package_items_by_locale", "m16-pre7", M35, '    ("items", "idempotency_key"),\n', "", CCO,
+      "slack_three_epochs"),
+    m("report_units_by_locale", "m16-pre7", M33,
+      '    ALTER COLUMN conversation_id TYPE text COLLATE "C",\n',
+      "    ALTER COLUMN conversation_id TYPE text,\n", CCO, "slack_three_epochs"),
+    m("gap_reasons_by_locale", "m16-pre7", PIPE,
+      'array_agg(DISTINCT r COLLATE "C" ORDER BY r COLLATE "C")', "array_agg(DISTINCT r ORDER BY r)",
+      DCO),
+    m("derivation_order_by_locale", "m16-pre7", NST, ' x.normalizer_version COLLATE "C" DESC',
+      " x.normalizer_version DESC", DCO),
+    m("verdict_not_checked", "m16-pre7", RC, "    if out.stated_clean and not out.chain_clean:",
+      "    if False:", URV, "forged"),
+    m("verdict_ignores_units", "m16-pre7", RC, "        elif fact.recon_status in UNCLEAN_RECON:",
+      "        elif False:", URV, "consistent_looking"),
+    m("verdict_ignores_banner", "m16-pre7", RC,
+      '    return doc.get("job", {}).get("clean") is True or CLEAN_BANNER in (doc.get("banner") or [])',
+      '    return doc.get("job", {}).get("clean") is True', URV, "for_a_chain_that_is_not"),
+    m("verdict_accepts_archive", "m16-pre7", RC, "fold.final_status != JobStatus.COMPLETED.value:",
+      "fold.final_status not in (JobStatus.COMPLETED.value, JobStatus.COMPLETED_AGAINST_ARCHIVE.value):",
+      URV, "every_reason"),
+    m("verdict_forged_passes_end_to_end", "m16-pre7", RC,
+      "    if out.stated_clean and not out.chain_clean:", "    if False:", ARP, "forged"),
+    m("stated_reasons_not_printed", "m16-pre7", CLI,
+      '                    sys.stdout.write(f"    report: {reason}\\n")', "                    pass",
+      ARP, "not_clean_for_a_clean_chain"),
+    m("normalizers_not_in_job_started", "m16-pre7", PIPE,
+      '                "normalizer_versions": [NORMALIZER_VERSION],\n', "", ARP, "normalizer"),
+    m("normalizer_not_in_batches", "m16-pre7", PIPE,
+      "            normalizer_version=NORMALIZER_VERSION,\n", "", ARP, "normalizer"),
+    m("report_normalizers_from_derivations", "m16-pre7", RL,
+      "            if chain.normalizer_versions is not None", "            if False", ARP,
+      "normalizer"),
+    m("normalizers_not_recomputed", "m16-pre7", RC, '"actors", "versions", "counts",',
+      '"actors", "counts",', URV, "normalizer_versions_are_stated"),
 ]  # fmt: skip

@@ -8,11 +8,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import json
 import subprocess
 import sys
 import uuid
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -23,13 +24,16 @@ from temporalio.worker import Worker
 
 import edisc_renderers.report.model as report_model
 from edisc_connector_dummy.connector import DummyConnector
+from edisc_core.ids import new_id
+from edisc_core.time import utc_now
 from edisc_db.session import tenant_tx
+from edisc_normalizer.model import NORMALIZER_VERSION
 from edisc_worker.activities import Activities
 from edisc_worker.contracts import task_queue
 from edisc_worker.reports import ReportActivities
 from edisc_worker.workflows import ReportWorkflow
 
-from ..worker.conftest import WORKFLOWS
+from ..worker.conftest import WORKFLOWS, spec
 from .conftest import Api, TenantCtx, add_principal
 from .first_byte import first_byte
 from .test_jobs import custody, make_world, wait_status
@@ -73,8 +77,8 @@ async def wait_report(c: httpx.AsyncClient, report_id: str, within: float = 90) 
         await asyncio.sleep(0.3)
 
 
-async def _sealed_job(api: Api, t: TenantCtx) -> tuple[Any, str]:
-    w = await make_world(api, t)
+async def _sealed_job(api: Api, t: TenantCtx, sp: Any = None) -> tuple[Any, str]:
+    w = await make_world(api, t, sp)
     async with api.client(t.subdomain, t.token(api.settings)) as c:
         job_id = (await c.post(f"/v1/matters/{w.matter}/jobs", json=w.job_body())).json()["id"]
     job = await wait_status(api, t, job_id)
@@ -83,9 +87,12 @@ async def _sealed_job(api: Api, t: TenantCtx) -> tuple[Any, str]:
 
 
 async def _reported(
-    api: Api, t: TenantCtx, reason: str = "first look"
-) -> tuple[Any, str, dict[str, Any]]:
-    w, job_id = await _sealed_job(api, t)
+    api: Api, t: TenantCtx, reason: str = "first look", *, sp: Any = None,
+    before: Callable[[str], Awaitable[None]] | None = None,
+) -> tuple[Any, str, dict[str, Any]]:  # fmt: skip
+    w, job_id = await _sealed_job(api, t, sp)
+    if before is not None:
+        await before(job_id)
     async with api.client(t.subdomain, t.token(api.settings)) as c:
         made = await c.post(f"/v1/jobs/{job_id}/reports", json={"reason": reason})
         assert made.status_code == 201, made.text
@@ -330,6 +337,102 @@ async def test_a_unit_row_stating_other_database_facts_fails_the_byte_for_byte_r
     assert code == 1, out
     assert "units.jsonl: the file is not what the chain gives" in out, out
     assert "scopes: written [7], recomputed [0]" in out, out
+
+
+async def _packages(api: Api, t: TenantCtx, job_id: str, report: dict[str, Any],
+                    tmp_path: Path) -> tuple[Path, Path]:  # fmt: skip
+    async with api.client(t.subdomain, t.token(api.settings)) as c:
+        rpkg = (await c.get(f"/v1/reports/{report['id']}/package")).content
+        jpkg = (await c.get(f"/v1/jobs/{job_id}/package", params={"objects": "omit"})).content
+    return _unzip(rpkg, tmp_path / "r"), _unzip(jpkg, tmp_path / "j")
+
+
+async def test_a_forged_clean_report_fails_the_verdict_from_the_chain(
+    api: Api, tenant: TenantCtx, report_worker: None, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # fmt: skip
+    """A job with gaps, reported by code that calls every job clean (faulty or compromised): the
+    report is internally consistent and sealed, its rows and sections match the chain, only its
+    verdict lies; the verdict from the chain alone catches it (ADR 0018 §30)."""
+    monkeypatch.setattr(report_model, "clean", lambda *a, **k: True)
+    sp = spec(failures={"seed": 4, "drop_rate": 0.25})
+    _, job_id, report = await _reported(api, tenant, sp=sp)
+    r, j = await _packages(api, tenant, job_id, report, tmp_path)
+    doc = json.loads((r / "outputs" / "report.json").read_bytes())
+    assert doc["job"]["clean"] is True and doc["job"]["status"] == "completed_with_gaps"
+    assert _cli(r)[0] == 0  # alone, the package is consistent
+    code, out = _cli(r, "--job-package", j)
+    assert code == 1, out
+    assert "VERDICT from the job chain alone: NOT clean" in out, out
+    assert (
+        "verdict: the report states clean, the chain does not give clean: final status"
+        " completed_with_gaps" in out
+    ), out
+    # every other recomputed section agrees: the verdict is the only difference
+    errors = [x for x in out.splitlines() if x.strip().startswith("ERROR")]
+    assert len(errors) == 1, errors
+
+
+async def test_a_report_not_clean_for_a_clean_chain_passes_and_names_its_reasons(
+    api: Api, tenant: TenantCtx, report_worker: None, tmp_path: Path
+) -> None:
+    """The report weighs what the chain cannot know (here a retention gap on the job's evidence):
+    it states not clean for a chain that gives clean; that passes, with the stated reasons."""
+
+    async def retention_gap(job_id: str) -> None:
+        async with tenant_tx(api.sessions, tenant.tenant_id) as s:
+            ev = (await s.execute(text(
+                "SELECT e.id FROM evidence_objects e WHERE e.job_id = :j ORDER BY e.id LIMIT 1"
+            ), {"j": uuid.UUID(job_id)})).scalar_one()  # fmt: skip
+            matter = (await s.execute(text(
+                "SELECT matter_id FROM collection_jobs WHERE id = :j"
+            ), {"j": uuid.UUID(job_id)})).scalar_one()  # fmt: skip
+            await s.execute(text(
+                "INSERT INTO retention_gaps (id, tenant_id, evidence_object_id, owner_type,"
+                " owner_id, unprotected_from, unprotected_until, outcome)"
+                " VALUES (:i, :t, :e, 'matter', :o, :f, :u, 'relocked')"
+            ), {"i": new_id(), "t": tenant.tenant_id, "e": ev, "o": matter,
+                "f": utc_now(), "u": utc_now()})  # fmt: skip
+
+    _, job_id, report = await _reported(api, tenant, before=retention_gap)
+    r, j = await _packages(api, tenant, job_id, report, tmp_path)
+    doc = json.loads((r / "outputs" / "report.json").read_bytes())
+    assert (doc["job"]["status"], doc["job"]["clean"]) == ("completed", False)
+    code, out = _cli(r, "--job-package", j)
+    assert code == 0, out
+    assert "VERDICT from the job chain alone: clean" in out, out
+    assert "the report states NOT clean although the chain gives clean" in out, out
+    assert "report: 1 retention gap(s) touching the job's evidence" in out, out
+
+
+async def test_normalizer_versions_are_recorded_and_recomputed_from_the_chain(
+    api: Api, tenant: TenantCtx, report_worker: None, tmp_path: Path
+) -> None:
+    """`job_started` and every batch record the normalizer version (ADR 0018 §30); the report states
+    them from the chain even when the items carry derivations of another normalizer (re-derived
+    later), and the verifier recomputes them."""
+
+    async def rederived(job_id: str) -> None:
+        async with tenant_tx(api.sessions, tenant.tenant_id) as s:
+            await s.execute(text(
+                "INSERT INTO item_derivations (item_id, tenant_id, normalizer_version, derived,"
+                " derived_hash) SELECT d.item_id, d.tenant_id, '9.9.9', d.derived, d.derived_hash"
+                " FROM job_items ji JOIN item_derivations d ON d.item_id = ji.item_id"
+                " WHERE ji.job_id = :j ORDER BY d.item_id LIMIT 1"
+            ), {"j": uuid.UUID(job_id)})  # fmt: skip
+
+    _, job_id, report = await _reported(api, tenant, before=rederived)
+    events = await custody(api, tenant, job_id)
+    (started,) = [e for e in events if e.event_type == "job_started"]
+    assert started.payload["normalizer_versions"] == [NORMALIZER_VERSION]
+    batches = [e for e in events if e.event_type == "items_collected"]
+    assert batches and {b.payload["normalizer_version"] for b in batches} == {NORMALIZER_VERSION}
+    r, j = await _packages(api, tenant, job_id, report, tmp_path)
+    doc = json.loads((r / "outputs" / "report.json").read_bytes())
+    assert doc["versions"]["normalizer_versions"] == [NORMALIZER_VERSION]
+    code, out = _cli(r, "--job-package", j)
+    assert code == 0, out
+    assert "normalizer-version sections" in out and "the normalizer versions (the job" not in out
 
 
 def _unzip(data: bytes, dest: Path) -> Path:

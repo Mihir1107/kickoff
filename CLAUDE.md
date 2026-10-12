@@ -157,9 +157,10 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Every manifest is validated against the vendored `rsmf_schema_2_0_0.json` (SHA-256 pinned, format
   checks on). The Relativity validator is not used until the licence is confirmed.
 
-## Collection report and preview (M16, ADR 0018; steps 1-6 built: model, HTML, PDF, loader, stream, API, preview)
-- Read ADR 0018 in full (and its §19/§20 implementation notes) before changing M16 code;
-  `docs/HANDOFF.md` has what is next. The report has its own custody stream (a sealed job chain is
+## Collection report and preview (M16, ADR 0018; complete: model, HTML, PDF, loader, stream, API, preview, docs)
+- Read ADR 0018 in full (its §19-§30 implementation notes, and §31: every deviation from the decision)
+  before changing M16 code; `docs/HANDOFF.md` has what is next. `docs/VERIFYING.md` is the guide for
+  third-party experts: a change to what `edisc-verify` checks or recomputes updates it. The report has its own custody stream (a sealed job chain is
   never appended to); facts come from the verified job chain first, database disagreements are
   reported as divergences, never resolved silently.
 - The pure model is `edisc_renderers.report.model` and the pure HTML builder `edisc_renderers.report.html`
@@ -215,7 +216,11 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   in unit events, `units_unsettled` at the end); the format is decided once per job by
   `job_started` (`facts_for_format`). `units.jsonl` must stay recomputable byte for byte from the job
   package (`edisc_renderers.report.recompute`): a new column the report states goes into the unit
-  events first. Report order columns are COLLATE "C" (never depend on the DB locale). The job
+  events first. Report order columns are COLLATE "C" (never depend on the DB locale).
+  `--job-package` also computes the clean verdict from the chain alone (`chain_verdict`): a report
+  stating clean when the chain does not FAILS; the other way round passes and prints the report's
+  reasons. `job_started.normalizer_versions` + each batch's `normalizer_version` (new jobs) are
+  what the report states and the verifier recomputes (ADR 0018 §30). The job
   package verifier is strict and reads zips in place, like the render and report verifiers.
 - Preview (§29): `GET /v1/jobs/{id}/preview` (`evidence.read`) loads ONE day through
   `RenderLoader.day_slice` (items by their own time on the 0034 index, links by primary key, roots by
@@ -305,6 +310,10 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   never log them, never add a new secret column without envelope encryption + context binding.
   Refresh responses are journaled in their own transaction before being applied; run `reconcile_token_refreshes`
   at worker startup. Prefer designs without refresh tokens (client credentials + certificate; Slack rotation off).
+- Text order is code-point order whatever the database's collation (ADR 0018 §30): a column name
+  the product orders by is COLLATE "C" in every table (migrations 0033, 0035), anything else is
+  `COLLATE "C"` in the query. `tests/integration/db/test_collation.py` scans every `ORDER BY`;
+  `tests/integration/corpus/test_collation.py` runs the corpus on a tailored ICU database.
 - Row locks that must coexist with FK inserts referencing the row: use `FOR NO KEY UPDATE`, not `FOR UPDATE`.
 - App/worker DB sessions set `lock_timeout` and `idle_in_transaction_session_timeout` (`EDISC_PG_*_TIMEOUT_MS`).
   A lock wait or abandoned transaction raises; `edisc_db.session.is_retryable_db_error` says whether to retry the

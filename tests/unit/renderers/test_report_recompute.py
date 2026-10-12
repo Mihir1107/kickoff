@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import unicodedata
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -62,7 +63,12 @@ def _events(*, detailed: bool = True) -> list[dict[str, Any]]:
     ]
 
 
-def _report(events: list[dict[str, Any]]) -> tuple[bytes, bytes]:
+def _report(
+    events: list[dict[str, Any]],
+    *,
+    divergences: Sequence[m.Divergence] = (),
+    retention_gaps: Sequence[dict[str, Any]] = (),
+) -> tuple[bytes, bytes]:
     """`report.json` and `units.jsonl` as the loader writes them (a database agreeing with the
     chain), built here from the model's row and section functions."""
     fold = m.ChainFold()
@@ -72,7 +78,8 @@ def _report(events: list[dict[str, Any]]) -> tuple[bytes, bytes]:
         for fact in fold.add(m.ChainEvent(f["seq"], f["event_type"], f["actor"], T0, f["payload"])):
             facts.setdefault(fact.unit_key, fact)
     rows = sorted(
-        (m.unit_row({"unit_key": k}, stated=v, zone="UTC", scopes=(), divergent=False)
+        (m.unit_row({"unit_key": k}, stated=v, zone="UTC", scopes=(),
+                    divergent=k in {d.subject for d in divergences})
          for k, v in facts.items()),
         key=m.unit_order,
     )  # fmt: skip
@@ -98,12 +105,14 @@ def _report(events: list[dict[str, Any]]) -> tuple[bytes, bytes]:
         conv_capped.add(last["worst_status"], (last["conversation_id"],), last)
     obs = m.JsonlDigest("observations.jsonl")
     doc = m.report_document(m.ReportInputs(
-        job={"status": "cancelled"}, chain=fold, verification={"ok": True, "errors": []},
-        snapshot={"renders": [], "digest": "00" * 32, "retention_gaps": []}, access={},
+        job={"status": fold.final_status}, chain=fold, verification={"ok": True, "errors": []},
+        snapshot={"renders": [], "digest": "00" * 32, "retention_gaps": list(retention_gaps)},
+        access={},
         unit_status_counts=status_counts, recon_counts=recon_counts, totals=totals,
         exceptions={"units": capped.record(units.record()),
                     "observations_capped": m.Capped().record(obs.record())},
-        observation_counts={}, pauses_db=[], divergences=[], normalizer_versions=[],
+        observation_counts={}, pauses_db=[], divergences=divergences,
+        normalizer_versions=fold.normalizer_versions or [],
         versions={"report_renderer": REPORT_RENDERER_VERSION,
                   "unicode": unicodedata.unidata_version},
         audit_events=[], files=[units, obs], evidence={}, identity={},

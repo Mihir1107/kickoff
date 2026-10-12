@@ -42,11 +42,19 @@ broken next to a `<name>.mutation-backup` copy: the runner refuses to start unti
 | `s20-natives` | oversized attachments as natives (§20, §21) | 45 |
 | `s21-review` | placeholder name encoding, concurrent writers, the dummy connector pin (§21 review) | 8 |
 | `ci-heartbeat` | slice rendering off the event loop: heartbeats never starved (CI run 37412915073, ADR 0015 §23) | 1 |
-| `m16-stream` | the report lifecycle, custody stream, stored files, retention, episodes (ADR 0018, M16 step 4) | 13 |
+| `s24-loop` | the event-loop guard, every CPU step of an activity off the loop, the render thread writes nothing (ADR 0015 §24) | 43 |
 | `m16-model` | the collection report model, loader and recorded access facts (ADR 0018, M16 step 1) | 21 |
-| `m16-pre5` | lone surrogates, the glyph set in the identity, PDF from stored HTML (tamper), image-only breaks (kind `image`, run in the report image), production install (ADR 0018 §23-§26) | 28 |
+| `m16-stream` | the report lifecycle, custody stream, stored files, retention, episodes (ADR 0018, M16 step 4) | 13 |
+| `m16-html` | the report HTML builder and its sanitiser (ADR 0018 §3.2, §4; M16 step 2) | 8 |
+| `m16-pre3` | marker elements, HTML-invalid code points, `conversations.jsonl` above the cap, report goldens, CI shards (ADR 0018 §21) | 14 |
+| `m16-pdf` | the report PDF child and toolchain (ADR 0018 §5, §6, §22; M16 step 3) | 14 |
+| `m16-pre5` | lone surrogates, the glyph set in the identity, PDF from stored HTML (tamper), image-only breaks (kind `image`, run in the report image), production install (ADR 0018 §23-§26) | 27 |
 | `m16-api` | job package download, reports API, report package, `edisc-verify` recomputation (ADR 0018 §27) | 17 |
-| `s24-loop` | the event-loop guard, every CPU step of an activity off the loop, the render thread writes nothing (ADR 0015 §24) | 37 |
+| `m16-pre6` | hostile export values, every unit fact in the chain, the strict job verifier reading zips in place (ADR 0018 §28) | 24 |
+| `m16-preview` | the preview route, renderer, sanitiser, link allow-list, day-bounded loader (ADR 0018 §29) | 11 |
+| `m16-pre7` | code-point order under any database collation, the clean verdict from the chain alone, normalizer versions in the chain (ADR 0018 §30) | 15 |
+
+292 entries: 135 unit, 153 integration, 4 image.
 
 The `s19-*` rounds were run by hand when they were built and only their categories were written
 down; the entries here re-create them against the current code.
