@@ -31,7 +31,10 @@ APPLE_DOUBLE = b"\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X        " + b"\x00" * 5
 
 @dataclass(frozen=True)
 class ExportOptions:
-    tier: Literal["public_only", "full"] = "full"
+    # "grid": a full export plus ``org_users.json``, the marker an org-level (Enterprise Grid)
+    # export is detected by (provisional, ADR 0014: confirm on real export). The default and the
+    # other tiers write exactly what they wrote before.
+    tier: Literal["public_only", "full", "grid"] = "full"
     epoch: int = 0
     wrapper: str | None = None  # e.g. "Acme Slack export Jan 5 2026 - Jan 8 2026"
     macos: bool = False  # __MACOSX/ AppleDouble twins and .DS_Store files
@@ -51,6 +54,10 @@ class ExportOptions:
     # "channel_id": conversation 0's id in its metadata file; "message_keys": conversation 0, day 0,
     # element 0's ``ts``, and the next reply's ``thread_ts`` in a later day file. Off by default.
     hostile: Literal["channel_name", "channel_id", "message_keys"] | None = None
+    # folders holding a day file (an empty one) but listed by no metadata file: the findings'
+    # ``folders_without_conversation`` (the collation test names them to sort differently under a
+    # tailored collation). None by default.
+    orphan_folders: tuple[str, ...] = ()
 
 
 @dataclass
@@ -128,11 +135,14 @@ def write_export(ds: Dataset, out: BinaryIO, opts: ExportOptions | None = None) 
     convs = [
         (i, c)
         for i, c in enumerate(ds.conversations())
-        if opts.tier == "full" or c.kind == "channel"
+        if opts.tier != "public_only" or c.kind == "channel"
     ]
     users = [_user(u) for u in ds.users(epoch)]
     add("users.json", _dump(users))
     manifest.metadata_files.append("users.json")
+    if opts.tier == "grid":
+        add("org_users.json", _dump(users))
+        manifest.metadata_files.append("org_users.json")
     by_file: dict[str, list[dict[str, Any]]] = {}
     for i, conv in convs:
         by_file.setdefault(METADATA_FILE[conv.kind], []).append(_conversation(ds, conv, opts, i))
@@ -168,6 +178,12 @@ def write_export(ds: Dataset, out: BinaryIO, opts: ExportOptions | None = None) 
             add(f"{folder}/{ds.day(d).isoformat()}.json", _dump(rows))
             manifest.day_files += 1
             manifest.messages += len(msgs)
+    for folder in opts.orphan_folders:
+        if opts.directory_entries:
+            zw.add(root + folder + "/")
+            manifest.entries += 1
+        add(f"{folder}/{ds.day(0).isoformat()}.json", b"[]")
+        manifest.day_files += 1
     if opts.padding_days:
         manifest.conversations["padding"] = "C99999PADDING"
         if opts.directory_entries:

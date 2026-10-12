@@ -737,6 +737,20 @@ def or_unknown(value: Any) -> Any:
     return UNKNOWN if value is None else value
 
 
+EXPORT_FIELDS = ("id", "sha256", "size_bytes", "entry_count", "declared_plan", "detected_tier",
+                 "tier_confirmed", "blind_spots", "tier_warnings", "findings")  # fmt: skip
+
+
+def export_section(recorded: Any) -> dict[str, Any] | None:
+    """The export a job collected from, as `job_started` recorded it (§7.2, §32), or None for a job
+    that did not collect from an export. A field the chain never recorded (a job started before
+    §32 recorded only the id and SHA-256) prints UNKNOWN; a recorded null stays null (an
+    undeclared plan)."""
+    if not isinstance(recorded, Mapping):
+        return None
+    return {k: recorded.get(k, UNKNOWN) for k in EXPORT_FIELDS}
+
+
 @dataclass(frozen=True)
 class ReportInputs:
     """Everything `report.json` states. Built by the loader; every field is already JSON-ready
@@ -808,7 +822,7 @@ def report_document(inp: ReportInputs) -> dict[str, Any]:
             "plan_tier": or_unknown(sp.get("plan_tier")),
             "granted_scopes": or_unknown(sp.get("granted_scopes")),
             "blind_spots": or_unknown(sp.get("blind_spots")),
-            "export": sp.get("export"),
+            "export": export_section(sp.get("export")),
             "database": dict(inp.access),
         },
         "exceptions": {

@@ -2,7 +2,7 @@
 
 REPORT_FORMAT = "edisc-collection-report/1"
 
-REPORT_RENDERER_VERSION = "1.4.0"
+REPORT_RENDERER_VERSION = "1.5.0"
 """Byte-identical `report.json`, JSONL files and `report.html` are promised for the same inputs AND
 this version. Any change to their bytes needs a bump; the report goldens
 (`tests/golden/report/<version>_unicode-<unicode>/`) are keyed by it.
@@ -15,4 +15,7 @@ their exact code units and counted (`lone_surrogates`, §23); the glyph set in t
 1.4.0: unit rows state the unit's kind, conversation, scopes, access-lost reason and gap reasons
 from the chain (UNKNOWN for jobs recorded before §28), units unsettled at the end come from the chain
 (`units_unsettled`), file order in code points whatever the database's locale; gap reasons and the
-access-lost reason in the HTML exception table (§28)."""
+access-lost reason in the HTML exception table (§28). 1.5.0: for a job read from a Slack export, the
+export's declared plan, detected tier, blind spots, tier warnings and validation findings from the
+chain (`job_started.export`, UNKNOWN where an older job did not record them) and an Export section
+in the HTML (§32)."""

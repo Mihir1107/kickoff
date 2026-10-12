@@ -22,11 +22,23 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - Stronger tenant binding than a settable GUC (per-tenant DB roles or signed tenant context), see ADR 0007 residual risk.
 - RFC 3161 trusted timestamping of custody anchors (TSA token stored next to each anchor) for court-grade proof of time.
 - **[required before production]** Bucket policy denying `s3:PutObject` without `If-None-Match` on anchor/evidence prefixes, and denying `s3:DeleteObject` (delete markers) for the app identity.
-- A standalone `edisc-verify` distribution for third-party experts (docs/VERIFYING.md): a wheel (or
-  zipapp) with only the offline modules and their dependencies (stdlib, `rfc8785`, `pydantic`), built
-  reproducibly per release and published with its SHA-256, so an air-gapped install does not need
-  the whole workspace (today `uv sync --frozen --no-dev --package edisc-renderers` also installs the
-  database and S3 client libraries, unused by the verifier).
+- **[required before production]** A standalone `edisc-verify` package that installs WITHOUT the
+  rest of the codebase, for third-party experts (docs/VERIFYING.md). Today the install needs the
+  workspace (`uv sync --frozen --no-dev --package edisc-renderers`, which also pulls the database and
+  S3 client libraries the verifier never uses). Needed:
+  - its own distribution (`edisc-verify`): only the offline modules (`edisc_custody` package / cli /
+    chain / merkle / archive / package_archives / rsmf_check / render_files / report_files /
+    job_export readers, `edisc_renderers.report.model` + `recompute`, the `edisc_core` pieces they
+    import: canonical, lone_surrogates, schemas, time) and their third-party dependencies, pinned;
+  - an import-boundary test: the distribution's modules import nothing outside it (no SQLAlchemy,
+    asyncpg, aiobotocore, temporalio, FastAPI), extending the existing purity tests;
+  - a CI job that builds it, installs it into an EMPTY venv from the built wheel(s) alone (no
+    workspace, no network after download), and verifies the corpus job, render and report packages,
+    including the tamper cases and `--job-package` recomputation; same results as the in-tree verifier;
+  - reproducible build per release (fixed `SOURCE_DATE_EPOCH`, pinned build backend), published
+    with its SHA-256 and the commit it was built from; VERIFYING.md's install section points to it;
+  - versioning: the verifier states which package formats it reads (`/1`-`/3` custody, `/1`-`/3`
+    render, `/1` report); a format bump releases a new verifier.
 - Anchor the exported package manifest to WORM at export time so the manifest hash itself is attested.
 - **[with Phase 2 bulk export ingestion]** Custody lock-narrowing reorder (deferred FK, `append_batch` last), then re-measure. Per-unit chains stay deferred (docs/runs/2026-09-30-custody-contention.md).
 - **[required before production]** Post-close destruction workflow: after a matter (or client) is closed

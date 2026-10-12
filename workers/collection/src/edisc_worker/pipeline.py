@@ -223,6 +223,28 @@ def _by_key(
     return sorted(by_key.items())
 
 
+def export_record(row: Any) -> dict[str, Any]:
+    """The export a job collects from, as `job_started` records it for the report (ADR 0018 §7.2,
+    §32): its identity, the plan its admin declared (null: not declared), the tier detected from the
+    archive alone, and the validation's blind spots, tier warnings and findings, verbatim from the
+    export record written once at validation (bounded: every list in it is a capped sample)."""
+    findings = dict(row.findings or {})
+    return {
+        "id": str(row.export_id),
+        "sha256": row.export_sha256,
+        "size_bytes": row.export_size,
+        "entry_count": row.entry_count,
+        "declared_plan": row.declared_plan,
+        "detected_tier": row.detected_tier,
+        "tier_confirmed": row.tier_confirmed,
+        "blind_spots": list(findings.get("blind_spots", [])),
+        "tier_warnings": list(findings.get("tier_warnings", [])),
+        "findings": {
+            k: v for k, v in findings.items() if k not in ("blind_spots", "tier_warnings")
+        },
+    }
+
+
 @dataclass
 class Pipeline:
     sessions: async_sessionmaker[AsyncSession]
@@ -336,7 +358,9 @@ class Pipeline:
             await s.execute(
                 text(
                     "SELECT c.plan_tier, c.granted_scopes, c.blind_spots, e.id AS export_id,"
-                    " e.sha256 AS export_sha256 FROM connections c LEFT JOIN slack_exports e"
+                    " e.sha256 AS export_sha256, e.size_bytes AS export_size, e.entry_count,"
+                    " e.declared_plan, e.detected_tier, e.tier_confirmed, e.findings"
+                    " FROM connections c LEFT JOIN slack_exports e"
                     " ON e.connection_id = c.id WHERE c.id = :c ORDER BY e.id LIMIT 1"
                 ),
                 {"c": connection_id},
@@ -363,11 +387,7 @@ class Pipeline:
                 # the normalizer this worker runs; each batch records its own too (a job resumed
                 # by an upgraded worker), so the report states them from the chain (ADR 0018 §30)
                 "normalizer_versions": [NORMALIZER_VERSION],
-                **(
-                    {"export": {"id": str(access.export_id), "sha256": access.export_sha256}}
-                    if access.export_id is not None
-                    else {}
-                ),
+                **({"export": export_record(access)} if access.export_id is not None else {}),
                 "scopes": [
                     {
                         "type": sc.scope_type.value,

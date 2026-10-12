@@ -123,6 +123,21 @@ async def api(
     limiter: RateLimiter,
     kms: LocalKmsClient,
 ) -> AsyncIterator[Api]:
+    async with make_api(api_settings, app_sessions, s3, temporal, limiter, kms) as made:
+        yield made
+
+
+@contextlib.asynccontextmanager
+async def make_api(
+    api_settings: Settings,
+    app_sessions: Sessions,
+    s3: S3Client,
+    temporal: Client,
+    limiter: RateLimiter,
+    kms: LocalKmsClient,
+) -> AsyncIterator[Api]:
+    """The API over the given database sessions (the `api` fixture's, or another database's: the
+    tailored-collation corpus test, ``tests/integration/corpus/test_collation.py``)."""
     http = httpx.AsyncClient()
     redis = aioredis.from_url(api_settings.redis_url)
     resources = Resources(
@@ -138,9 +153,11 @@ async def api(
     )
     app = create_app(api_settings, resources)
     await asyncio.to_thread(warm_routes, app)
-    yield Api(api_settings, app_sessions, s3, temporal, resources, http, app, api_settings)
-    await http.aclose()
-    await redis.aclose()
+    try:
+        yield Api(api_settings, app_sessions, s3, temporal, resources, http, app, api_settings)
+    finally:
+        await http.aclose()
+        await redis.aclose()
 
 
 @dataclass

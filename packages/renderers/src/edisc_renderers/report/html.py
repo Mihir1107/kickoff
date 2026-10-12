@@ -268,6 +268,65 @@ def _section_pairs(name: str, section: Mapping[str, Any], skip: Sequence[str] = 
     return _h2(name, section.get("source")) + _kv(pairs)
 
 
+def _value(v: Any) -> str:
+    """One recorded value in a cell: our own formatting for numbers and yes/no, a list joined in
+    order, "none" for null or an empty one, everything else user-safe."""
+    if v is None:
+        return "none"
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    if isinstance(v, int):
+        return num(v)
+    if isinstance(v, (list, dict)) and not v:
+        return "none"
+    if isinstance(v, list) and all(not isinstance(x, (list, dict)) for x in v):
+        return user(", ".join(str(x) for x in v))
+    return user(v)
+
+
+def _finding_rows(value: Any, path: str = "") -> list[list[str]]:
+    """The validation findings flattened to (dotted path, value) rows in key order."""
+    if not isinstance(value, Mapping) or not value:
+        return [[user(path or "findings"), _value(value)]]
+    rows: list[list[str]] = []
+    for k, v in sorted(value.items()):
+        rows.extend(_finding_rows(v, f"{path}.{k}" if path else str(k)))
+    return rows
+
+
+def _statements(values: Any) -> str:
+    rows = [[user(v)] for v in values] if isinstance(values, list) else [[user(values)]]
+    return table(["statement"], rows or [["none"]])
+
+
+def _export(export: Mapping[str, Any] | None, source: Any) -> str:
+    """The export the job collected from (§32): its identity, the plan its admin declared next to
+    the tier detected from the archive, then what the export cannot contain (its blind spots), the
+    tier warnings and every validation finding. Nothing for a job that did not read an export."""
+    if export is None:
+        return ""
+    declared = export.get("declared_plan")
+    pairs = [
+        ("export id", user(export.get("id"))),
+        ("SHA-256", user(export.get("sha256"))),
+        ("size (bytes)", _value(export.get("size_bytes"))),
+        ("zip entries", _value(export.get("entry_count"))),
+        ("declared plan", "not declared" if declared is None else user(declared)),
+        ("detected tier", user(export.get("detected_tier"))),
+        ("tier confirmed", _value(export.get("tier_confirmed"))),
+    ]
+    return "".join([
+        _h2("Export", source),
+        _kv(pairs),
+        el("p", "What this export cannot contain (blind spots):"),
+        _statements(export.get("blind_spots")),
+        el("p", "Tier warnings:"),
+        _statements(export.get("tier_warnings")),
+        el("p", "Validation findings (every entry of the archive accounted for, ADR 0014 §4):"),
+        table(["finding", "value"], _finding_rows(export.get("findings"))),
+    ])  # fmt: skip
+
+
 def report_html(doc: Mapping[str, Any]) -> bytes:
     """`report.html` for a `report.json` document (§3.2, §4). Banner first, exceptions before the
     totals, every enum value in the count tables, UNKNOWN where nothing was recorded. Strings that
@@ -306,7 +365,8 @@ def report_html(doc: Mapping[str, Any]) -> bytes:
         _banner(doc),
         _page_identity(doc),
         _section_pairs("Job", doc["job"]),
-        _section_pairs("Access", doc["access"], skip=("database", "export")),
+        _section_pairs("Access", doc["access"], skip=("database", "export"))
+        + _export(doc["access"].get("export"), doc["access"].get("source")),
         _h2("Exceptions", exc.get("source")),
         el("p", "Units with exceptions (worst status first):"),
         _capped(exc.get("units", {}), unit_cols, "units.jsonl"),

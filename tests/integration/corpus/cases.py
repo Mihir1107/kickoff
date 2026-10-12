@@ -30,7 +30,10 @@ class Case:
     policy: ThreadParentPolicy = ThreadParentPolicy.INCLUDE_PARENT_AND_THREAD
     options: RenderOptions = field(default_factory=RenderOptions)
     source: Literal["live", "export"] = "live"
-    export_tier: Literal["full", "public_only"] = "full"
+    export_tier: Literal["full", "public_only", "grid"] = "full"
+    # the plan the admin declares at upload (None: not declared); the report states it next to the
+    # detected tier, with the export's blind spots and findings (ADR 0018 §32)
+    export_plan: Literal["free", "pro", "business_plus", "enterprise_grid"] | None = None
     export_legacy_layout: bool = False  # an older export layout (reply_broadcast, no blocks)
     # a lone surrogate in conversation 0's channel name or id (ADR 0018 §28; `ExportOptions.hostile`)
     export_hostile: Literal["channel_name", "channel_id"] | None = None
@@ -153,7 +156,12 @@ CASES: dict[str, Case] = {
     # U+FFFD and the exact code units in `edisc.lone_surrogates`
     "lone_surrogates": Case(_spec(seed=49, lone_surrogates=True)),
     # the export dialect: completeness against the archive, the ADR 0014 caveat in every file
-    "export_full": Case(_spec(seed=42, dialect="slack_history"), source="export"),
+    # one case per detected tier, each with a declared plan (§32): a full export of a Business+
+    # workspace, a free-plan export (public channels only: the report says what it cannot contain)
+    # and an org-level export (Grid suspected, unconfirmed, processed as full)
+    "export_full": Case(
+        _spec(seed=42, dialect="slack_history"), source="export", export_plan="business_plus"
+    ),
     "export_legacy_layout": Case(
         _spec(seed=45, dialect="slack_history"), source="export", export_legacy_layout=True
     ),
@@ -161,7 +169,16 @@ CASES: dict[str, Case] = {
         _spec(seed=50, dialect="slack_history", lone_surrogates=True), source="export"
     ),
     "export_public_only": Case(
-        _spec(seed=43, dialect="slack_history"), source="export", export_tier="public_only"
+        _spec(seed=43, dialect="slack_history"),
+        source="export",
+        export_tier="public_only",
+        export_plan="free",
+    ),
+    "export_grid": Case(
+        _spec(seed=53, dialect="slack_history"),
+        source="export",
+        export_tier="grid",
+        export_plan="enterprise_grid",
     ),
     # a channel NAME holding a lone surrogate: text, stored exactly, every message collected and
     # rendered; the conversation's name in the RSMF is valid with its exact code units

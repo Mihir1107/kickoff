@@ -68,7 +68,15 @@ async def test_an_export_job_reports_archive_relative_completeness_with_the_cave
     assert days <= {(u["conversation_id"], u["day"]) for u in counted}
     access = doc["access"]
     assert access["source"] == "job_chain"
-    assert access["export"] == {"id": export["id"], "sha256": export["sha256"]}
+    # the export as the job's chain recorded it (ADR 0018 §32) equals the export record
+    findings = dict(export["findings"])
+    assert access["export"] == {
+        "id": export["id"], "sha256": export["sha256"], "size_bytes": export["size_bytes"],
+        "entry_count": export["entry_count"], "declared_plan": export["declared_plan"],
+        "detected_tier": export["detected_tier"], "tier_confirmed": export["tier_confirmed"],
+        "blind_spots": findings.pop("blind_spots"), "tier_warnings": findings.pop("tier_warnings"),
+        "findings": findings,
+    }  # fmt: skip
     assert access["blind_spots"] == export["findings"]["blind_spots"]
     assert access["plan_tier"] == export["detected_tier"]
 

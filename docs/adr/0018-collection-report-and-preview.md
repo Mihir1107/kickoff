@@ -5,7 +5,7 @@ from `docs/plans/m16.md` (the proposal, kept as history) with the review decisio
 2026-10-06 folded in, and the PDF spike S1 (§5.10) passed. **Amended 2026-10-06** (§18): compressed
 streams, no Japanese font, report worker limits and an OOM crash point, admission by PDF goldens, the
 ICC licence, the spike as evidence, and (amendment 7) the PDF render in a child process with its own
-memory limit. Implementation notes per step: §19-§30. **Every place where the build differs from
+memory limit. Implementation notes per step: §19-§30; the export in the report: §32. **Every place where the build differs from
 the decision above is listed in §31.** Two points still wait for the mentor (§17).
 Builds on ADR 0005 (units, statuses), 0014 §4 (archive caveat), 0015 (render custody stream, loader,
 determinism, packages, first-byte rule), 0017 (worker images per runtime identity, generalised here).
@@ -1155,6 +1155,48 @@ and keep running. Breaks: a dev-only import in the API and in the worker.
 5. Mutation round `m16-pre7` (15 breaks, all caught). The collation breaks edit the migrations: the
    static test migrates its own scratch database, so a migration break is visible to it.
 
+## 32. The export a job read, in its report (2026-10-12; deviation 5 closed)
+A report on a job collected from a Slack export now says what that export is and what it cannot
+contain, from the chain (D7), so a free-plan export's report states that private channels and direct
+messages are not in it.
+1. **Recorded.** `job_started.export` (new jobs) holds `id`, `sha256`, `size_bytes`,
+   `entry_count`, `declared_plan` (what the admin declared at upload, null when not declared),
+   `detected_tier` (`public_only` / `full` / `grid`, from the archive alone, ADR 0014 §5),
+   `tier_confirmed`, `blind_spots`, `tier_warnings` and `findings` (the rest of the export record's
+   validation findings, verbatim: counts and capped samples, so bounded). All read from the
+   `slack_exports` row written once at validation (`edisc_worker.pipeline.export_record`). A custody
+   payload addition: the verifier treats the fields as optional.
+2. **Stated.** `report.json` `access.export` = `model.export_section`: every field of
+   `EXPORT_FIELDS`, from the chain; a field the chain does not hold prints UNKNOWN (jobs started
+   before §32 recorded only id and SHA-256); a recorded null stays null ("not declared" in the HTML).
+   The HTML has an Export section after Access: identity, declared plan next to detected tier, then
+   "What this export cannot contain (blind spots)", the tier warnings, and every finding flattened to
+   (dotted path, value) rows in key order, user values through the sanitiser (an entry name in a
+   sample is revealed, never obeyed). Report renderer **1.5.0** (report and PDF goldens: a
+   free-plan export with a hostile sample name in the `archive` case; the other cases differ only by
+   the version string).
+3. **Recomputed.** `recompute._access` uses the same `export_section`, so `edisc-verify
+   --job-package` recomputes the whole export section; a report stating another tier, plan or blind
+   spots than the chain fails (tested by forging one).
+4. **Corpus.** One case per detected tier, each with a declared plan: `export_full` (Business+),
+   `export_public_only` (free), `export_grid` (Enterprise Grid: the dummy export writer's new `grid`
+   tier writes `org_users.json`; detected `grid`, unconfirmed, with its warning). Each export case
+   checks the stated section against the case and the product's own blind-spot texts
+   (`layout.BLIND_SPOTS_*`), the findings against the export record, the recomputation, the forged
+   report, and the HTML. The writer's default output and every other tier are byte-unchanged (no
+   dummy version bump; `export_grid` has its own new corpus golden).
+5. **Collation (§30 follow-up).** `tests/integration/corpus/test_collation.py` now also runs
+   `export_full` through the API on the tailored ICU database and on the default one (upload, lock,
+   validation, collection from the export, render, report, job package): `units.jsonl`, the derived
+   sections and the stated export section are identical. The export carries three day-file folders
+   no metadata file lists (`ExportOptions.orphan_folders`), named so the tailored rules order the
+   finding's sample otherwise than code points; it must read `Corphan, Dorphan, Gorphan` on both.
+   `tests/integration/api/conftest.make_api` builds the API over any database's sessions.
+6. Mutation round `m16-export` (8 breaks, all caught): the findings, the plan and the blind spots
+   not recorded; UNKNOWN printed as null; the access section not recomputed; the Export section or
+   its blind spots missing from the HTML; the export entries' folder order left to the database's
+   collation (migration 0035).
+
 ## 31. Built vs decided: every deviation, in one place (2026-10-12)
 The decision sections (§1-§18) are kept as written; where the build differs, this is the list. Each
 line names the section it amends and the implementation note that records why.
@@ -1165,7 +1207,7 @@ line names the section it amends and the implementation note that records why.
 | 2 | §16: steps in order 1-7 | Step 4 (custody stream) built right after step 1, before HTML and PDF | The user asked to review the stored, sealed stream first (§20) |
 | 3 | §1, §7.1, §19.2: kind, conversation, scopes, access-lost reason of a unit are database facts | For jobs started since §28 (`unit_event_format` 2) every unit fact is in the chain (and unsettled units in `units_unsettled`); the database row is the cross-check | So `units.jsonl` is recomputable byte for byte (§28.2) |
 | 4 | §1: `renders.jsonl` lists every external native as `{file_id}_EXTERNAL.txt` | Lists each native's custody-anchored record (ord, SHA-256, size, referencing files); the `_EXTERNAL.txt` names live only inside the `.rsmf` zips | Reading every render file to list names is not done; the record is what custody anchors (§19.5) |
-| 5 | §1.1.3: for exports, size, validation findings and tier detection in the access section | The access section states the export id and SHA-256 and the blind spots from `job_started`, plus the connection's database facts; the export's size, findings and tier detection are NOT in the report | Not built; they are on the export record (`GET /v1/exports/{id}`). Open item |
+| 5 | §1.1.3: for exports, size, validation findings and tier detection in the access section | Since §32: `access.export` states, from `job_started.export`, the export's id, SHA-256, size, entry count, declared plan, detected tier, tier confirmation, blind spots, tier warnings and validation findings; the HTML has an Export section; the verifier recomputes it. Jobs started before §32 state id and SHA-256 and print UNKNOWN for the rest | Was an open item until §32 |
 | 6 | §1.1.2: units per scope | Each unit row carries the indexes of the scopes covering it; no per-scope unit count is stated | Derivable from `units.jsonl`; not stated separately. Open item |
 | 7 | §3.2: markers are ASCII text `[U+XXXX]` | Markers are ELEMENTS (`<span class="cp">U+XXXX</span>`); HTML-invalid code points are replaced too | A literal "[U+202E]" in a name was indistinguishable from a replaced U+202E (§21.1, §21.2) |
 | 8 | §5.5: the glyph-coverage pass runs "before HTML for the PDF is built" | Coverage is applied in the ONE stored `report.html`, from the committed `fonts/coverage.txt` | §10 renders the PDF from the stored HTML; both hold this way (§22.4) |

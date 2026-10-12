@@ -53,6 +53,25 @@ HARD = [
 LONE = "lone \ud83d high, \udc00 low, \ude00\ud83d reversed"
 
 
+# what `job_started.export` records for a free-plan export (§32); one sample entry name is hostile
+EXPORT: dict[str, Any] = {
+    "id": "0192f3a4-0000-7000-8000-00000000e0e0", "sha256": "5e" * 32, "size_bytes": 1_234_567,
+    "entry_count": 42, "declared_plan": "free", "detected_tier": "public_only",
+    "tier_confirmed": True,
+    "blind_spots": [
+        "Edits keep only the latest text; earlier versions are not in the export.",
+        "Private channels, direct messages and group direct messages are not in this export.",
+    ],
+    "tier_warnings": ["users.json is missing: authors cannot be resolved to user profiles."],
+    "findings": {
+        "entries_by_kind": {"day_file": 36, "metadata": 2, "unknown": 1},
+        "unknown_entries": {"count": 1, "sample": [HARD[12]]},
+        "metadata_files": ["channels.json", "users.json"],
+        "conversations_refused": {}, "messages": 120, "workspace_id": None,
+    },
+}  # fmt: skip
+
+
 def key() -> str:
     return (
         f"{REPORT_RENDERER_VERSION}_unicode-{unicodedata.unidata_version}"
@@ -78,7 +97,7 @@ def _digest(name: str, rows: int) -> m.JsonlDigest:
 def _inputs(*, units: int, conversations: int, status: str = "completed", live: bool = True,
             failed_every: int = 0, gap_every: int = 0, hard: bool = False,
             custody_ok: bool = True, divergences: int = 0,
-            retention_gaps: int = 0) -> m.ReportInputs:  # fmt: skip
+            retention_gaps: int = 0, export: bool = False) -> m.ReportInputs:  # fmt: skip
     """Fixed report inputs (no randomness, no clock): ``units`` units spread over
     ``conversations`` conversations, every ``failed_every``-th unit failed and every
     ``gap_every``-th one with a gap; ``hard`` puts the hard strings in names and error texts."""
@@ -89,6 +108,8 @@ def _inputs(*, units: int, conversations: int, status: str = "completed", live: 
     if live:
         started |= {"plan_tier": "pro", "granted_scopes": ["channels:history"],
                     "blind_spots": ["private channels"], "unit_day_zone": "UTC"}  # fmt: skip
+    if export:  # a free-plan export: public channels only (§32)
+        started |= {"plan_tier": "public_only", "export": EXPORT}
     chain.add(m.ChainEvent(1, "job_started", "user:alice", T0, started))
     capped, conv_capped, fold = m.Capped(), m.Capped(), m.ConversationFold()
     status_counts: dict[str, int] = {}
@@ -170,7 +191,8 @@ CASES: dict[str, Callable[[], m.ReportInputs]] = {
     "gaps_and_failures_hard_strings": lambda: _inputs(
         units=40, conversations=8, status="completed_with_gaps", failed_every=5, gap_every=3,
         hard=True),
-    "archive": lambda: _inputs(units=6, conversations=2, status="completed_against_archive"),
+    "archive": lambda: _inputs(
+        units=6, conversations=2, status="completed_against_archive", export=True),
     "pre_change_unknown": lambda: _inputs(units=4, conversations=1, live=False, gap_every=2),
     "custody_failed_divergent": lambda: _inputs(
         units=4, conversations=1, custody_ok=False, divergences=2, retention_gaps=1),

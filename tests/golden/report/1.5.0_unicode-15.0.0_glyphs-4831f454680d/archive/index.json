@@ -1,0 +1,17 @@
+{
+  "files": [
+    {
+      "name": "report.html",
+      "sha256": "f7de5ebee7f33d98a6ed1411a60eb9a0ee91de148286e9d73879a9eb3280e14d",
+      "size": 10596
+    },
+    {
+      "name": "report.json",
+      "sha256": "1f7be62e54fbccb9f2ecd66c2ae644b26dcce85affa049115f7b8e13080a1c78",
+      "size": 5183
+    }
+  ],
+  "glyph_set": "4831f454680d3e0bd8e35aca3d295811ca9ec68e8c4cdc39f05a96a448407610",
+  "renderer_version": "1.5.0",
+  "unicode": "15.0.0"
+}

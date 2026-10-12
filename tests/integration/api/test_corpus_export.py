@@ -11,6 +11,7 @@ then gets a report whose ``units.jsonl`` is rebuilt from the job package byte fo
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import uuid
@@ -29,13 +30,16 @@ from edisc_connector_dummy.dialects.slack_export import (
     ExportOptions,
     write_export,
 )
+from edisc_connector_slack_export.layout import BLIND_SPOTS_ALL, BLIND_SPOTS_PUBLIC_ONLY
+from edisc_core.canonical import canonical_json
 from edisc_core.lone_surrogates import replacement, substitute_key, utf16_units
 from edisc_custody.export import export_package
 from edisc_db.session import tenant_tx
+from edisc_renderers.report.html import escape
 from edisc_renderers.report.recompute import recompute
 from edisc_worker.renders import RenderRun
 
-from ..corpus.cases import EXPORT
+from ..corpus.cases import EXPORT, Case
 from ..corpus.check import (
     check_against_oracle,
     check_golden,
@@ -60,17 +64,19 @@ async def test_export_case(api: Api, tenant: TenantCtx, tmp_path: Path, name: st
         ds, buf, ExportOptions(tier=case.export_tier, legacy_layout=case.export_legacy_layout,
                                hostile=case.export_hostile)
     )  # fmt: skip
+    plan = {} if case.export_plan is None else {"plan": case.export_plan}
     oracle = build(case)
     async with collection_workers(api, FileHost(ds)) as exp:
         w = await make_world(exp, tenant, case.spec)
         start = datetime.combine(ds.day(case.first_day), datetime.min.time(), tzinfo=UTC)
         async with exp.client(tenant.subdomain, tenant.token(exp.settings)) as c:
-            export = await _export_connection(c, w.client, buf.getvalue())
+            export = await _export_connection(c, w.client, buf.getvalue(), **plan)
             job = await _job(
                 c, w.matter,
                 {"connection_id": export["connection_id"],
                  "scopes": [_scope(start, ds.n_days(0) - case.first_day, case.policy.value)]},
             )  # fmt: skip
+        await _check_export_report(exp, tenant, case, buf.getvalue(), manifest, job, tmp_path)
         rs = exp.settings.model_copy(update={"render_files_batch_size": case.batch_size})
         job_id = uuid.UUID(job["id"])
         render_id = await new_render(exp.sessions, tenant.tenant_id, job_id, case.options)
@@ -100,6 +106,57 @@ async def test_export_case(api: Api, tenant: TenantCtx, tmp_path: Path, name: st
                 units = " ".join(f"{u:04x}" for u in utf16_units(exact))
                 assert f"/display: {units}" in lone  # the name, and its `edisc.known_name` copy
                 assert {v.split(": ", 1)[1] for v in lone} == {units}
+
+
+async def _check_export_report(
+    api: Api, tenant: TenantCtx, case: Case, data: bytes, manifest: ExportManifest,
+    job: dict[str, Any], tmp_path: Path,
+) -> None:  # fmt: skip
+    """The report states the export the job read, from the chain (ADR 0018 §32): the declared plan,
+    the tier detected from the archive, what the export cannot contain (its blind spots), the tier
+    warnings and the validation findings; the verifier recomputes it from the job package, and the
+    HTML says it. Expected values come from the case and the product's own statements (`layout`),
+    the findings from the export record (the chain must equal it)."""
+    job_id = uuid.UUID(job["id"])
+    built, files = await build_report(api.sessions, api.s3, api.settings, tenant, job_id)
+    stated = built.document["access"]["export"]
+    tier = case.export_tier
+    spots = list(BLIND_SPOTS_ALL + (BLIND_SPOTS_PUBLIC_ONLY if tier == "public_only" else ()))
+    assert {k: stated[k] for k in ("sha256", "size_bytes", "entry_count", "declared_plan",
+                                   "detected_tier", "tier_confirmed", "blind_spots")} == {
+        "sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data),
+        "entry_count": manifest.entries, "declared_plan": case.export_plan, "detected_tier": tier,
+        "tier_confirmed": tier != "grid", "blind_spots": spots,
+    }  # fmt: skip
+    grid_warning = "Enterprise Grid structure suspected"
+    assert any(grid_warning in w for w in stated["tier_warnings"]) == (tier == "grid")
+    if tier != "grid":  # each case declares the plan that normally produces its tier
+        assert stated["tier_warnings"] == []
+    findings, *_ = await _state(api, tenant, job_id, job["connection_id"])
+    assert stated["findings"] == {
+        k: v for k, v in findings.items() if k not in ("blind_spots", "tier_warnings")
+    }
+    assert (stated["blind_spots"], stated["tier_warnings"]) == (
+        findings["blind_spots"], findings["tier_warnings"],
+    )  # fmt: skip
+    assert stated["findings"]["metadata_files"] == sorted(manifest.metadata_files)
+    pkg = await export_package(api.sessions, api.s3, api.settings, tenant_id=tenant.tenant_id,
+                               job_id=job_id, dest=tmp_path / "export-report-job",
+                               include_objects=False, archives="reference")  # fmt: skip
+    events = [json.loads(x) for x in (pkg / "events.jsonl").read_bytes().splitlines()]
+    done = recompute(events, built.report_json, files.data["units.jsonl"])
+    assert done.ok, done.differences
+    # a report stating another tier or plan than the chain recorded fails the recomputation
+    forged = json.loads(built.report_json)
+    forged["access"]["export"] |= {"detected_tier": "full", "declared_plan": "enterprise_grid",
+                                   "blind_spots": list(BLIND_SPOTS_ALL[:1])}  # fmt: skip
+    if forged["access"]["export"] != built.document["access"]["export"]:
+        bad = recompute(events, canonical_json(forged), files.data["units.jsonl"])
+        assert not bad.ok and any("access" in d for d in bad.differences), bad.differences
+    page = files.data["report.html"].decode("utf-8")
+    for spot in spots:
+        assert escape(spot) in page
+    assert ("not in this export" in page) == (tier == "public_only")
 
 
 def _day_counts(ds: Dataset, conversation: str) -> dict[str, int]:

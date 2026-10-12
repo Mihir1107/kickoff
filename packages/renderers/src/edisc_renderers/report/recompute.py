@@ -57,6 +57,7 @@ from edisc_renderers.report.model import (
     UnitFact,
     conversations_section,
     exact_document,
+    export_section,
     jsonl_line,
     kind_of,
     or_unknown,
@@ -206,7 +207,7 @@ def _access(sp: Mapping[str, Any]) -> dict[str, Any]:
         "plan_tier": or_unknown(sp.get("plan_tier")),
         "granted_scopes": or_unknown(sp.get("granted_scopes")),
         "blind_spots": or_unknown(sp.get("blind_spots")),
-        "export": sp.get("export"),
+        "export": export_section(sp.get("export")),
     }
 
 

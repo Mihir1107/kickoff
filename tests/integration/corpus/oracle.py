@@ -285,7 +285,7 @@ def ts_day(ts: str, zone_name: str) -> date:
 
 COVERAGE = {
     "dialect:live:slack", "dialect:live:slack_history", "dialect:export:slack_history",
-    "export_tier:full", "export_tier:public_only",
+    "export_tier:full", "export_tier:public_only", "export_tier:grid",
     "zone:UTC", "zone:America/New_York", "zone:Asia/Kolkata", "zone:Asia/Kathmandu",
     "day_length:23h", "day_length:25h", "offset:30min", "offset:45min",
     "context:on", "context:off", "policy:replies_only", "policy:include_parent_and_thread",

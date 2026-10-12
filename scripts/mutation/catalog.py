@@ -37,6 +37,10 @@ Rounds (ADR 0015):
   before the first byte with its CSP, refusals audited, nothing outside a scope served, the pure
   renderer's sanitiser and link allow-list, every message of the day on one page, the day-bounded
   loader and its thread roots, the renderer off the event loop.
+- ``m16-export``: the export a job read, in its report (ADR 0018 §32): declared plan, detected tier,
+  blind spots and findings recorded in `job_started`, stated (UNKNOWN when not recorded),
+  recomputed by the verifier, shown in the HTML; export ingestion's orders under a tailored
+  collation.
 - ``m16-pre7``: the fixes before M16 step 7 (ADR 0018 §30): code-point order whatever the
   database's collation (the corpus run on a tailored ICU database, every ordered text column C),
   the clean verdict recomputed from the chain alone (a report may never state clean when the chain
@@ -159,6 +163,7 @@ CLI = "packages/custody/src/edisc_custody/cli.py"
 CCO = "tests/integration/corpus/test_collation.py"
 DCO = "tests/integration/db/test_collation.py"
 URV = "tests/unit/renderers/test_report_verdict.py"
+UEX = "tests/unit/renderers/test_report_export.py"
 
 
 @dataclass(frozen=True)
@@ -1012,4 +1017,26 @@ CATALOG: list[Mutation] = [
       "normalizer"),
     m("normalizers_not_recomputed", "m16-pre7", RC, '"actors", "versions", "counts",',
       '"actors", "counts",', URV, "normalizer_versions_are_stated"),
+    # ------------------------------------------------------------------ the export in the report (§32)
+    m("export_findings_not_recorded", "m16-export", PIPE,
+      '            k: v for k, v in findings.items() if k not in ("blind_spots", "tier_warnings")\n',
+      '            k: v for k, v in findings.items() if False\n', ACE, "export_public_only"),
+    m("export_plan_not_recorded", "m16-export", PIPE, '        "declared_plan": row.declared_plan,',
+      '        "declared_plan": None,', ACE, "export_public_only"),
+    m("export_blind_spots_not_recorded", "m16-export", PIPE,
+      '        "blind_spots": list(findings.get("blind_spots", [])),', '        "blind_spots": [],',
+      ACE, "export_grid"),
+    m("export_unknown_printed_as_null", "m16-export", RM,
+      "    return {k: recorded.get(k, UNKNOWN) for k in EXPORT_FIELDS}",
+      "    return {k: recorded.get(k) for k in EXPORT_FIELDS}", UEX, "unknown"),
+    m("export_access_not_recomputed", "m16-export", RC, '("job", "scopes", "access", "pauses",',
+      '("job", "scopes", "pauses",', ACE, "export_public_only"),
+    m("export_section_not_in_html", "m16-export", RH,
+      '        + _export(doc["access"].get("export"), doc["access"].get("source")),\n',
+      "        ,\n", UEX, "cannot_contain"),
+    m("export_blind_spots_not_in_html", "m16-export", RH,
+      '        _statements(export.get("blind_spots")),', "        _statements([]),", UEX,
+      "cannot_contain"),
+    m("export_findings_by_locale", "m16-export", M35, '    ("export_entries", "folder"),\n', "", CCO,
+      "export_case"),
 ]  # fmt: skip

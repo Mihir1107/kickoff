@@ -222,6 +222,11 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   reasons. `job_started.normalizer_versions` + each batch's `normalizer_version` (new jobs) are
   what the report states and the verifier recomputes (ADR 0018 §30). The job
   package verifier is strict and reads zips in place, like the render and report verifiers.
+- Export jobs (§32): `job_started.export` records the export's declared plan, detected tier, blind
+  spots, tier warnings and validation findings (`pipeline.export_record`); the report states them
+  from the chain (`model.export_section`, UNKNOWN for older jobs), the HTML has an Export section,
+  the verifier recomputes it. Corpus: one export case per tier, and `export_full` on the tailored
+  collation database too (`api.conftest.make_api` builds the API over any database).
 - Preview (§29): `GET /v1/jobs/{id}/preview` (`evidence.read`) loads ONE day through
   `RenderLoader.day_slice` (items by their own time on the 0034 index, links by primary key, roots by
   exact id; never the whole conversation), renders with the pure `edisc_renderers.preview` (same

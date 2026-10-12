@@ -139,6 +139,7 @@ fails.
 | The unit exceptions list (capped at 1,000, worst first) and the conversations section, plus `conversations.jsonl` when the report has more than 1,000 conversations | Derived from those rows |
 | Job: who started it, its final status, the unit day zone | From `job_started` and the final event |
 | Scopes, access facts (connector and version, connection, plan tier, granted scopes, blind spots, export hash) | As `job_started` recorded them |
+| For a job read from a Slack export: the export's size, entry count, declared plan, detected tier, whether the tier is confirmed, its blind spots (what the export cannot contain), tier warnings and validation findings | As `job_started.export` recorded them (jobs started since ADR 0018 §32). For older jobs the report prints UNKNOWN for these and the recomputation expects exactly that |
 | Pauses (with who re-authorized) and how many were never resumed | From `job_paused` / `job_resumed` |
 | Custody actors by event type | Every event's actor |
 | Normalizer versions | From `job_started` and each batch, for jobs started since they were recorded (ADR 0018 §30). Older jobs: checked by digest only, and the output says so |

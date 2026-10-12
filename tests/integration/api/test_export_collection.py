@@ -76,8 +76,10 @@ async def _linked(api: Api, t: TenantCtx, job_id: str, *, in_scope: bool | None 
         return set(rows)
 
 
-async def _export_connection(c: httpx.AsyncClient, client: str, data: bytes) -> dict[str, Any]:
-    export_id, done = await upload(c, uuid.UUID(client), data)
+async def _export_connection(
+    c: httpx.AsyncClient, client: str, data: bytes, **body: Any
+) -> dict[str, Any]:
+    export_id, done = await upload(c, uuid.UUID(client), data, **body)
     assert done.status_code == 202, done.text
     out = await settled(c, export_id)
     assert out["status"] == "ready", out
