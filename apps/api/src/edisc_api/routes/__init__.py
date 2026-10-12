@@ -3,10 +3,13 @@ enumerates the routes and fails on any route without one."""
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import FastAPI
 
 
-def register(app: FastAPI) -> None:
+def register(app: FastAPI) -> list[Any]:
+    """Include every router; returns them (``safe_errors.install`` reads their routes)."""
     from edisc_api.routes import (
         admin,
         connections,
@@ -20,13 +23,10 @@ def register(app: FastAPI) -> None:
         reports,
     )
 
-    app.include_router(me.router)
-    app.include_router(hierarchy.router)
-    app.include_router(admin.router)
-    app.include_router(connections.router)
-    app.include_router(jobs.router)
-    app.include_router(exports.router)
-    app.include_router(renders.router)
-    app.include_router(reports.router)
-    app.include_router(job_package.router)
-    app.include_router(preview.router)
+    routers = [
+        me.router, hierarchy.router, admin.router, connections.router, jobs.router, exports.router,
+        renders.router, reports.router, job_package.router, preview.router,
+    ]  # fmt: skip
+    for router in routers:
+        app.include_router(router)
+    return routers

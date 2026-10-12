@@ -16,6 +16,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Header, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic_core import PydanticCustomError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
@@ -26,7 +27,7 @@ from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller
 from edisc_api.authz import P, Permission, Scope, authorize, perm
-from edisc_api.errors import conflict, not_found, unprocessable
+from edisc_api.errors import RecordedText, conflict, not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, decode_text, encode_text, page_of
 from edisc_api.routes.hierarchy import ensure_matter_open
 from edisc_connector_dummy.guard import source_permitted
@@ -78,7 +79,8 @@ class ScopeIn(Strict):
     @model_validator(mode="after")
     def _range(self) -> ScopeIn:
         if self.date_from >= self.date_to:
-            raise ValueError("date_from must be before date_to")
+            # a static message (edisc_ types keep theirs in a 422; ADR 0016 amendment, D11)
+            raise PydanticCustomError("edisc_date_range", "date_from must be before date_to")
         return self
 
 
@@ -127,7 +129,7 @@ class UnitOut(Strict):
     expected_count: int | None
     collected_count: int
     file_gaps: int
-    last_error: str | None
+    last_error: RecordedText | None
     day_anomalies: int
     caveat: str | None  # verbatim (ADR 0014) when recon_status is matched_against_archive
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import socket
 import tomllib
 from pathlib import Path
@@ -122,11 +123,25 @@ async def _api_comes_up(python: Path, tmp: Path) -> None:
                     await asyncio.sleep(0.5)
                     continue
                 assert resp.status_code == 401, resp.text  # up, and refusing the anonymous call
-                return
-        pytest.fail(f"the API did not come up:\n{(tmp / 'api.log').read_text()[-4000:]}")
+                # the raw request line never reaches a log (uvicorn's access log is off; ADR 0016
+                # amendment, D11): a canary in the path, the query and the token
+                canary = f"Zq{secrets.token_hex(12)}"
+                for url in (f"/v1/jobs/{canary}?q={canary}", f"/v1/{canary}"):
+                    await client.get(f"http://127.0.0.1:{port}{url}",
+                                     headers={"authorization": f"Bearer {canary}"})  # fmt: skip
+                break
+            else:
+                pytest.fail(f"the API did not come up:\n{(tmp / 'api.log').read_text()[-4000:]}")
+        if proc.returncode is not None:
+            pytest.fail(f"the API did not come up:\n{(tmp / 'api.log').read_text()[-4000:]}")
     finally:
         await _stop(proc)
         log.close()
+    logged = (tmp / "api.log").read_text()
+    assert canary not in logged, logged[-4000:]
+    assert '"event": "request"' in logged and '"route": "/v1/jobs/{job_id}"' in logged, logged[
+        -4000:
+    ]
 
 
 async def _worker_comes_up(python: Path, tmp: Path, name: str, args: list[str]) -> None:

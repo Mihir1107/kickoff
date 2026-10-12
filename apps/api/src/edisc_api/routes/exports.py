@@ -37,7 +37,7 @@ from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller
 from edisc_api.authz import TENANT, P, Permission, Scope, authorize, perm, permissions, roles_at
-from edisc_api.errors import ApiError, conflict, forbidden, not_found, unprocessable
+from edisc_api.errors import ApiError, RecordedDetail, conflict, forbidden, not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, page_of
 from edisc_api.routes.hierarchy import ensure_client_open
 from edisc_connector_slack_export.archive_access import default_limits
@@ -85,7 +85,7 @@ class ExportOut(Strict):
     client_id: uuid.UUID
     status: str
     reject_reason: str | None
-    reject_detail: dict[str, Any] | None
+    reject_detail: RecordedDetail | None
     declared_size: int
     declared_sha256: str | None
     declared_plan: str | None
@@ -457,7 +457,7 @@ def _check_parts(parts: list[tuple[int, int, str, str]], declared: int, part_min
         )
     total = sum(p[1] for p in parts)
     if total != declared:
-        raise unprocessable(f"received {total} bytes, declared {declared}")
+        raise unprocessable(f"received {total} bytes, which is not the declared size")
 
 
 async def _check_stored_parts(

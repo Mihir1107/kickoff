@@ -9,6 +9,7 @@ from typing import Literal
 
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic_core import PydanticCustomError
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
@@ -72,11 +73,13 @@ class AssignmentIn(Strict):
     @model_validator(mode="after")
     def _check(self) -> AssignmentIn:
         if (self.principal_id is None) == (self.group_id is None):
-            raise ValueError("exactly one of principal_id and group_id")
-        if self.role not in ROLES:
-            raise ValueError(f"unknown role {self.role}")
+            raise PydanticCustomError("edisc_assignee", "exactly one of principal_id and group_id")
+        if self.role not in ROLES:  # never the value sent (ADR 0016 amendment, D11)
+            raise PydanticCustomError("edisc_unknown_role", "unknown role")
         if (self.scope_type == "tenant") != (self.scope_id is None):
-            raise ValueError("scope_id is required except for scope_type tenant")
+            raise PydanticCustomError(
+                "edisc_scope_id", "scope_id is required except for scope_type tenant"
+            )
         return self
 
 

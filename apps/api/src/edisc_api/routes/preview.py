@@ -43,6 +43,12 @@ REFUSED_STATUS = {
     "page_not_found": 404,
     "unknown_time_zone": 422,
 }
+REFUSED_DETAIL = {
+    "job_not_sealed": "only sealed jobs are previewed",
+    "not_in_scope": "the day is outside every scope of the job for this conversation",
+    "page_not_found": "the day has no such page",
+    "unknown_time_zone": "unknown time zone (IANA names of the pinned tzdata)",
+}
 HEADERS = {
     "content-security-policy": CSP_HEADER,
     "x-content-type-options": "nosniff",
@@ -81,7 +87,8 @@ async def preview(
         )  # fmt: skip
     except PreviewRefusedError as exc:
         await _refused(res, caller, rid, job_id, request, exc.code, exc.detail, integrity=False)
-        raise ApiError(REFUSED_STATUS[exc.code], exc.code, exc.detail) from exc
+        # the audit keeps the detail; the answer never quotes the request (D11)
+        raise ApiError(REFUSED_STATUS[exc.code], exc.code, REFUSED_DETAIL[exc.code]) from exc
     except PreviewIntegrityError as exc:
         await _refused(res, caller, rid, job_id, request, "preview_integrity", str(exc),
                        integrity=True)  # fmt: skip

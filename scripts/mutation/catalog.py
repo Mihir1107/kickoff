@@ -45,6 +45,11 @@ Rounds (ADR 0015):
   database's collation (the corpus run on a tailored ICU database, every ordered text column C),
   the clean verdict recomputed from the chain alone (a report may never state clean when the chain
   does not give clean), normalizer versions recorded in `job_started` and each batch, recomputed.
+- ``m17-d11``: no error path echoes a request value (M17 step 0, ADR 0016 amendment, decision
+  D11): the sanitised 422 body (no input/ctx, client-chosen loc keys, schema-only messages), the
+  fixed 500 and its message-free log line, log paths without client segments, uvicorn's access log
+  off, statement errors without parameters, recorded worker texts redacted on the way out, the
+  route refusals that quoted the request.
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
   and the blocking-I/O guard ``edisc_core.loopblock``, §24.8), every CPU step moved off the loop, the
   render thread writing nothing (ADR 0015 §24).
@@ -164,6 +169,13 @@ CCO = "tests/integration/corpus/test_collation.py"
 DCO = "tests/integration/db/test_collation.py"
 URV = "tests/unit/renderers/test_report_verdict.py"
 UEX = "tests/unit/renderers/test_report_export.py"
+SE = "apps/api/src/edisc_api/safe_errors.py"
+APPM = "apps/api/src/edisc_api/app.py"
+ERRS = "apps/api/src/edisc_api/errors.py"
+SESS = "packages/db/src/edisc_db/session.py"
+USE = "tests/unit/api/test_safe_errors.py"
+NOE = "tests/integration/api/test_no_echo.py"
+DBS = "tests/integration/db/test_statement_errors.py"
 
 
 @dataclass(frozen=True)
@@ -1039,4 +1051,50 @@ CATALOG: list[Mutation] = [
       "cannot_contain"),
     m("export_findings_by_locale", "m16-export", M35, '    ("export_entries", "folder"),\n', "", CCO,
       "export_case"),
+    # ------------------------------------------------------------------ no error echoes a value (D11)
+    m("echo_422_default_handler", "m17-d11", SE,
+      "    app.add_exception_handler(RequestValidationError, _validation_error)\n", "", NOE,
+      "any_route_and_field"),
+    m("echo_422_default_handler_unit", "m17-d11", SE,
+      "    app.add_exception_handler(RequestValidationError, _validation_error)\n", "", USE,
+      "wrong_body"),
+    m("echo_422_input_kept", "m17-d11", SE,
+      '                "msg": _message(e),\n',
+      '                "msg": _message(e),\n                "input": e.get("input"),\n', USE,
+      "never_carries"),
+    m("echo_422_client_keys_kept", "m17-d11", SE,
+      "part in names or (i == 0 and part in LOCATIONS)", "True", USE, "client_chosen"),
+    m("echo_422_messages_kept", "m17-d11", SE,
+      "    if kind in SCHEMA_MESSAGES or kind.startswith(OWN_PREFIX):", "    if True:", USE,
+      "wrong_body"),
+    m("echo_500_unhandled_not_caught", "m17-d11", SE,
+      "    app.add_middleware(SafeErrors, segments=lambda: segments)\n", "", USE, "fixed_500"),
+    m("echo_500_message_logged", "m17-d11", SE,
+      "        request_id=request_id, response_started=started,",
+      "        request_id=request_id, response_started=started, message=str(exc),", USE,
+      "fixed_500"),
+    m("echo_stream_error_swallowed", "m17-d11", SE, "            if started:\n                raise",
+      "            if started:\n                return", USE, "first_byte"),
+    m("echo_raw_path_in_log_context", "m17-d11", APPM, "        bind_context(request_id=rid, path=path)",
+      "        bind_context(request_id=rid, path=request.url.path)", NOE, "any_route_and_field"),
+    m("echo_uvicorn_loggers_not_routed", "m17-d11", "apps/api/src/edisc_api/main.py",
+      "route_server_logs()  #", "pass  #", PROD),
+    m("echo_uvicorn_access_log_on", "m17-d11", SE, "    access.disabled = True\n", "", USE,
+      "uvicorn_access"),
+    m("echo_sql_parameters", "m17-d11", SESS, "        hide_parameters=True,\n", "", DBS),
+    m("echo_recorded_text_not_redacted", "m17-d11", ERRS,
+      "RecordedText = Annotated[str, AfterValidator(redact_text)]", "RecordedText = str", USE,
+      "recorded_worker_texts"),
+    m("echo_unknown_source", "m17-d11", "apps/api/src/edisc_api/routes/connections.py",
+      '        raise unprocessable("unknown source")', '        raise unprocessable(f"unknown source {body.source}")',
+      NOE, "handler_refusals"),
+    m("echo_unknown_role", "m17-d11", "apps/api/src/edisc_api/routes/admin.py",
+      'PydanticCustomError("edisc_unknown_role", "unknown role")',
+      'PydanticCustomError("edisc_unknown_role", f"unknown role {self.role}")', NOE,
+      "handler_refusals"),
+    m("echo_render_zone", "m17-d11", API,
+      '        raise unprocessable("unknown time zone (IANA names of the pinned tzdata)") from exc',
+      "        raise unprocessable(str(exc)) from exc", NOE, "handler_refusals"),
+    m("echo_preview_refusal_detail", "m17-d11", PRV, "exc.code, REFUSED_DETAIL[exc.code]) from exc",
+      "exc.code, exc.detail) from exc", APV, "refusals_are_audited"),
 ]  # fmt: skip

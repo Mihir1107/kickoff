@@ -60,6 +60,12 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Credentials only through `edisc_db.connection_tokens`; the API test suite scans every response for
   every credential it handed in.
 - Nothing is deleted: memberships and role assignments are ended (`removed_at` / `revoked_at`).
+- No error path echoes a request value (ADR 0016 A8): 422 bodies come from `edisc_api.safe_errors`
+  (type, sanitised loc, schema-only msg; never input/ctx); an unhandled error is a fixed 500 whose
+  log line has types and frames, never the text; log lines carry `request_path` (static segments
+  only), never the query; `ApiError` details are fixed texts or server state, never a value the
+  request sent; our validators raise `PydanticCustomError("edisc_...", "<static>")`; worker texts in
+  answers are `RecordedText`. `test_no_echo.py` fuzzes every route from the OpenAPI document.
 
 ## Slack exports (M14, ADR 0014)
 - Upload: `POST /v1/clients/{c}/exports` → `PUT /v1/exports/{id}/parts/{n}` (Content-Digest sha-256) →

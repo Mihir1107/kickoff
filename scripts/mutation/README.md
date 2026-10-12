@@ -54,8 +54,9 @@ broken next to a `<name>.mutation-backup` copy: the runner refuses to start unti
 | `m16-preview` | the preview route, renderer, sanitiser, link allow-list, day-bounded loader (ADR 0018 §29) | 11 |
 | `m16-pre7` | code-point order under any database collation, the clean verdict from the chain alone, normalizer versions in the chain (ADR 0018 §30) | 15 |
 | `m16-export` | the export a job read, in its report: recorded, stated, recomputed, in the HTML; export ingestion under a tailored collation (ADR 0018 §32) | 8 |
+| `m17-d11` | no error path echoes a request value: sanitised 422s, fixed 500s, value-free log lines, uvicorn's access log off, hidden statement parameters, redacted worker texts, route refusals (ADR 0016 A8, M17 step 0) | 17 |
 
-300 entries: 138 unit, 158 integration, 4 image.
+317 entries: 147 unit, 166 integration, 4 image.
 
 The `s19-*` rounds were run by hand when they were built and only their categories were written
 down; the entries here re-create them against the current code.

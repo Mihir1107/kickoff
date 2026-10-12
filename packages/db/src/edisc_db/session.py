@@ -46,6 +46,9 @@ def create_engine(
         pool_size=pool_size,
         max_overflow=pool_size,
         pool_pre_ping=True,
+        # a statement error's text never carries its parameters: it reaches logs, unit errors in the
+        # chain and API answers (ADR 0016 amendment, D11); the SQLSTATE stays on the error
+        hide_parameters=True,
         connect_args={"server_settings": server_settings},
     )
 

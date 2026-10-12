@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ from types_aiobotocore_s3 import S3Client
 from edisc_api.auth import Authenticator, AuthError, Caller, JwksCache
 from edisc_api.client_ip import client_ip
 from edisc_api.errors import ApiError
+from edisc_api.safe_errors import install as install_safe_errors
+from edisc_api.safe_errors import request_path
 from edisc_connector_dummy.connector import DummyConnector
 from edisc_connector_dummy.guard import dummy_permitted, ensure_dummy_permitted
 from edisc_connector_slack_export.connector import SlackExportConnector
@@ -126,9 +129,17 @@ def create_app(settings: Settings, resources: Resources | None = None) -> FastAP
         rid = request_id(request)
         request.state.request_id = rid
         clear_context()
-        bind_context(request_id=rid, path=request.url.path)
+        path = request_path(request)  # never a client-chosen segment, never the query string
+        bind_context(request_id=rid, path=path)
+        started = time.monotonic()
         try:
             response = await call_next(request)
+            route = request.scope.get("route")
+            # the access line (uvicorn's own prints the raw request line: switched off in main)
+            log.info(
+                "request", method=request.method, route=getattr(route, "path", None),
+                status=response.status_code, ms=round((time.monotonic() - started) * 1000, 1),
+            )  # fmt: skip
         finally:
             clear_context()
         response.headers["x-request-id"] = rid
@@ -137,7 +148,7 @@ def create_app(settings: Settings, resources: Resources | None = None) -> FastAP
     @app.exception_handler(AuthError)
     async def _auth_error(request: Request, exc: AuthError) -> JSONResponse:
         # same response for unknown tenant and any token problem: no subdomain enumeration
-        log.info("authentication failed", reason=str(exc), path=request.url.path)
+        log.info("authentication failed", reason=str(exc), path=request_path(request))
         await _count_auth_failure(request)
         return JSONResponse(
             {"error": "unauthorized"}, status_code=401, headers={"WWW-Authenticate": "Bearer"}
@@ -151,7 +162,7 @@ def create_app(settings: Settings, resources: Resources | None = None) -> FastAP
 
     from edisc_api.routes import register
 
-    register(app)
+    install_safe_errors(app, register(app))  # last: its middleware wraps every other one
     return app
 
 

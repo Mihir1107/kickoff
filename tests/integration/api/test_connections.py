@@ -235,7 +235,7 @@ async def test_the_dummy_connector_is_refused_outside_disposable_environments(
     try:
         async with api.client(tenant.subdomain, tenant.token(api.settings)) as c:
             r = await c.post(f"/v1/clients/{w.client}/connections", json=_connection_body())
-            assert (r.status_code, r.json()["detail"]) == (422, "unknown source dummy")
+            assert (r.status_code, r.json()["detail"]) == (422, "unknown source")
             r = await c.post(f"/v1/matters/{w.matter}/jobs", json=w.job_body())
             assert (r.status_code, r.json()["detail"]) == (422, "no connector for dummy")
     finally:

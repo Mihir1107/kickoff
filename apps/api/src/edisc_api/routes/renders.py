@@ -39,7 +39,7 @@ from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller, require_recent_sign_in
 from edisc_api.authz import P, Permission, Scope, authorize, perm
-from edisc_api.errors import ApiError, conflict, not_found, unprocessable
+from edisc_api.errors import ApiError, RecordedText, conflict, not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, decode_text, encode_text, page_of
 from edisc_api.routes.jobs import IdempotencyKey, _claim_key, _request_hash
 from edisc_core.ids import new_id
@@ -78,8 +78,8 @@ class EpisodeOut(Strict):
     kind: str  # unroutable | sealing_stuck
     started_at: datetime
     ended_at: datetime | None
-    end_reason: str | None
-    detail: str | None
+    end_reason: RecordedText | None
+    detail: RecordedText | None
 
 
 class RenderOut(Strict):
@@ -87,8 +87,8 @@ class RenderOut(Strict):
     job_id: uuid.UUID
     matter_id: uuid.UUID
     status: str
-    reason: str | None
-    detail: str | None
+    reason: RecordedText | None
+    detail: RecordedText | None
     options: dict[str, Any]
     renderer_version: str
     unicode_version: str
@@ -279,8 +279,9 @@ async def create_render_route(
             time_zone=body.time_zone,
             external_over_bytes=body.external_over_bytes,
         )
-    except RenderInputError as exc:
-        raise unprocessable(str(exc)) from exc
+    except RenderInputError as exc:  # only the zone can be wrong here: the model checks the rest
+        # never the value sent (ADR 0016 amendment, D11)
+        raise unprocessable("unknown time zone (IANA names of the pinned tzdata)") from exc
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         job = await _job_for_render(s, job_id)
         await authorize(s, caller, P.EXPORT_CREATE, Scope("matter", job.matter_id))

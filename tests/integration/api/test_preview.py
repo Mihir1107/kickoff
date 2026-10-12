@@ -24,7 +24,7 @@ from edisc_renderers.preview import CSP_HEADER
 from edisc_worker.preview import build_preview
 
 from ..worker.conftest import spec
-from .conftest import Api, TenantCtx, add_principal
+from .conftest import Api, TenantCtx, add_principal, secret
 from .first_byte import first_byte
 from .test_jobs import custody, make_world, wait_status
 from .test_reports import report_worker
@@ -150,12 +150,13 @@ async def test_refusals_are_audited_and_never_an_empty_page(
         outside = (ds.day(0) - timedelta(days=30)).isoformat()
         r = await c.get(_url(job_id), params={"conversation": conv, "day": outside})
         assert (r.status_code, r.json()["error"]) == (404, "not_in_scope")
+        # canaries (`secret`): the client's scan fails the test if an answer quotes them (D11)
         r = await c.get(
-            _url(job_id), params={"conversation": "CNOPE", "day": ds.day(0).isoformat()}
+            _url(job_id), params={"conversation": secret("CNOPE"), "day": ds.day(0).isoformat()}
         )
         assert (r.status_code, r.json()["error"]) == (404, "not_in_scope")
         r = await c.get(_url(job_id), params={"conversation": conv, "day": ds.day(0).isoformat(),
-                                               "zone": "Mars/Olympus"})  # fmt: skip
+                                               "zone": secret("Mars/Olympus")})  # fmt: skip
         assert (r.status_code, r.json()["error"]) == (422, "unknown_time_zone")
         r = await c.get(_url(job_id), params={"conversation": conv, "day": ds.day(0).isoformat(),
                                                "page": 99})  # fmt: skip

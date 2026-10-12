@@ -296,7 +296,9 @@ async def test_parts_below_the_minimum_and_wrong_totals_are_refused(
         export2 = (await create(c, tenant.default_client_id, 300)).json()["id"]
         assert (await put_part(c, export2, 1, b"a" * 100)).status_code == 200
         r = await c.post(f"/v1/exports/{export2}/complete")
-        assert r.status_code == 422 and "received 100 bytes, declared 300" in r.json()["detail"]
+        assert r.status_code == 422 and r.json()["detail"] == (
+            "received 100 bytes, which is not the declared size"
+        )
         assert (await c.get(f"/v1/exports/{export2}")).json()["status"] == "uploading"
 
 

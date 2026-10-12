@@ -35,7 +35,7 @@ from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller, require_recent_sign_in
 from edisc_api.authz import P, Permission, Scope, authorize, perm
-from edisc_api.errors import ApiError, conflict, not_found
+from edisc_api.errors import ApiError, RecordedText, conflict, not_found
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, page_of
 from edisc_core.ids import new_id
 from edisc_custody.report_export import (
@@ -71,8 +71,8 @@ class ReportOut(Strict):
     job_id: uuid.UUID
     matter_id: uuid.UUID
     status: str
-    reason: str | None  # why it was refused or failed (e.g. duplicate_identity)
-    detail: str | None
+    reason: RecordedText | None  # why it was refused or failed (e.g. duplicate_identity)
+    detail: RecordedText | None
     requested_by: str  # "system" for the automatic report, else the requesting principal
     request_reason: str | None  # why a person requested it (manual regeneration)
     renderer_version: str
