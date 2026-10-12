@@ -39,6 +39,8 @@ preview renderer **1.0.0**. M16 is complete; the items before M17 are done (belo
 
 ## Done: M17 decisions, ADR 0016 Amendment 1, M17 step 0 (2026-10-12; mutation round `m17-d11`, 17/17)
 - CI for `0a9277d` (the M17 plan): run 38251573775, every job green.
+- CI for `e593d05` (step 0) + `349459d` (amendment): run 38262381669, every job green
+  (production-install and report-pdf included).
 - **Decisions** (user, 2026-10-12): D1 (one relay host; signed single-use state bound to tenant,
   user, nonce; PKCE; never a query parameter), D2 extended to Slack (external ids only from the
   signed ID token / authenticated token response; ONE external tenant or workspace per tenant of
