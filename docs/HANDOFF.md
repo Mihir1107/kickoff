@@ -1,11 +1,12 @@
-# Handoff (2026-10-12: the export in the report, an export case on the tailored collation, the standalone verifier in the BACKLOG; M17 planned (not built); next: the user's decisions on docs/plans/m17.md)
+# Handoff (2026-10-12: M17 decisions taken, ADR 0016 Amendment 1, M17 step 0 built (no error path echoes a request value); next: the open M17 decisions, then M17 step 2 (sessions))
 
 This file alone is enough to continue. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisions §1-§18, notes
 §19-§30 and §32, **every deviation in §31**); the rest of the plan of record is `docs/ARCHITECTURE.md`,
 `docs/adr/`, `docs/plans/phase-2.md` and `docs/BACKLOG.md`. M16 summary:
 `docs/runs/2026-10-12-m16-complete.md`. Expert guide: `docs/VERIFYING.md`. Demo: `docs/DEMO.md`.
-**M17 proposal: `docs/plans/m17.md`** (plan only, nothing built; 14 decisions in its §12).
+**M17 plan: `docs/plans/m17.md`** (reviewed; decisions in its §12; design changes in ADR 0016
+Amendment 1). Step 0 is built; the rest is not.
 
 ## Current state
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`. Migrations at head: **0035**.
@@ -36,7 +37,33 @@ preview renderer **1.0.0**. M16 is complete; the items before M17 are done (belo
    is now marked required before production, with what it needs (own distribution, import boundary,
    empty-venv CI job, reproducible build, format versions).
 
-## Found while planning M17 (not fixed: plan only)
+## Done: M17 decisions, ADR 0016 Amendment 1, M17 step 0 (2026-10-12; mutation round `m17-d11`, 17/17)
+- CI for `0a9277d` (the M17 plan): run 38251573775, every job green.
+- **Decisions** (user, 2026-10-12): D1 (one relay host; signed single-use state bound to tenant,
+  user, nonce; PKCE; never a query parameter), D2 extended to Slack (external ids only from the
+  signed ID token / authenticated token response; ONE external tenant or workspace per tenant of
+  ours, a move is an audited operator action: this also answers D13 as "no"), D3, D5 (+ alerts at
+  pause and before the deadline; deadline a tenant setting, default 7 days), D10 (production builds
+  do not register the generic credential routes; checked in `production-install`), D11 (a class).
+  All written into ADR 0016 Amendment 1 (A1-A8) with the tests each needs; ADR 0012's pause row
+  points at A6. **Open: D4, D6, D7, D8, D9, D12, D14** (D13 to be confirmed as decided by D2).
+- **Step 0 (A8, built):** `edisc_api.safe_errors` (422 body: type, sanitised loc (client-chosen keys
+  `*`), schema-only messages, never input/ctx/url; outermost middleware: fixed 500 + a log line of
+  exception types and frames only, re-raise after the first byte; log paths keep only static route
+  segments; uvicorn's access log off and its error log through ours, the API writes its own access
+  line); `hide_parameters=True` on every engine; worker texts in answers through the redactor
+  (`RecordedText`, `RecordedDetail`); refusals that quoted the request fixed (unknown source,
+  unknown role, render/preview time zone, preview refusals (audit keeps the detail), export size).
+  Tests: `tests/integration/api/test_no_echo.py` (OpenAPI-driven canary in every route and field,
+  wrong shapes, keys, bodies, headers, bearer, host; responses AND the production logging output via
+  `tests/logcapture.py`), `tests/unit/api/test_safe_errors.py`,
+  `tests/integration/db/test_statement_errors.py`, a canary through the real uvicorn in the
+  production-install test, canaries in the preview refusal test. Found on the way: the existing
+  "no credential in logs" check used `caplog`, which never sees structlog lines in tests (structlog
+  is unconfigured there and prints to stdout); `tests/logcapture.py` installs the real setup.
+- Not done here by instruction: the M17 build itself.
+
+## Found while planning M17 (step 0 fixed the first; the rest is in ADR 0016 Amendment 1)
 - **The API reflects request values in 422 bodies, credentials included** (FastAPI's default
   `input` field): a token sent in a misplaced field or with the wrong type comes back in the response.
   Reproduced with the connections route's model shape. Plan step 0 (`docs/plans/m17.md` §0) fixes it
@@ -47,7 +74,7 @@ preview renderer **1.0.0**. M16 is complete; the items before M17 are done (belo
   callback's `tenant` parameter** (otherwise one customer can bind another customer's consented Entra
   tenant); revocation cuts in-flight downloads; revoked tokens end as `access_lost` units.
 
-## Next: the user's decisions on `docs/plans/m17.md` §12, then the ADR 0016 amendment, then step 0
+## Next: the open decisions (D4, D6, D7, D8, D9, D12, D14; confirm D13), then M17 step 2 (sessions, migration 0036)
 
 ## Done: the fixes before step 7 (2026-10-12; ADR 0018 §30; mutation round `m16-pre7`, 15/15)
 1. **Collation.** Every ORDER BY reaching output bytes reviewed; migration 0035: the remaining
