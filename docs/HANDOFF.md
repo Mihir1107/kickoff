@@ -1,18 +1,77 @@
-# Handoff (2026-10-12: the fixes before step 6 and M16 step 6 (preview) done; next: M16 step 7 (docs))
+# Handoff (2026-10-12: the fixes before step 7 and M16 step 7 (docs) done: M16 COMPLETE; next: wait for the user)
 
-This file alone is enough to build M16. Rules are in `CLAUDE.md` (read it first, in full). The M16
-design of record is **`docs/adr/0018-collection-report-and-preview.md`** (read it in full before any
-code); the rest of the plan of record is `docs/ARCHITECTURE.md`, `docs/adr/`, `docs/plans/phase-2.md`
-and `docs/BACKLOG.md`. `docs/plans/m16.md` is the superseded proposal (history only).
+This file alone is enough to continue. Rules are in `CLAUDE.md` (read it first, in full). The M16
+design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisions §1-§18, notes
+§19-§30, **every deviation in §31**); the rest of the plan of record is `docs/ARCHITECTURE.md`,
+`docs/adr/`, `docs/plans/phase-2.md` and `docs/BACKLOG.md`. M16 summary:
+`docs/runs/2026-10-12-m16-complete.md`. Expert guide: `docs/VERIFYING.md`. Demo: `docs/DEMO.md`.
 
 ## Current state
-**Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`. Migrations at head: **0034**.
+**Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`. Migrations at head: **0035**.
 Renderer **1.3.2**, dummy connector **0.5.0**, normalizer **0.3.0**, report renderer **1.4.0**,
-preview renderer **1.0.0**. M16 **steps 1-6 are built**; step 7 (docs) is next. Commits: `21a71e9`
-(the fixes before step 6, ADR 0018 §28; its CI run 38215193217 failed one test in shard 3: a test
-still asserting the old "unsettled units from the database" behaviour, outside the local selection;
-fixed in `879654b`), `0b1f665` (step 6, ADR 0018 §29). CI run **38217444718 green** on `0b1f665`
-(lint, typecheck, unit, production-install, report-pdf, 4 integration shards).
+preview renderer **1.0.0**. **M16 is complete** (steps 1-7). Commits this session: `1c3cc59` (the
+fixes before step 7, ADR 0018 §30), then the step 7 docs commit (see `git log`). CI run **38234557526 green** on `1c3cc59`
+(lint, typecheck, unit, production-install, report-pdf, 4 integration shards); the step 7 commit is
+docs and demo scripts only (its CI run: see `gh run list`).
+
+## Done: the fixes before step 7 (2026-10-12; ADR 0018 §30; mutation round `m16-pre7`, 15/15)
+1. **Collation.** Every ORDER BY reaching output bytes reviewed; migration 0035: the remaining
+   ordered text columns COLLATE "C" (items keys, storage keys, scope external ids, export
+   conversation/folder columns, and the same NAMES in every table: one rule the static test checks
+   without alias resolution); query-level COLLATE for the gap-reason union and the derivation
+   tie-break. Columns, not the database default (fixed at CREATE DATABASE; managed Postgres
+   defaults to en_US). Tests: `tests/integration/db/test_collation.py` (static: every ORDER BY term
+   vs a database migrated from scratch IN the test, so a migration break is visible) and
+   `tests/integration/corpus/test_collation.py` (the `custodians` and `slack_three_epochs` cases on a
+   tailored ICU database (`&C < G < D`, digits reversed; a precondition test proves it reorders) and
+   on the default one: RSMF = golden, units.jsonl + derived sections byte-identical, recompute OK,
+   package orders code-point). Found on the way: `job_started` lists scopes in the CALLER's order
+   (unit events index them by creation order), so `collection_scopes.external_id` order never
+   reached the chain (it orders the jobs API and planning); the first mutation of it was therefore
+   not catchable by the corpus run and is caught by the static test. Not covered dynamically: export
+   ingestion on the tailored database (the API fixtures are bound to the main database).
+2. **Verdict offline** (`recompute.chain_verdict`): clean by the chain = one start, one final event,
+   `job_finished` `completed`, no stop, every conversation-day unit reconciled and not
+   gap/surplus/access_lost/unverifiable/failed (the pipeline's own status rule). A report stating
+   clean (`job.clean` OR the banner's clean line) for a chain that is not FAILS; the other way passes
+   and prints the report's stated reasons. Unit + end-to-end tests (`test_reports.py`: a report made
+   by code calling every job clean, of a job with gaps, fails ONLY on the verdict; a clean job with a
+   retention gap passes and prints it).
+3. **Normalizer versions** in `job_started` and each `items_collected` batch (new jobs); the loader
+   states the chain's set; the verifier recomputes it (section `versions`). No report renderer bump
+   (same inputs, same bytes).
+4. BACKLOG: hostile-id conversations collected under the stand-in key; a standalone verifier
+   distribution.
+5. **A local failure diagnosed, not re-run to green:** the full local suite (1,123 passed) failed the
+   50k soak at teardown with two simultaneous 288/292 ms loop blocks in two workers at random library
+   frames. Reproduced: not unloaded (worst 55 ms), not in 3 runs under 8-core contention (worst
+   246 ms). Cause: host starvation (macOS reclaiming disk + Spotlight + Docker VM, load average 72).
+   Recorded in ADR 0015 §24.11 with the candidate mitigation should it recur on CI.
+
+## Done: M16 step 7, docs (2026-10-12)
+- `docs/VERIFYING.md` (for a third-party expert): obtaining and running `edisc-verify` (install
+  command tested in a scratch venv), what every check proves, what the report recomputation covers,
+  what is checked by digest only and why, how to read each kind of FAILED line, checking anchors
+  independently, limits.
+- Demo (`scripts/demo.sh`, `scripts/demo.py`, `docs/DEMO.md`): collection with a SIGKILL, render
+  through the API, render package, report (JSON, HTML, PDF in a report worker CONTAINER of the
+  freshly built report image; the API creates reports for its measured toolchain), preview, job
+  package, `edisc-verify` on all three (report recomputed from the job chain), two tampers that fail.
+  Three runs from clean: 62-70 s with the image cached; toolchain measured in the demo image =
+  the admitted `e24aecbb3dd4`. Found while making it run: macOS bash 3.2 + `set -u` rejects an empty
+  array (`${net[@]+"${net[@]}"}`); the job and render package routes REFERENCE archives/outputs by
+  default, so the demo asks for `archives=embed` / `outputs=embed`.
+- ADR 0018: status implemented, §30 (fixes), §31 (every deviation in one table). ADR 0017
+  amendment: runtime identities per output kind. CLAUDE.md M16 section consolidated.
+- `docs/runs/2026-10-12-m16-complete.md`: what was built, test and mutation counts, measurements,
+  open items.
+
+## Next: wait for the user
+Open items (details in the M16 summary and ADR 0018 §31): mentor questions (paper default, name
+visibility); before production: report image in a registry + `deploy/render-images.json` + report
+worker deployment files, ICC check against color.org; not built: export findings/tier in the
+report's access section, per-scope unit counts, 1M-unit measurement (cloud VM), report
+reproductions, standalone verifier, hostile ids collected under stand-in keys.
 
 ## Done: M16 step 6, the preview (2026-10-12; ADR 0018 §29; mutation round `m16-preview`, 11/11)
 `RenderLoader.day_slice` (day-bounded: items by their own time on the 0034 partial expression index,
@@ -86,18 +145,6 @@ file content, package; `report.read` every role, `report.create` admin + manager
 all caught. Also found: a latent sanitiser-fuzz expectation bug (CRLF: each CR gets its marker, so
 the page never holds a CRLF pair); the mutation runner treated "no test ran" as caught (now a
 problem).
-
-## Next: M16 step 7 (docs), then wait for the user
-ADR 0018 §16.7: a CLAUDE.md section for M16 (mostly done incrementally; consolidate), this file, the
-ADR 0017 amendment (runtime identities per output kind: the report queue
-`reports.r<renderer>.p<toolchain12>.u<unicode>.g<glyphs12>`), BACKLOG (report reproductions are
-listed). Production report creators need `EDISC_REPORT_TOOLCHAIN_ID` (the admitted image id) once
-reports carry PDFs outside test stacks. Local PDF work: `MIN_FREE_GB=9 make test-env-up` then
-`make test-report-pdf` (amd64 emulation, ~10 min; record new PDF goldens with
-`EDISC_RECORD_REPORT_PDF=1` after a report renderer bump; the image copies `tests/`, so do not edit the
-tree during its build). Undiagnosed: one 265 ms loop block in the API middleware during the first
-`export_lone_surrogates` run (see "Gotchas"). Disk on this laptop swings between 2 and 15 GB free; a
-report image rebuild costs ~1.5 GB of Docker VM space.
 
 ## Done: six fixes before step 3, then M16 step 3 (2026-10-10; ADR 0018 §21, §22; ADR 0015 §24.10)
 Fixes (`42951ba`): markers are ELEMENTS (`<span class="cp">`), so literal "[U+202E]" text differs

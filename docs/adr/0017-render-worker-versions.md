@@ -113,6 +113,27 @@ episodes); the rest is planned work (see "Implementation" at the end).
 5. The API accepts renders even when no current worker polls (unroutable episodes flag it); unknown or
    retired triples get 409 `renderer_unavailable`.
 
+## Amendment (2026-10-12, M16): runtime identities per output kind (ADR 0018 §6)
+The "renderer triple" generalises to a **runtime identity per output kind**. A production is
+promised byte for byte for its inputs and its identity, and runs only on the queue of that identity:
+
+| Kind | Identity | Queue | Recorded in |
+|---|---|---|---|
+| RSMF render | renderer, Unicode, tzdata | `renders.r<renderer>.u<unicode>.tz<tzdata>` | `renders`, `render_started`, file headers, golden key |
+| Collection report | report renderer, PDF toolchain id (SHA-256 of the image's layout path: Python distributions, native library and Debian versions, zlib, fonts, `fonts.conf`, print stylesheet, ICC profile; `none` outside the image, local/test/ci only), Unicode, glyph set (SHA-256 of the font coverage), and per report the paper size | `reports.r<renderer>.p<toolchain12>.u<unicode>.g<glyphs12>` | `reports`, `report_started`, golden keys (`tests/golden/report/…_glyphs-<g12>`, `tests/golden/report-pdf/…_toolchain-<id12>`) |
+
+- One image may serve several identities; the registry file (`deploy/render-images.json`, not
+  written yet: no registry) records per image digest the identities it serves, e.g.
+  `rsmf: r1.3.2-u15.0.0-tz2026e`, `report: r1.4.0-p<toolchain12>-u15.0.0-g<glyphs12>`.
+- The report image exists (`deploy/report-image/Dockerfile`, linux/amd64 only). It measures its own
+  toolchain id (`python -m edisc_worker.versions`), and its admission gate (HTML and PDF goldens
+  byte for byte, veraPDF, image-only mutation breaks) runs in the CI `report-pdf` job. The API and
+  maintenance workers create new reports with `EDISC_REPORT_TOOLCHAIN_ID` (the admitted id), so they
+  need not run in the image. The worker records `EDISC_IMAGE_DIGEST` in `report_started` when set.
+- Routing, the safety-net check in the activities, and `unroutable` episodes apply to reports as to
+  renders (`production_episodes`, keyed by kind and id). Report reproductions (§4 applied to
+  reports) are BACKLOG.
+
 ## Implementation (planned, not started)
 - `edisc_worker.versions` command (prints the triple), the image build that tags by triple and runs the
   oracle corpus and goldens inside the image, `deploy/render-images.json`.

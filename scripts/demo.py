@@ -1,7 +1,9 @@
-"""The demo driver, run by ``scripts/demo.sh`` against the disposable ``edisc-demo`` stack and a real API
-process. It seeds a tenant, uploads a synthetic Slack export, collects it while SIGKILLing the worker
-mid-job, shows reconciliation and custody, writes the offline custody package, and renders the job
-to RSMF through the step 3 loader. Each step prints what it proves."""
+"""The demo driver, run by ``scripts/demo.sh`` against the disposable ``edisc-demo`` stack, a real API
+process, a collection/render worker process and a report worker container (the report image). It
+seeds a tenant, uploads a synthetic Slack export, collects it while SIGKILLing the worker mid-job,
+shows reconciliation and custody, renders the job to RSMF, makes the collection report (JSON, HTML,
+PDF), previews a conversation-day and downloads the render, report and job packages, all through the
+API. Each step prints what it proves; ``demo.sh`` then runs ``edisc-verify`` and the tampers."""
 
 from __future__ import annotations
 
@@ -32,11 +34,7 @@ from edisc_connector_dummy.dialects.slack_export import ExportOptions, write_exp
 from edisc_connector_dummy.spec import DatasetSpec
 from edisc_core.kms import LocalKmsClient
 from edisc_core.settings import Settings
-from edisc_custody.export import export_package
 from edisc_db.session import create_engine, session_factory, tenant_tx
-from edisc_evidence.s3 import s3_client
-from edisc_renderers.rsmf import RenderOptions
-from edisc_worker.render_store import render_and_store
 
 AUDIENCE = "edisc-api"
 SPEC = DatasetSpec(
@@ -73,7 +71,8 @@ class Worker:
         self.starts += 1
         log = (self.logs / f"worker-{self.starts}.log").open("w")
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "edisc_worker", "--source", "slack_export", "--exports"],
+            [sys.executable, "-m", "edisc_worker", "--source", "slack_export", "--exports",
+             "--renders"],
             stdout=log, stderr=subprocess.STDOUT, env=os.environ.copy(),
         )  # fmt: skip
         info(f"worker started (pid {self.proc.pid}, log {log.name})")
@@ -114,6 +113,48 @@ async def poll_export(c: httpx.AsyncClient, export_id: str) -> dict[str, Any]:
             return export
         await asyncio.sleep(0.3)
     raise SystemExit("the export did not settle")
+
+
+async def poll(c: httpx.AsyncClient, path: str, done: Any, within: float = 300) -> dict[str, Any]:
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        r = await c.get(path)
+        r.raise_for_status()
+        doc: dict[str, Any] = r.json()
+        if done(doc):
+            return doc
+        await asyncio.sleep(0.5)
+    raise SystemExit(f"{path} did not settle within {within} s")
+
+
+async def pages(c: httpx.AsyncClient, path: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    cursor = None
+    while True:
+        r = await c.get(path, params={"limit": 200, **({"cursor": cursor} if cursor else {})})
+        r.raise_for_status()
+        out += r.json()["items"]
+        cursor = r.json().get("next_cursor")
+        if not cursor:
+            return out
+
+
+async def download(c: httpx.AsyncClient, path: str, dest: Path) -> None:
+    """A package: retried while the render or report is still sealing (409)."""
+    for _ in range(120):
+        async with c.stream("GET", path) as r:
+            if r.status_code == 409:
+                await asyncio.sleep(0.5)
+                continue
+            r.raise_for_status()
+            size = 0
+            with dest.open("wb") as f:
+                async for chunk in r.aiter_bytes():
+                    f.write(chunk)
+                    size += len(chunk)
+            check(size == int(r.headers["content-length"]), f"{dest}: short")
+            return
+    raise SystemExit(f"{path}: still not downloadable")
 
 
 async def run(out: Path, base: str) -> dict[str, Any]:
@@ -255,64 +296,79 @@ async def run(out: Path, base: str) -> dict[str, Any]:
         check(v["ok"], v)
         ok(f"{v['events']} events, {v['batches_checked']} batches, {v['items_checked']} items, {v['anchors_checked']} WORM anchors")  # fmt: skip
 
-        say("7. Offline custody package (for edisc-verify, no database needed)")
-        package = out / "package"
-        async with s3_client(settings) as s3:
-            await export_package(sessions, s3, settings, tenant_id=tenant.tenant_id, job_id=uuid.UUID(job_id), dest=package)  # fmt: skip
-        size = sum(p.stat().st_size for p in package.rglob("*") if p.is_file())
-        ok(f"{package} ({size / 2**20:.1f} MiB, export zip embedded)")
+        say("7. RSMF production: a render of the sealed job (its own workflow and custody stream)")
+        r = await c.post(f"/v1/jobs/{job_id}/renders", json={})
+        check(r.status_code == 201, r.text)
+        render_id = r.json()["id"]
+        render = await poll(c, f"/v1/renders/{render_id}", lambda x: x["status"] in ("completed", "failed", "refused"))  # fmt: skip
+        check(render["status"] == "completed", render)
+        files = await pages(c, f"/v1/renders/{render_id}/files")
+        rsmf_dir = out / "rsmf"
+        rsmf_dir.mkdir()
+        for f in files:
+            blob = (await c.get(f"/v1/renders/{render_id}/files/{f['ord']}/content")).content
+            check(hashlib.sha256(blob).hexdigest() == f["sha256"], f"{f['name']}: bytes differ")
+            (rsmf_dir / f["name"]).write_bytes(blob)
+        # a named channel reads best in Mail; the busiest one, fixed by the data
+        biggest = max(files, key=lambda f: (f["conversation_id"].startswith("C"), f["size"], f["name"]))  # fmt: skip
+        eml = out / (Path(biggest["name"]).stem + ".eml")
+        shutil.copyfile(rsmf_dir / biggest["name"], eml)
+        summary = render.get("summary") or {}
+        ok(f"{len(files)} RSMF files, each downloaded and checked against its recorded SHA-256")
+        ok(f"render summary: {json.dumps(summary, sort_keys=True)[:200]}")
+        ok(f"open in Mail: {eml}")
+
+        say("8. Render package: the production with its custody stream and the job's seal")
+        render_zip = out / "render.zip"
+        await download(c, f"/v1/renders/{render_id}/package?outputs=embed", render_zip)
+        ok(f"{render_zip} ({render_zip.stat().st_size / 2**20:.1f} MiB), audited and anchored before the first byte")  # fmt: skip
+
+        say("9. Collection report: report.json, the JSONL lists, report.html and report.pdf")
+        r = await c.post(f"/v1/jobs/{job_id}/reports", json={"reason": "demo: show the report"})
+        check(r.status_code == 201, r.text)
+        report_id = r.json()["id"]
+        info(f"report {report_id}")
+        report = await poll(c, f"/v1/reports/{report_id}", lambda x: x["sealed"] or x["status"] in ("failed", "refused"), within=600)  # fmt: skip
+        check((report["status"], report["sealed"]) == ("completed", True), report)
+        report_dir = out / "report"
+        report_dir.mkdir()
+        for f in (await c.get(f"/v1/reports/{report_id}/files")).json():
+            blob = (await c.get(f"/v1/reports/{report_id}/files/{f['name']}/content")).content
+            check(hashlib.sha256(blob).hexdigest() == f["sha256"], f"{f['name']}: bytes differ")
+            (report_dir / f["name"]).write_bytes(blob)
+        doc = json.loads((report_dir / "report.json").read_bytes())
+        check((report_dir / "report.pdf").is_file(), "the report has no PDF (report worker image?)")
+        ok(f"files: {', '.join(sorted(p.name for p in report_dir.iterdir()))}")
+        for line in doc["banner"]:
+            print(f"   {RED if not doc['job']['clean'] else GREEN}|{RESET} {line}", flush=True)
+        ok(f"job status {doc['job']['status']}, clean {doc['job']['clean']}; open {report_dir / 'report.pdf'}")  # fmt: skip
+        report_zip = out / "report.zip"
+        await download(c, f"/v1/reports/{report_id}/package", report_zip)
+        ok(f"report package {report_zip}")
 
         say(
-            "8. RSMF: render the sealed job (step 3 loader: pinned, verified inputs) into locked productions"
+            "10. Preview: one conversation-day as HTML, on demand (audited and anchored, never stored)"
         )
-        render_id = uuid.uuid4()
-        async with s3_client(settings) as s3:
-            rendered = await render_and_store(
-                sessions, s3, settings, tenant_id=tenant.tenant_id, job_id=uuid.UUID(job_id),
-                render_id=render_id, options=RenderOptions(),
-            )  # fmt: skip
-            rsmf_dir = out / "rsmf"
-            rsmf_dir.mkdir()
-            for f in rendered.files:
-                resp = await s3.get_object(Bucket=settings.s3_evidence_bucket, Key=f.storage_key, VersionId=f.version_id)  # fmt: skip
-                async with resp["Body"] as body:
-                    blob = await body.read()
-                check(
-                    hashlib.sha256(blob).hexdigest() == f.sha256, f"{f.name}: stored bytes differ"
-                )
-                (rsmf_dir / f.name).write_bytes(blob)
-        # a named channel reads best in Mail; the busiest one, fixed by the data
-        biggest = max(
-            rendered.files,
-            key=lambda f: (
-                f.record["conversation_id"].startswith("C"),
-                f.record["event_count"],
-                f.name,
-            ),
-        )
-        eml = out / (Path(biggest.name).stem + ".eml")
-        shutil.copyfile(rsmf_dir / biggest.name, eml)
-        r = rendered.reconciliation
-        ok(
-            f"{len(rendered.files)} RSMF files, every one locked, pinned and hash-checked on download"
-        )
-        ok(f"reconciliation: {r.items_in:,} items in = {r.events_out:,} events out, {r.context_events} thread-context events")  # fmt: skip
-        ok(
-            f"{rendered.verified_objects} archive entries re-read from the locked export and verified first"
-        )
-        ok(
-            f"{r.unavailable_attachments} attachment references to unfetched files appear as <file>.UNAVAILABLE.txt placeholders, named and with their reason"
-        )
-        ok(f"open in Mail: {eml}")
+        r = await c.get(f"/v1/jobs/{job_id}/preview", params={"conversation": biggest["conversation_id"], "day": biggest["day"]})  # fmt: skip
+        check(r.status_code == 200, r.text)
+        preview = out / "preview.html"
+        preview.write_bytes(r.content)
+        ok(f"{preview} ({biggest['conversation_id']} on {biggest['day']}; CSP {r.headers['content-security-policy'][:40]}...)")  # fmt: skip
+
+        say("11. Job custody package: the chain, every item, the evidence and the export zip")
+        job_zip = out / "job.zip"
+        await download(c, f"/v1/jobs/{job_id}/package?objects=embed&archives=embed", job_zip)
+        ok(f"{job_zip} ({job_zip.stat().st_size / 2**20:.1f} MiB, export zip embedded)")
 
         (out / "summary.json").write_text(json.dumps({
             "tenant": sub, "job_id": job_id, "status": job["status"], "killed_at": killed_at,
-            "messages": linked, "duplicates": dupes, "custody": v, "render_id": str(render_id),
-            "rsmf_files": len(rendered.files), "reconciliation": r.as_payload(), "eml": str(eml),
+            "messages": linked, "duplicates": dupes, "custody": v, "render_id": render_id,
+            "rsmf_files": len(files), "render_summary": summary, "report_id": report_id,
+            "report_clean": doc["job"]["clean"], "eml": str(eml),
             "seconds": round(time.monotonic() - started, 1),
         }, indent=2) + "\n")  # fmt: skip
         await c.aclose()
-        return {"package": str(package)}
+        return {"job": str(job_zip)}
     finally:
         worker.stop()
         await engine.dispose()
