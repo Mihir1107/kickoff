@@ -9,8 +9,10 @@ and `docs/BACKLOG.md`. `docs/plans/m16.md` is the superseded proposal (history o
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`. Migrations at head: **0034**.
 Renderer **1.3.2**, dummy connector **0.5.0**, normalizer **0.3.0**, report renderer **1.4.0**,
 preview renderer **1.0.0**. M16 **steps 1-6 are built**; step 7 (docs) is next. Commits: `21a71e9`
-(the fixes before step 6, ADR 0018 §28; CI run 38215193217) and the step 6 commit after it (ADR 0018
-§29; see `git log` and its CI run).
+(the fixes before step 6, ADR 0018 §28; its CI run 38215193217 failed one test in shard 3: a test
+still asserting the old "unsettled units from the database" behaviour, outside the local selection;
+fixed in `879654b`), `0b1f665` (step 6, ADR 0018 §29). CI run **38217444718 green** on `0b1f665`
+(lint, typecheck, unit, production-install, report-pdf, 4 integration shards).
 
 ## Done: M16 step 6, the preview (2026-10-12; ADR 0018 §29; mutation round `m16-preview`, 11/11)
 `RenderLoader.day_slice` (day-bounded: items by their own time on the 0034 partial expression index,
