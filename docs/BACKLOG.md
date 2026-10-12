@@ -86,8 +86,6 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
   `conversation_snapshot` items through the directory unit: name, type, topic, purpose, members,
   archived state (channels are renamed; every state is kept). Normalizer, loader and renderer already
   handle them, and the dummy connector emits them (ADR 0004 amendment 2026-10-04; ADR 0015 §13).
-- `edisc-verify` on JOB custody packages (`verify_package`) does not flag files the manifest does not
-  account for; make it strict like render packages (with the same `--tolerate-os-metadata` rule).
 - Log redaction (`edisc_core.redaction.register_secret`) recompiles one regex over EVERY secret the
   process has registered, on each new secret, and `redact_text` runs it on every log line: both grow
   with the number of decrypted tokens a long-lived worker has seen (66-87 ms per registration on the

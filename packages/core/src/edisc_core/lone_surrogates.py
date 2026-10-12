@@ -62,6 +62,17 @@ def recorded_text(text: str, limit: int) -> tuple[str, dict[str, list[int]]]:
     return replacement(cut), ({"utf16": utf16_units(cut)} if has_lone(cut) else {})
 
 
+SUBSTITUTE_PREFIX = "lone-surrogate:"
+
+
+def substitute_key(value: str) -> str:
+    """A stand-in key for a STRUCTURAL source value holding a lone surrogate (a conversation id),
+    which can be neither stored nor keyed (ADR 0018 §28): ``lone-surrogate:`` + its exact UTF-16 code
+    units in hex, dot-separated. Lossless, ASCII, no ``/``, never equal to a source id. Used only to
+    name the unit that reports the value as a gap; nothing is collected under it."""
+    return SUBSTITUTE_PREFIX + ".".join(f"{u:04x}" for u in utf16_units(value))
+
+
 def _pointer_token(key: str) -> str:
     return key.replace("~", "~0").replace("/", "~1")
 

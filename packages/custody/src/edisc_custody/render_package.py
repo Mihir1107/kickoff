@@ -57,11 +57,17 @@ from edisc_custody.chain import (
     VerificationReport,
     anchor_key,
 )
-from edisc_custody.package import PackageFormatError, PackageReport, verify_package
+from edisc_custody.package import (
+    PackageFormatError,
+    PackageReport,
+    read_manifest,
+    verify_package,
+)
 from edisc_custody.package_source import (
     DirectorySource,
     PackageSource,
     ZipSource,
+    is_os_metadata,
     lines,
     open_source,
     read_all,
@@ -153,18 +159,6 @@ def _sha256_entry(source: PackageSource, name: str) -> tuple[str, int]:
     return h.hexdigest(), size
 
 
-def is_os_metadata(name: str) -> bool:
-    """Files an operating system may drop into an extracted folder: ``.DS_Store``, AppleDouble
-    ``._*``, anything under ``__MACOSX/``, ``Thumbs.db``, ``desktop.ini``. Nothing else."""
-    parts = name.split("/")
-    base = parts[-1]
-    return (
-        "__MACOSX" in parts[:-1]
-        or base in (".DS_Store", "Thumbs.db", "desktop.ini")
-        or base.startswith("._")
-    )
-
-
 def verify_render_package(
     root: Path,
     outputs: Sequence[Path] = (),
@@ -181,14 +175,18 @@ def verify_render_package(
     source = open_source(root)
     tolerate = tolerate_os_metadata and not isinstance(source, ZipSource)
     try:
-        return _verify(source, outputs, job_package, tolerate)
+        return _verify(source, outputs, job_package, tolerate, tolerate_os_metadata)
     finally:
         if isinstance(source, ZipSource):
             source.close()
 
 
 def _verify(
-    source: PackageSource, outputs: Sequence[Path], job_package: Path | None, tolerate: bool
+    source: PackageSource,
+    outputs: Sequence[Path],
+    job_package: Path | None,
+    tolerate: bool,
+    tolerate_job: bool = False,
 ) -> RenderPackageReport:
     report = RenderPackageReport()
     manifest_bytes = read_all(source, "manifest.json")
@@ -323,8 +321,8 @@ def _verify(
 
     # 5. optionally, the job itself
     if job_package is not None:
-        report.job = verify_package(job_package)
-        jm = json.loads((job_package / "manifest.json").read_bytes())
+        report.job = verify_package(job_package, tolerate_os_metadata=tolerate_job)
+        jm = read_manifest(job_package)
         if jm.get("stream_id") != job_id or jm.get("tenant_id") != tenant_id:
             report.errors.append("job package: belongs to another job or tenant")
         elif reference is not None:

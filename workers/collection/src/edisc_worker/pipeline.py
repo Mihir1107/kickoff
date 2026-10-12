@@ -44,6 +44,7 @@ from edisc_connectors_base.types import (
     FileUnavailableError,
     RawBatch,
     ThreadParentPolicy,
+    UncollectableUnitError,
     WorkUnit,
 )
 from edisc_core.ids import new_id
@@ -84,6 +85,11 @@ DIRECTORY_UNIT = "directory"
 # Pipeline._messages_of_day for why there is no day filter). Conversation-wide, not unit-wide: with
 # several scopes a message of this day may have been linked first as thread context by a neighbouring
 # day's unit (job_items holds one link per item), and it still counts for this day.
+# gap_reasons := sorted distinct union with :gr (text[])
+_ADD_GAP_REASONS = (
+    "(SELECT coalesce(array_agg(DISTINCT r ORDER BY r), '{}') FROM"
+    " unnest(gap_reasons || CAST(:gr AS text[])) AS r)"
+)
 _UNIT_LINKED_ITEMS = (
     "SELECT source_item_id, item_type, sent_at FROM items WHERE id = ANY(ARRAY("
     "SELECT ji.item_id FROM job_items ji WHERE ji.job_id = :j AND ji.unit_key IN ("
@@ -99,6 +105,11 @@ _EARLIER_CLEAN_ITEMS = (
     " AND wu.file_gaps = 0))"
 )
 ACTOR = "collection-worker"
+# `job_started.unit_event_format`: 2 = every unit event carries the unit's database-only facts (kind,
+# conversation, scopes, access-lost reason, gap reasons) and units left unsettled at the end are
+# recorded (`units_unsettled`), so the report's unit rows come from the chain alone (ADR 0018 §28)
+UNIT_EVENT_FORMAT = 2
+UNSETTLED_BATCH = 500  # units per `units_unsettled` event
 
 
 class NoScopeError(ValueError):
@@ -346,6 +357,7 @@ class Pipeline:
                 "granted_scopes": sorted(access.granted_scopes or []),
                 "blind_spots": None if access.blind_spots is None else list(access.blind_spots),
                 "unit_day_zone": "UTC",
+                "unit_event_format": UNIT_EVENT_FORMAT,
                 **(
                     {"export": {"id": str(access.export_id), "sha256": access.export_sha256}}
                     if access.export_id is not None
@@ -640,6 +652,9 @@ class Pipeline:
         except ConversationInaccessibleError as exc:
             await self._record_access_lost(tenant_id, job_id, row, conn, exc, scope)
             return CollectOutcome.DONE
+        except UncollectableUnitError as exc:
+            await self._record_uncollectable(tenant_id, job_id, unit_key, exc.reason)
+            return CollectOutcome.DONE
         except _StopWaiting as stop:
             return stop.outcome
         else:
@@ -834,7 +849,9 @@ class Pipeline:
                 )
                 extra: tuple[Derived, ...] = ()
             else:
-                subjects = await asyncio.to_thread(message_page_subjects, batch.body, ctx=ctx)
+                subjects = await asyncio.to_thread(
+                    message_page_subjects, batch.body, ctx=ctx, select=batch.select
+                )
                 if current.pages_done == 0 and batch.kind is BatchKind.HISTORY:
                     subjects = subjects | {
                         access_subject(ctx.workspace_id, ctx.conversation_id or "")
@@ -877,9 +894,11 @@ class Pipeline:
             )
             await s.execute(
                 text(
-                    "UPDATE work_units SET cursor = :c, pages_done = pages_done + 1, file_gaps = file_gaps + :g,"
+                    "UPDATE work_units SET cursor = :c, pages_done = pages_done + 1, file_gaps = file_gaps + :g,"  # noqa: S608
                     " archive_accounted = coalesce(CAST(:acc AS integer), archive_accounted),"
-                    " day_anomalies = day_anomalies + :anom,"
+                    " day_anomalies = day_anomalies + :anom, gap_reasons = "
+                    + _ADD_GAP_REASONS
+                    + ","
                     " last_page_evidence_id = CASE WHEN :hist THEN CAST(:ev AS uuid) ELSE last_page_evidence_id END,"
                     " last_page_fragment_hash = CASE WHEN :hist THEN CAST(:frag AS text) ELSE last_page_fragment_hash END,"
                     " updated_at = now() WHERE job_id = :j AND unit_key = :k"
@@ -892,6 +911,7 @@ class Pipeline:
                     "frag": fragment,
                     "acc": None if archive_counts is None else archive_counts[0],
                     "anom": 0 if archive_counts is None else archive_counts[1],
+                    "gr": sorted(set(batch.gaps)),
                     "j": job_id,
                     "k": unit_key,
                 },
@@ -1035,6 +1055,61 @@ class Pipeline:
             self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=job_id
         )
 
+    async def _record_uncollectable(
+        self, tenant_id: uuid.UUID, job_id: uuid.UUID, unit_key: str, reason: str
+    ) -> None:
+        """A unit whose messages cannot be collected as items (ADR 0018 §28): it stays in the job,
+        running with the reason recorded, and reconciles as a GAP (expected from the source, nothing
+        collected). Idempotent."""
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            await s.execute(
+                text(
+                    "UPDATE work_units SET status = 'running', gap_reasons = "  # noqa: S608
+                    + _ADD_GAP_REASONS
+                    + ","
+                    " updated_at = now() WHERE job_id = :j AND unit_key = :k"
+                    " AND status NOT IN ('done', 'failed')"
+                ),
+                {"gr": [reason], "j": job_id, "k": unit_key},
+            )
+
+    async def unit_detail(
+        self, s: AsyncSession, job_id: uuid.UUID, rows: Sequence[Any]
+    ) -> dict[str, dict[str, Any]]:
+        """The database-only facts of these units, as their custody events record them (format 2):
+        kind, conversation, the covering scopes as indexes into `job_started.scopes` (scope rows in
+        creation order, as the report states them), the access-lost reason, the gap reasons."""
+        order: list[uuid.UUID] = list(
+            (
+                await s.execute(
+                    text("SELECT id FROM collection_scopes WHERE job_id = :j ORDER BY id"),
+                    {"j": job_id},
+                )
+            ).scalars()
+        )
+        index = {sid: i for i, sid in enumerate(order)}
+        covering: dict[str, list[int]] = {}
+        for r in (
+            await s.execute(
+                text(
+                    "SELECT unit_key, scope_id FROM work_unit_scopes WHERE job_id = :j"
+                    " AND unit_key = ANY(:u)"
+                ),
+                {"j": job_id, "u": [r.unit_key for r in rows]},
+            )
+        ).all():
+            covering.setdefault(r.unit_key, []).append(index[r.scope_id])
+        return {
+            r.unit_key: {
+                "kind": r.kind,
+                "conversation_id": r.conversation_id,
+                "scopes": sorted(covering.get(r.unit_key, [])),
+                "access_lost_reason": r.access_lost_reason,
+                "gap_reasons": sorted(r.gap_reasons or []),
+            }
+            for r in rows
+        }
+
     # ------------------------------------------------------------------ unit finalize
     async def finalize_unit(
         self, *, tenant_id: uuid.UUID, job_id: uuid.UUID, unit_key: str, conn: Connection
@@ -1055,13 +1130,14 @@ class Pipeline:
                 row.expected_count is not None
                 and row.archive_accounted == row.expected_count
                 and row.file_gaps == 0
+                and not row.gap_reasons
             )
             recon = ReconStatus.MATCHED_AGAINST_ARCHIVE.value if matched else ReconStatus.GAP.value
         else:
             collected = await self._collected(tenant_id, job_id, unit_key, row.day)
             if row.expected_count is None:
                 recon = ReconStatus.UNVERIFIABLE.value
-            elif collected < row.expected_count or row.file_gaps > 0:
+            elif collected < row.expected_count or row.file_gaps > 0 or row.gap_reasons:
                 recon = ReconStatus.GAP.value
             elif collected > row.expected_count:
                 recon = ReconStatus.SURPLUS.value
@@ -1103,6 +1179,7 @@ class Pipeline:
             ).one()
             if locked.status == "done":
                 return recon
+            detail = (await self.unit_detail(s, job_id, [row]))[unit_key]
             if last_page is not None:
                 scope = await self.unit_scope(tenant_id, job_id, unit_key)
                 ctx = scope.context(
@@ -1175,6 +1252,7 @@ class Pipeline:
                         if self.connector.archive_backed and row.kind != "directory"
                         else {}
                     ),
+                    **detail,
                 },
                 anchor_every=self.anchor_every,
             )
@@ -1251,13 +1329,15 @@ class Pipeline:
                 await s.execute(
                     text(
                         "UPDATE work_units SET status = 'failed', recon_status = 'failed', last_error = :e, updated_at = now()"
-                        " WHERE job_id = :j AND unit_key = :k AND status NOT IN ('done', 'failed') RETURNING unit_key"
+                        " WHERE job_id = :j AND unit_key = :k AND status NOT IN ('done', 'failed')"
+                        " RETURNING unit_key, kind, conversation_id, access_lost_reason, gap_reasons"
                     ),
                     {"e": replacement(f"{error_type}: {error}"[:4000]), "j": job_id, "k": unit_key},
                 )
             ).first()
             if done is None:
                 return
+            detail = (await self.unit_detail(s, job_id, [done]))[unit_key]
             await append(
                 s,
                 tenant_id=tenant_id,
@@ -1270,6 +1350,7 @@ class Pipeline:
                     "error_type": error_type,
                     "error": chain_error,
                     **{f"error_{k}": v for k, v in exact.items()},
+                    **detail,
                 },
                 anchor_every=self.anchor_every,
             )
@@ -1520,7 +1601,9 @@ class Pipeline:
                 units = (
                     await s.execute(
                         text(
-                            "SELECT unit_key, kind, status, recon_status FROM work_units WHERE job_id = :j"
+                            "SELECT unit_key, kind, conversation_id, status, recon_status, expected_count,"
+                            " collected_count, file_gaps, access_lost_reason, gap_reasons"
+                            " FROM work_units WHERE job_id = :j ORDER BY unit_key"
                         ),
                         {"j": job_id},
                     )
@@ -1563,6 +1646,34 @@ class Pipeline:
                     ),  # integer: custody payloads never carry floats
                     "stop_reason": job.stop_reason,
                 }
+                # units no reconciliation or failure event settled (a cancelled or failed job):
+                # recorded too, so every unit the report states is in the chain (ADR 0018 §28)
+                unsettled = [u for u in units if u.status not in ("done", "failed")]
+                details = await self.unit_detail(s, job_id, unsettled) if unsettled else {}
+                for at in range(0, len(unsettled), UNSETTLED_BATCH):
+                    await append(
+                        s,
+                        tenant_id=tenant_id,
+                        stream_id=job_id,
+                        job_id=job_id,
+                        event_type="units_unsettled",
+                        actor=ACTOR,
+                        payload={
+                            "units": [
+                                {
+                                    "unit_key": u.unit_key,
+                                    "status": u.status,
+                                    "recon_status": u.recon_status,
+                                    "expected": u.expected_count,
+                                    "collected": u.collected_count,
+                                    "file_gaps": u.file_gaps,
+                                    **details[u.unit_key],
+                                }
+                                for u in unsettled[at : at + UNSETTLED_BATCH]
+                            ]
+                        },
+                        anchor_every=self.anchor_every,
+                    )
                 await append(
                     s,
                     tenant_id=tenant_id,

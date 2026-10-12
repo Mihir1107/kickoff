@@ -144,14 +144,40 @@ def test_os_litter() -> None:
     assert not is_junk("general/2026-01-05.json") and not is_junk("MACOSX.json")
 
 
-def test_a_record_naming_a_conversation_with_a_lone_surrogate_is_invalid_not_stored() -> None:
-    """Escaped JSON can hold a lone surrogate (ADR 0018 §23): it names no storable id or zip folder,
-    so the record is invalid (counted in the findings), never inserted, never a crash."""
+def test_a_name_with_a_lone_surrogate_is_kept_exactly_never_refused() -> None:
+    """Names are text (ADR 0018 §28): stored as the replacement text with the exact code units; the
+    folder is what a UTF-8 writer makes of the name (U+FFFD per surrogate). Nothing is refused."""
+    lone = chr(0xD83D)
+    rec = conversation_record("channel", {"id": "C1", "name": "gen" + lone})
+    assert rec is not None and rec.refused is None and rec.conversation_id == "C1"
+    assert rec.name == rec.folder == "gen\ufffd"
+    assert rec.exact == {"/name": [ord("g"), ord("e"), ord("n"), 0xD83D]}
+    # a real U+FFFD in another channel's name gives the same folder: a duplicate the findings name
+    other = conversation_record("channel", {"id": "C2", "name": "gen\ufffd"})
+    assert other is not None and other.folder == rec.folder and other.exact == {}
+
+
+def test_an_id_or_team_with_a_lone_surrogate_refuses_the_conversation_under_a_stand_in() -> None:
+    """Structural values (ADR 0018 §28): the conversation is listed under a stand-in id holding the
+    exact code units, and refused with the reason, so its units become gaps; never dropped."""
     lone = chr(0xDC00)
-    assert conversation_record("channel", {"id": "C" + lone, "name": "general"}) is None
-    assert conversation_record("channel", {"id": "C1", "name": "gen" + lone}) is None
-    rec = conversation_record("channel", {"id": "C1", "name": "general", "team_id": "T" + lone})
-    assert rec is not None and rec.team_id is None  # an unusable team is not taken
+    rec = conversation_record("channel", {"id": "C" + lone, "name": "general"})
+    assert rec is not None and rec.refused == "conversation_id_lone_surrogate"
+    assert rec.conversation_id == "lone-surrogate:0043.dc00" and rec.folder == "general"
+    assert rec.exact == {"/id": [0x43, 0xDC00]}
+    dm = conversation_record("dm", {"id": "D" + lone})  # a DM's folder is its id
+    assert dm is not None and dm.folder == "D\ufffd" and dm.refused is not None
+    team = conversation_record("channel", {"id": "C1", "name": "general", "team_id": "T" + lone})
+    assert team is not None and team.refused == "team_id_lone_surrogate" and team.team_id is None
+    assert team.exact == {"/team_id": [0x54, 0xDC00]} and team.conversation_id == "C1"
+    # the first team field present decides; a later valid one never stands in for it
+    both = {"id": "C1", "name": "g", "context_team_id": "T" + lone, "team_id": "T1"}
+    assert conversation_record("channel", both).refused == "team_id_lone_surrogate"  # type: ignore[union-attr]
+    # the export's workspace id holds one: conversations without a team of their own are refused
+    ws = conversation_record("channel", {"id": "C1", "name": "g"}, workspace_unkeyable=True)
+    assert ws is not None and ws.refused == "workspace_id_lone_surrogate"
+    own = {"id": "C1", "name": "g", "team_id": "T1"}
+    assert conversation_record("channel", own, workspace_unkeyable=True).refused is None  # type: ignore[union-attr]
 
 
 def test_a_key_with_a_lone_surrogate_is_not_storable() -> None:

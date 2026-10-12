@@ -238,7 +238,13 @@ async def test_the_package_is_deterministic_and_recomputes_from_the_job_package(
     assert "not recomputed (no --job-package given)" in out
     code, out = _cli(tmp_path / "report.zip", "--job-package", tmp_path / "job.zip")
     assert code == 0, out
-    assert "RECOMPUTED from the job chain: identical" in out
+    # a job recorded with its unit facts (ADR 0018 §28): every unit row comes from the chain, and
+    # units.jsonl is rebuilt from the job package byte for byte
+    with zipfile.ZipFile(io.BytesIO(packages[0].content)) as zf:
+        rows = zf.read("outputs/units.jsonl").splitlines()
+    assert rows and all(b'"source":"job_chain"' in r for r in rows)
+    assert f"units.jsonl byte for byte ({len(rows)} rows)" in out, out
+    assert "taken as written" not in out
     reads = await _audits(api, tenant, "audit.report_package_read")
     assert [e.payload["manifest_sha256"] for e in reads] == [
         p.headers["x-manifest-sha256"] for p in packages
@@ -295,7 +301,35 @@ async def test_a_report_built_to_other_facts_than_the_chain_fails_the_recomputat
     assert _cli(r)[0] == 0  # alone, the package is consistent
     code, out = _cli(r, "--job-package", j)
     assert code == 1, out
-    assert "recomputed from the job chain: unit" in out and "expected" in out, out
+    assert "recomputed from the job chain: units.jsonl" in out and "expected" in out, out
+
+
+async def test_a_unit_row_stating_other_database_facts_fails_the_byte_for_byte_recomputation(
+    api: Api, tenant: TenantCtx, report_worker: None, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # fmt: skip
+    """Since §28 the chain records every unit's scopes, kind, conversation, access-lost reason and
+    gap reasons: a report stating other scopes (no count, exception or section changes with them)
+    is caught only by rebuilding units.jsonl byte for byte, and it is."""
+    real = report_model.unit_row
+
+    def lying(row: Any, **kw: Any) -> dict[str, Any]:
+        out = real(row, **kw)
+        if out["source"] == "job_chain":
+            out["scopes"] = [7]
+        return out
+
+    monkeypatch.setattr(report_model, "unit_row", lying)
+    _, job_id, report = await _reported(api, tenant)
+    async with api.client(tenant.subdomain, tenant.token(api.settings)) as c:
+        rpkg = (await c.get(f"/v1/reports/{report['id']}/package")).content
+        jpkg = (await c.get(f"/v1/jobs/{job_id}/package", params={"objects": "omit"})).content
+    r, j = _unzip(rpkg, tmp_path / "r"), _unzip(jpkg, tmp_path / "j")
+    assert _cli(r)[0] == 0
+    code, out = _cli(r, "--job-package", j)
+    assert code == 1, out
+    assert "units.jsonl: the file is not what the chain gives" in out, out
+    assert "scopes: written [7], recomputed [0]" in out, out
 
 
 def _unzip(data: bytes, dest: Path) -> Path:

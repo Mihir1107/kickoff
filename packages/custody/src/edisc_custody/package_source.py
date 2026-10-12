@@ -211,5 +211,18 @@ def is_zip(path: Path) -> bool:
         return False
 
 
+def is_os_metadata(name: str) -> bool:
+    """Files an operating system may drop into an extracted folder: ``.DS_Store``, AppleDouble
+    ``._*``, anything under ``__MACOSX/``, ``Thumbs.db``, ``desktop.ini``. Nothing else. Only ever
+    tolerated in a DIRECTORY package (``--tolerate-os-metadata``), never in a zip."""
+    parts = name.split("/")
+    base = parts[-1]
+    return (
+        "__MACOSX" in parts[:-1]
+        or base in (".DS_Store", "Thumbs.db", "desktop.ini")
+        or base.startswith("._")
+    )
+
+
 def open_source(path: Path) -> DirectorySource | ZipSource:
     return ZipSource(path) if is_zip(path) else DirectorySource(path)

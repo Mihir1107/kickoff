@@ -428,3 +428,59 @@ async def test_grid_items_are_namespaced_by_their_conversation_team(
         f"T2/C2/{_ts(5, 9)}",
         f"T3/C3/{_ts(5, 9)}",
     }
+
+
+# ------------------------------------------------------------------ hostile team ids (ADR 0018 §28)
+async def test_team_ids_with_lone_surrogates_refuse_their_conversations_as_gaps(
+    api: Api, tenant: TenantCtx
+) -> None:
+    """A team id names the workspace an item is keyed by: one holding a lone surrogate cannot. A
+    conversation naming such a team, and (when such a team WINS the users.json vote, so the export's
+    workspace has no usable id) every conversation without a team of its own, is refused: each of its
+    day files is a GAP unit with the reason, none of its messages an item, never a guess."""
+    lone_a, lone_b = "T" + chr(0xD83D), "T" + chr(0xDC00)
+    users = [{"id": "U1", "team_id": lone_a, "name": "a"}, {"id": "U2", "team_id": lone_a,
+             "name": "b"}, {"id": "U3", "team_id": "T1", "name": "c"}]  # fmt: skip
+    channels = [{"id": "C1", "name": "general"}, {"id": "C2", "name": "random", "team_id": "T2"},
+                {"id": "C3", "name": "third", "context_team_id": lone_b}]  # fmt: skip
+    files = {
+        "general/2026-01-05.json": [_msg(_ts(5, 9), "one"), _msg(_ts(5, 10), "two")],
+        "random/2026-01-05.json": [_msg(_ts(5, 9), "kept")],
+        "third/2026-01-05.json": [_msg(_ts(5, 11), "three")],
+    }
+    buf = io.BytesIO()
+    zw = ZipWriter(buf)
+    zw.add("users.json", json.dumps(users).encode())  # escaped: "\ud83d", like a JSON encoder
+    zw.add("channels.json", json.dumps(channels).encode())
+    for name, messages in files.items():
+        zw.add(name, json.dumps(messages).encode())
+    zw.close()
+    async with collection_workers(api, FileHost()) as exp:
+        w = await make_world(exp, tenant)
+        async with exp.client(tenant.subdomain, tenant.token(exp.settings)) as c:
+            export = await _export_connection(c, w.client, buf.getvalue())
+            findings = export["findings"]
+            assert findings["workspace_id_lone_surrogate"] is True
+            assert findings["users_team_id_lone_surrogate"] == 2
+            assert findings["conversations_refused"] == {
+                "team_id_lone_surrogate": 1, "workspace_id_lone_surrogate": 1,
+            }  # fmt: skip
+            job = await _job(c, w.matter, {"connection_id": export["connection_id"],
+                                           "scopes": [_scope(datetime(2026, 1, 5, tzinfo=UTC), 1)]})  # fmt: skip
+        assert job["status"] == "completed_with_gaps"
+        async with tenant_tx(exp.sessions, tenant.tenant_id) as s:
+            rows = (await s.execute(text(
+                "SELECT * FROM work_units WHERE job_id = :j AND kind = 'conversation_day'"
+            ), {"j": uuid.UUID(job["id"])})).all()  # fmt: skip
+            units = {r.conversation_id: r for r in rows}
+        linked = await _linked(exp, tenant, job["id"])
+    assert set(units) == {"C1", "C2", "C3"}
+    want = {"C1": (2, 0, "gap", ["workspace_id_lone_surrogate"]),
+            "C2": (1, 1, "matched_against_archive", []),
+            "C3": (1, 0, "gap", ["team_id_lone_surrogate"])}  # fmt: skip
+    for conv, (expected, collected, recon, reasons) in want.items():
+        u = units[conv]
+        assert (u.expected_count, u.collected_count, u.recon_status, u.gap_reasons) == (
+            expected, collected, recon, reasons,
+        ), conv  # fmt: skip
+    assert {m.split("/")[1] for m in linked} == {"C2"}  # only the keyable conversation's message

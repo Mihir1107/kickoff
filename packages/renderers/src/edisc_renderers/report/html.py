@@ -217,10 +217,15 @@ def _counts_table(rows: Sequence[Mapping[str, Any]]) -> str:
     return table(["value", "count"], [[user(r["value"]), num(r["count"])] for r in rows])
 
 
+def _listed(value: Any) -> Any:
+    """A list cell (gap reasons): its values joined, in order."""
+    return ", ".join(str(v) for v in value) if isinstance(value, list) else value
+
+
 def _capped(section: Mapping[str, Any], columns: Sequence[tuple[str, str]], file_name: str) -> str:
     """A severity-ordered capped list: its rows (worst first, already selected by the model), the
     exact total, and -- when the cap hid some -- where the rest is, by file and SHA-256 (§4.6)."""
-    rows = [[user(r.get(key)) for _, key in columns] for r in section.get("rows", [])]
+    rows = [[user(_listed(r.get(key))) for _, key in columns] for r in section.get("rows", [])]
     out = [
         el("p", f"{num(section.get('total', 0))} total; showing the {num(len(rows))} worst"),
         table([h for h, _ in columns], rows),
@@ -272,7 +277,8 @@ def report_html(doc: Mapping[str, Any]) -> bytes:
     doc = exact_document(doc)
     exc = doc["exceptions"]
     unit_cols = [("status", "recon_status"), ("unit", "unit_key"), ("expected", "expected"),
-                 ("collected", "collected"), ("error", "error")]  # fmt: skip
+                 ("collected", "collected"), ("gap reasons", "gap_reasons"),
+                 ("access lost", "access_lost_reason"), ("error", "error")]  # fmt: skip
     obs_cols = [("kind", "kind"), ("unit", "unit_key"), ("item", "item_id"),
                 ("file", "file_id"), ("reason", "reason")]  # fmt: skip
     conv_cols = [("worst status", "worst_status"), ("conversation", "conversation_id"),

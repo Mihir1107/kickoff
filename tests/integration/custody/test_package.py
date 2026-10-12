@@ -6,6 +6,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -22,10 +23,10 @@ from .conftest import run_job
 Sessions = async_sessionmaker[AsyncSession]
 
 
-def _cli(pkg: Path) -> tuple[int, str]:
+def _cli(pkg: Path, *args: str) -> tuple[int, str]:
     """Run the verifier exactly as an expert would: separate process, no DB/S3 settings in its env."""
     proc = subprocess.run(
-        [sys.executable, "-m", "edisc_custody.cli", str(pkg)],
+        [sys.executable, "-m", "edisc_custody.cli", str(pkg), *args],
         capture_output=True,
         text=True,
         env={"PATH": "/usr/bin:/bin"},
@@ -149,3 +150,96 @@ async def test_dropping_the_seal_anchor_fails_a_finalized_package(package: Path)
 def test_unreadable_package_exits_2(tmp_path: Path) -> None:
     code, out = _cli(tmp_path)
     assert code == 2, out
+
+
+# ------------------------------------------------------------------ strict, and zips read in place
+NO_WRITES = """
+import os, sys
+from edisc_custody.cli import main
+WRITE = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC
+def hook(event, args):
+    if event == "open" and (
+        (isinstance(args[1], str) and any(c in args[1] for c in "wax+")) or (args[2] & WRITE)
+    ):
+        raise PermissionError(f"the verifier wrote: {args[0]!r}")
+    if event in ("os.mkdir", "os.rename", "os.remove", "os.link", "os.symlink", "shutil.copyfile",
+                 "tempfile.mkstemp", "tempfile.mkdtemp"):
+        raise PermissionError(f"the verifier changed the filesystem: {event} {args!r}")
+sys.addaudithook(hook)
+sys.exit(main(sys.argv[1:]))
+"""
+
+
+def cli_without_writes(*args: str | Path) -> tuple[int, str]:
+    """The verifier with an audit hook that fails on any file write, directory or temp file: a zip
+    package is read where it lies, never copied out (ADR 0018 §28)."""
+    proc = subprocess.run(
+        [sys.executable, "-B", "-c", NO_WRITES, *map(str, args)],
+        capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"}, timeout=120, check=False,
+    )  # fmt: skip
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def _hook_control(target: Path) -> tuple[int, str]:
+    script = NO_WRITES.replace("sys.exit(main(sys.argv[1:]))", "open(sys.argv[1], 'wb').close()")
+    proc = subprocess.run(
+        [sys.executable, "-B", "-c", script, str(target)],
+        capture_output=True, text=True, timeout=60, check=False,
+    )  # fmt: skip
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def zip_directory(src: Path, dest: Path, *, extra: dict[str, bytes] | None = None,
+                  method: int = zipfile.ZIP_STORED) -> Path:  # fmt: skip
+    with zipfile.ZipFile(dest, "w", compression=method) as zf:
+        for p in sorted(q for q in src.rglob("*") if q.is_file()):
+            zf.write(p, p.relative_to(src).as_posix())
+        for name, data in (extra or {}).items():
+            zf.writestr(name, data)
+    return dest
+
+
+async def test_a_file_the_manifest_does_not_list_fails_the_package(package: Path) -> None:
+    (package / "notes.txt").write_text("added after export")
+    code, out = _cli(package)
+    assert code == 1 and "notes.txt: not part of this package" in out, out
+    (package / "notes.txt").unlink()
+    (package / "objects" / ("ab" * 32)).write_bytes(b"an object nothing references")
+    code, out = _cli(package)
+    assert code == 1 and f"objects/{'ab' * 32}: not an evidence object" in out, out
+
+
+async def test_os_metadata_is_tolerated_only_in_a_directory_and_only_on_request(
+    package: Path, tmp_path: Path
+) -> None:
+    (package / ".DS_Store").write_bytes(b"\0\0\0\1Bud1")
+    (package / "objects" / "._x").write_bytes(b"AppleDouble")
+    code, out = _cli(package)
+    assert code == 1 and ".DS_Store: not part of this package" in out, out
+    code, out = _cli(package, "--tolerate-os-metadata")
+    assert code == 0, out
+    assert "TOLERATED .DS_Store" in out and "TOLERATED objects/._x" in out
+    # a zip is verified strictly, whatever the option says
+    (package / ".DS_Store").unlink()
+    (package / "objects" / "._x").unlink()
+    pkg_zip = zip_directory(package, tmp_path / "job.zip", extra={".DS_Store": b"x"})
+    code, out = _cli(pkg_zip, "--tolerate-os-metadata")
+    assert code == 1 and ".DS_Store: not part of this package" in out, out
+    assert "does not apply to a zip" in out
+
+
+async def test_a_zip_package_is_verified_in_place(package: Path, tmp_path: Path) -> None:
+    pkg_zip = zip_directory(package, tmp_path / "job.zip")
+    code, out = cli_without_writes(pkg_zip)
+    assert code == 0, out
+    assert "48 items and 12 evidence objects re-hashed" in out
+    # the control: the hook does catch a write (so the check above can fail)
+    code, out = _hook_control(tmp_path / "x")
+    assert code != 0 and "the verifier wrote" in out
+    # tampered inside the zip: caught by the same checks
+    data = bytearray(pkg_zip.read_bytes())
+    at = data.find(b'"actor":"')
+    data[at + 9] ^= 0x01
+    (tmp_path / "bad.zip").write_bytes(bytes(data))
+    code, out = cli_without_writes(tmp_path / "bad.zip")
+    assert code in (1, 2) and not out.startswith("VERIFIED"), out

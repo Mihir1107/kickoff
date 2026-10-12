@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from edisc_core.lone_surrogates import has_lone
+from edisc_core.lone_surrogates import has_lone, replacement, substitute_key, utf16_units
 
 KNOWN_METADATA = frozenset(
     {
@@ -147,8 +147,14 @@ class ConversationRecord:
     conversation_id: str
     kind: str
     folder: str
-    name: str | None
+    name: str | None  # valid text: a lone surrogate is its replacement (U+FFFD), exact in ``exact``
     team_id: str | None  # the conversation's own team (Grid); None = the export's workspace
+    # JSON Pointer ("/id", "/name", "/team_id") -> exact UTF-16 code units of a value holding a lone
+    # surrogate (ADR 0018 §23, §28); empty when none does
+    exact: dict[str, list[int]]
+    # why the conversation's messages cannot be collected as items: a STRUCTURAL value they would be
+    # keyed by holds a lone surrogate (its units are then gaps with this reason, never skipped)
+    refused: str | None = None
 
 
 # Where a conversation record names its team, first match wins *(confirm on real export: Enterprise
@@ -156,11 +162,24 @@ class ConversationRecord:
 # returns for the team a conversation is accessed from, so export and API identities agree.
 TEAM_FIELDS = ("context_team_id", "team_id", "team")
 
+REFUSED_ID = "conversation_id_lone_surrogate"
+REFUSED_TEAM = "team_id_lone_surrogate"
+REFUSED_WORKSPACE = "workspace_id_lone_surrogate"
 
-def conversation_record(kind: str, element: Any) -> ConversationRecord | None:
+
+def conversation_record(
+    kind: str, element: Any, *, workspace_unkeyable: bool = False
+) -> ConversationRecord | None:
     """One element of a conversation metadata file, or None when it lacks what is needed to find its
     folder (counted and reported by the caller). Channels, private channels and group DMs are stored
-    under their ``name``; DMs under their id *(confirm on real export)*."""
+    under their ``name``; DMs under their id *(confirm on real export)*.
+
+    Lone surrogates (escaped JSON, ADR 0018 §23, §28) never drop a record. A NAME is text: kept as
+    its replacement text with its exact code units, and the folder is the replacement text, which is
+    what a UTF-8 writer makes of it (U+FFFD per surrogate) *(confirm on real export)*. An ID or a
+    TEAM is structural: the conversation is listed under a stand-in id (`substitute_key`) and marked
+    ``refused``, so its units are reported as gaps; ``workspace_unkeyable`` (the export's own
+    workspace id holds one) refuses every conversation that names no team of its own."""
     if not isinstance(element, dict):
         return None
     cid, name = element.get("id"), element.get("name")
@@ -168,20 +187,40 @@ def conversation_record(kind: str, element: Any) -> ConversationRecord | None:
         return None
     if name is not None and not isinstance(name, str):
         return None
-    if any(isinstance(v, str) and has_lone(v) for v in (cid, name)):
-        return None  # a lone surrogate (escaped JSON) names no storable id or zip folder (§23)
+    exact: dict[str, list[int]] = {}
+    refused: str | None = None
+    if has_lone(cid):
+        exact["/id"] = utf16_units(cid)
+        refused = REFUSED_ID
+    if name is not None and has_lone(name):
+        exact["/name"] = utf16_units(name)
     folder = cid if kind == "dm" else name
+    if folder is not None:
+        folder = replacement(folder)
     if not folder or "/" in folder or folder in (".", ".."):
         return None
-    team = next(
-        (
-            v
-            for f in TEAM_FIELDS
-            if isinstance(v := element.get(f), str) and v and "/" not in v and not has_lone(v)
-        ),
-        None,
+    team: str | None = None
+    for f in TEAM_FIELDS:
+        v = element.get(f)
+        if not isinstance(v, str) or not v or "/" in v:
+            continue
+        if has_lone(v):
+            exact["/team_id"] = utf16_units(v)
+            refused = refused or REFUSED_TEAM
+        else:
+            team = v
+        break
+    if team is None and workspace_unkeyable and refused is None:
+        refused = REFUSED_WORKSPACE
+    return ConversationRecord(
+        substitute_key(cid) if has_lone(cid) else cid,
+        kind,
+        folder,
+        None if name is None else replacement(name),
+        team,
+        exact,
+        refused,
     )
-    return ConversationRecord(cid, kind, folder, name, team)
 
 
 def storable_key(value: Any) -> str | None:

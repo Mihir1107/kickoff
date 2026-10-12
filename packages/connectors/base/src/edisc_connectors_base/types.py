@@ -107,6 +107,10 @@ class RawBatch:
     select: frozenset[str] | None = (
         None  # set: only these message ts in ``body`` belong to the batch
     )
+    # reasons this batch leaves its unit incomplete although every element is collected (a value the
+    # connector cannot key, e.g. a `thread_ts` holding a lone surrogate: its thread context cannot be
+    # found). Recorded on the unit in the batch transaction; the unit then reconciles as a GAP.
+    gaps: tuple[str, ...] = ()
 
 
 class FileUnavailableReason(StrEnum):
@@ -145,6 +149,17 @@ class ConversationInaccessibleError(Exception):
     def __init__(self, conversation_id: str, reason: AccessLossReason, response: bytes) -> None:
         super().__init__(f"conversation {conversation_id} inaccessible: {reason.value}")
         self.conversation_id, self.reason, self.response = conversation_id, reason, response
+
+
+class UncollectableUnitError(Exception):
+    """The unit's messages cannot be collected as items because a STRUCTURAL value they would be
+    keyed by is unusable (a conversation or team id holding a lone surrogate, ADR 0018 §28). Never a
+    silent skip: the unit stays in the job and reconciles as a GAP with this reason; its source bytes
+    stay in the evidence."""
+
+    def __init__(self, unit_key: str, reason: str) -> None:
+        super().__init__(f"unit {unit_key} cannot be collected: {reason}")
+        self.unit_key, self.reason = unit_key, reason
 
 
 class AuthenticationError(Exception):

@@ -773,12 +773,18 @@ def finalize_unit(
     return tuple(out)
 
 
-def message_page_subjects(page: bytes, *, ctx: NormalizeContext) -> frozenset[str]:
-    """Subjects whose prior state ``normalize_messages_page`` consults, known before normalizing."""
+def message_page_subjects(
+    page: bytes, *, ctx: NormalizeContext, select: frozenset[str] | None = None
+) -> frozenset[str]:
+    """Subjects whose prior state ``normalize_messages_page`` consults, known before normalizing;
+    ``select`` as there (a message it skips, e.g. one whose ``ts`` holds a lone surrogate and cannot
+    be an identity, ADR 0018 §28, names no subject)."""
     if ctx.conversation_id is None:
         raise NormalizationError("a messages page needs a conversation")
     out: set[str] = set()
     for raw in _parse(page, "messages", ctx.dialect):
+        if select is not None and raw.get("ts") not in select:
+            continue
         mid = message_id(ctx.workspace_id, ctx.conversation_id, str(raw.get("ts")))
         out |= {mid, f"{mid}#reactions", f"{mid}#observation"}
         out |= {

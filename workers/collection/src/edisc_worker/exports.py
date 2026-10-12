@@ -103,12 +103,17 @@ class _Scan:
     encodings: Counter[str] = field(default_factory=Counter)
     encoding_samples: dict[str, list[str]] = field(default_factory=dict)
     workspace: str | None = None
+    # the most common team in users.json holds a lone surrogate: no workspace id can key the items
+    # of conversations without a team of their own (ADR 0018 §28)
+    workspace_unkeyable: bool = False
+    users_team_id_lone_surrogate: int = 0
     messages: int = 0
     threaded: int = 0
     anomalies: int = 0
     anomaly_sample: list[str] = field(default_factory=list)
     elements_without_ts: int = 0
     thread_ts_lone_surrogate: int = 0  # thread_ts holding a lone surrogate: not indexed (§23)
+    ts_lone_surrogate: int = 0  # ts holding one: not indexed, its unit reports it as a gap (§28)
     unparseable: int = 0
     unparseable_sample: list[str] = field(default_factory=list)
 
@@ -357,21 +362,23 @@ class ExportIngest:
                 "not_a_slack_export",
                 "no channels.json, groups.json, dms.json or mpims.json at the top level",
             )
+        await self._workspace(src, limits, scan)
         records = await self._load_conversations(tenant_id, export_id, src, limits, scan)
         await self.hooks.hit("validate:after_conversations")
-        scan.workspace = await self._workspace(src, limits, scan)
         await self._index_day_files(tenant_id, export_id, src, limits, scan)
         return scan, tier, records
 
-    async def _workspace(
-        self, src: CoalescingSource, limits: ArchiveLimits, scan: _Scan
-    ) -> str | None:
+    async def _workspace(self, src: CoalescingSource, limits: ArchiveLimits, scan: _Scan) -> None:
         """The Slack team the export belongs to: the most common ``team_id`` in users.json (external
         members of shared channels carry other teams). Message identities are namespaced by it, as for
-        the live API, so an exported message and the same message collected live are one item."""
+        the live API, so an exported message and the same message collected live are one item.
+
+        A team id holding a lone surrogate still votes (it is counted in the findings): when it WINS,
+        no id can name the workspace, and every conversation without a team of its own is refused
+        (its units are gaps, ADR 0018 §28) instead of being keyed by a guess."""
         entry = scan.metadata.get("users.json")
         if entry is None:
-            return None
+            return
         teams: Counter[str] = Counter()
         try:
             async for raw in iter_array_elements(
@@ -379,12 +386,17 @@ class ExportIngest:
                 max_element_bytes=self.settings.export_max_json_element_bytes,
             ):
                 user = json.loads(raw)
-                team = storable_key(user.get("team_id")) if isinstance(user, dict) else None
-                if team is not None:  # a lone surrogate (§23) never names the workspace
+                team = user.get("team_id") if isinstance(user, dict) else None
+                if isinstance(team, str) and team:
                     teams[team] += 1
+                    if storable_key(team) is None:
+                        scan.users_team_id_lone_surrogate += 1
         except (JsonStreamError, ValueError) as exc:
             raise ExportRejectedError("metadata_invalid", f"users.json: {exc}") from exc
-        return teams.most_common(1)[0][0] if teams else None
+        if teams:
+            winner = teams.most_common(1)[0][0]
+            scan.workspace = storable_key(winner)
+            scan.workspace_unkeyable = scan.workspace is None
 
     async def _index_day_files(
         self,
@@ -463,6 +475,11 @@ class ExportIngest:
                     sent = None
                 if sent is None:
                     scan.elements_without_ts += 1
+                    continue
+                if storable_key(ts) is None:
+                    # no item can be keyed by it (ADR 0018 §28): counted, never indexed; the unit
+                    # that reads this file reports the element as a gap (`ts_lone_surrogate`)
+                    scan.ts_lone_surrogate += 1
                     continue
                 if sent.date() != row.hint_day:
                     anomalies += 1
@@ -674,13 +691,21 @@ class ExportIngest:
                             "metadata_invalid", f"{filename}: element {counts['elements']}: {exc}"
                         ) from exc
                     counts["elements"] += 1
-                    rec = conversation_record(kind, element)
+                    rec = conversation_record(
+                        kind, element, workspace_unkeyable=scan.workspace_unkeyable
+                    )
                     if rec is None:
                         counts["invalid_records"] += 1
                         continue
+                    if rec.exact:
+                        counts["records_with_lone_surrogates"] += 1
+                    if rec.refused is not None:
+                        counts[f"refused:{rec.refused}"] += 1
                     batch.append(
                         {"cid": rec.conversation_id, "kind": rec.kind, "folder": rec.folder,
-                         "name": rec.name, "entry": filename, "team": rec.team_id}
+                         "name": rec.name, "entry": filename, "team": rec.team_id,
+                         "exact": json.dumps(rec.exact) if rec.exact else None,
+                         "refused": rec.refused}
                     )  # fmt: skip
                     if len(batch) >= self.settings.export_entry_batch:
                         counts["duplicates"] += await self._insert_conversations(
@@ -707,9 +732,11 @@ class ExportIngest:
                 await s.execute(
                     text(
                         "INSERT INTO export_conversations (tenant_id, export_id, conversation_id, kind,"
-                        " folder, name, metadata_entry, team_id) SELECT CAST(:t AS uuid), CAST(:e AS uuid), *"
+                        " folder, name, metadata_entry, team_id, exact, refused)"
+                        " SELECT CAST(:t AS uuid), CAST(:e AS uuid), *"
                         " FROM unnest(CAST(:cid AS text[]), CAST(:kind AS text[]), CAST(:folder AS text[]),"
-                        " CAST(:name AS text[]), CAST(:entry AS text[]), CAST(:team AS text[]))"
+                        " CAST(:name AS text[]), CAST(:entry AS text[]), CAST(:team AS text[]),"
+                        " CAST(CAST(:exact AS text[]) AS jsonb[]), CAST(:refused AS text[]))"
                         " ON CONFLICT (export_id, conversation_id) DO NOTHING RETURNING 1"
                     ),
                     {"t": tenant_id, "e": export_id, **cols},
@@ -767,6 +794,7 @@ class ExportIngest:
             "ts_outside_hint_day": {"count": scan.anomalies, "sample": scan.anomaly_sample},
             "elements_without_ts": scan.elements_without_ts,
             "thread_ts_lone_surrogate": scan.thread_ts_lone_surrogate,
+            "ts_lone_surrogate": scan.ts_lone_surrogate,
             "day_files_unparseable": {"count": scan.unparseable, "sample": scan.unparseable_sample},
             "os_metadata_entries": {"count": scan.junk, "sample": scan.junk_sample},
             "name_encodings": {
@@ -775,6 +803,16 @@ class ExportIngest:
             },
             "conversations": conversations,
             "invalid_metadata_records": records["invalid_records"],
+            # lone surrogates (ADR 0018 §23, §28): names kept exactly, ids/teams refused as keys; a
+            # refused conversation's units are gaps with the reason, its bytes stay in the export
+            "metadata_records_with_lone_surrogates": records["records_with_lone_surrogates"],
+            "conversations_refused": {
+                k.split(":", 1)[1]: n
+                for k, n in sorted(records.items())
+                if k.startswith("refused:")
+            },
+            "users_team_id_lone_surrogate": scan.users_team_id_lone_surrogate,
+            "workspace_id_lone_surrogate": scan.workspace_unkeyable,
             "folders_without_conversation": orphan_folders,
             "conversations_without_messages": empty_conversations,
             "folders_listed_twice": shared_folders,

@@ -1,0 +1,66 @@
+{
+  "pdfs": {
+    "archive": {
+      "a4": {
+        "sha256": "2af8305c89c322b6afcfe55c1eb8927443d7b409873133a75e341a9a96e3ca16",
+        "size": 30591
+      },
+      "letter": {
+        "sha256": "7cf90017c81d21b70138328aa99ea75f699cb2a9a32f42dd5ea54a80a3d7adc2",
+        "size": 30519
+      }
+    },
+    "at_the_cap": {
+      "a4": {
+        "sha256": "a1c7bf03baa5597c96c4ac4651e90ab35ca08b0c5ad5c5b0662d6e883e522140",
+        "size": 812043
+      },
+      "letter": {
+        "sha256": "c72c1754e8aeb5eeb9227b0ce65fd9ddf4da12560c88b0e0dd9d381efdb1cb88",
+        "size": 822280
+      }
+    },
+    "clean": {
+      "a4": {
+        "sha256": "dce6d8090d8370c1ca224ff23c33efaf83143080f9ccc09613d5ba06e1057b4f",
+        "size": 28905
+      },
+      "letter": {
+        "sha256": "1446efc51c11277aa09e2ab17d2dfe74f599a9d726e7ff09259b985074a31322",
+        "size": 28830
+      }
+    },
+    "custody_failed_divergent": {
+      "a4": {
+        "sha256": "164bd53edf2e2765312fd7950ae43668b7c6b3a587f822861fe3f5b9732e7df3",
+        "size": 30290
+      },
+      "letter": {
+        "sha256": "9e1d6abc797663f6f509c61bd26f53a7d2f8c7eb2446becf5c0e599d1be0fc0b",
+        "size": 30235
+      }
+    },
+    "gaps_and_failures_hard_strings": {
+      "a4": {
+        "sha256": "5d6ac1de03396e6d0ff70e950cfdcc21661a4b759c25a60dba4c64221ef30edc",
+        "size": 55855
+      },
+      "letter": {
+        "sha256": "e6b25b3eedf85d0976f156daa30201443430bfd3fb6d7e1f0fad9ddd13cbbb48",
+        "size": 55682
+      }
+    },
+    "pre_change_unknown": {
+      "a4": {
+        "sha256": "1da850d2442a4eb4cfb000ca47d65705299698fb8fb4ba958d35204872259905",
+        "size": 29230
+      },
+      "letter": {
+        "sha256": "74fc8f614b7febfa626c9938871baa00e3fa418d491008f3cc891da6bcc132d9",
+        "size": 29117
+      }
+    }
+  },
+  "report_key": "1.4.0_unicode-15.0.0_glyphs-4831f454680d",
+  "toolchain_id": "e24aecbb3dd4b6170461ee24e64bf9c73b5c2f3a2ed3279160b57b74085b96a3"
+}

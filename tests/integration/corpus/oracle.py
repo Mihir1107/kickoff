@@ -85,6 +85,8 @@ def _range(ds: Dataset, case: Case, epoch: int) -> tuple[datetime, datetime]:
 
 
 def _scoped_conversations(ds: Dataset, case: Case) -> list[str]:
+    if case.export_hostile == "channel_id":  # refused: its units are gaps, nothing is collected
+        return [c.id for c in ds.conversations()[1:]]
     if case.export_tier == "public_only" and case.source == "export":
         return [c.id for c in ds.conversations() if c.kind == "channel"]
     if case.custodians:

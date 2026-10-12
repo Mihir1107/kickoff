@@ -20,6 +20,12 @@ interprets them (``dialect = "export"``).
   resolved addresses are checked hop by hop and the connection is pinned to the checked IP
   (``file_links``). An expired, revoked or unreachable link is a ``FileUnavailableError`` with its
   reason: a recorded file gap, never a stall.
+- **Lone surrogates** (ADR 0018 §28): a conversation whose id or team (or the export's workspace)
+  holds one was listed under a stand-in id and refused at validation: its units raise
+  ``UncollectableUnitError`` and are reported as gaps. A message whose ``ts`` holds one cannot be an
+  item: the history batch selects the others (``ts_lone_surrogate``); a ``thread_ts`` holding one
+  cannot be looked up for thread context (``thread_ts_lone_surrogate``). Both are recorded on the unit
+  as gap reasons, never skipped silently.
 """
 
 from __future__ import annotations
@@ -62,8 +68,10 @@ from edisc_connectors_base.types import (
     InvalidCursorError,
     RawBatch,
     ThreadParentPolicy,
+    UncollectableUnitError,
     WorkUnit,
 )
+from edisc_core.lone_surrogates import has_lone
 from edisc_core.redaction import register_secret
 from edisc_core.schemas import ScopeType
 from edisc_core.settings import Settings
@@ -104,6 +112,11 @@ class _Step:
     entry_idx: int
     select: frozenset[str] | None
     thread_ts: str | None
+    gaps: tuple[str, ...] = ()
+
+
+TS_LONE_SURROGATE = "ts_lone_surrogate"
+THREAD_TS_LONE_SURROGATE = "thread_ts_lone_surrogate"
 
 
 def _encode(index: int) -> Cursor:
@@ -149,8 +162,10 @@ class SlackExportConnector:
         # activity (the pipeline downloads a batch's files before normalizing it). Never persisted;
         # bounded (oldest dropped first).
         self._links: OrderedDict[tuple[uuid.UUID, str], str] = OrderedDict()
-        # (export, conversation) -> team: immutable once the export is validated
-        self._teams: OrderedDict[tuple[uuid.UUID, str], str | None] = OrderedDict()
+        # (export, conversation) -> (team, refused): immutable once the export is validated
+        self._meta: OrderedDict[tuple[uuid.UUID, str], tuple[str | None, str | None]] = (
+            OrderedDict()
+        )
 
     # ------------------------------------------------------------------ helpers
     @staticmethod
@@ -209,17 +224,25 @@ class SlackExportConnector:
         """The conversation's own team when its metadata record names one (Enterprise Grid: one export,
         many workspaces), else the export's workspace (users.json). Never per message: a shared
         channel's messages carry their senders' teams *(confirm on real export)*."""
+        team, _ = await self._conversation(conn, conversation_id)
+        return team or conn.workspace_id
+
+    async def _conversation(
+        self, conn: Connection, conversation_id: str
+    ) -> tuple[str | None, str | None]:
+        """(team, refused reason) of a conversation of the export."""
         key = (self._export_id(conn), conversation_id)
-        if key not in self._teams:
+        if key not in self._meta:
             rows = await self._entry_rows(
                 conn,
-                "SELECT team_id FROM export_conversations WHERE export_id = :e AND conversation_id = :c",
+                "SELECT team_id, refused FROM export_conversations WHERE export_id = :e"
+                " AND conversation_id = :c",
                 {"e": key[0], "c": conversation_id},
             )
-            self._teams[key] = rows[0].team_id if rows else None
-            while len(self._teams) > MAX_LINKS:
-                self._teams.popitem(last=False)
-        return self._teams[key] or conn.workspace_id
+            self._meta[key] = (rows[0].team_id, rows[0].refused) if rows else (None, None)
+            while len(self._meta) > MAX_LINKS:
+                self._meta.popitem(last=False)
+        return self._meta[key]
 
     async def expected_count(self, conn: Connection, unit: WorkUnit) -> int | None:
         """The number of elements in the day file (counted at validation); None if it did not parse."""
@@ -232,14 +255,32 @@ class SlackExportConnector:
         """History first, then the thread context the policy asks for (same rules as the Web API
         connector): replies here whose parent is before the range -> the parent (parent_only) or the
         whole thread; parents here with replies at/after the end of the range -> the whole thread."""
-        steps = [_Step(BatchKind.HISTORY, entry_idx, None, None)]
         policy = scope.thread_parent_policy
+        try:
+            parsed = json.loads(body)
+            messages = [m for m in parsed if isinstance(m, dict)]
+        except (ValueError, TypeError):
+            # the history batch fails loudly in the normalizer; no context to plan
+            return [_Step(BatchKind.HISTORY, entry_idx, None, None)]
+        # lone surrogates (ADR 0018 §28): a ts cannot be an item identity, a thread_ts cannot be
+        # looked up; both leave the unit a gap with the reason, never a failure of the whole unit
+        hostile_ts = any(isinstance(m.get("ts"), str) and has_lone(m["ts"]) for m in messages)
+        hostile_thread = any(
+            isinstance(m.get("thread_ts"), str) and has_lone(m["thread_ts"])
+            and not (isinstance(m.get("ts"), str) and has_lone(m["ts"]))
+            for m in messages
+        )  # fmt: skip
+        select = (
+            frozenset(
+                m["ts"] for m in messages if isinstance(m.get("ts"), str) and not has_lone(m["ts"])
+            )
+            if hostile_ts
+            else None
+        )
+        gaps = (TS_LONE_SURROGATE,) * hostile_ts + (THREAD_TS_LONE_SURROGATE,) * hostile_thread
+        steps = [_Step(BatchKind.HISTORY, entry_idx, select, None, gaps)]
         if policy is ThreadParentPolicy.REPLIES_ONLY:
             return steps
-        try:
-            messages = [m for m in json.loads(body) if isinstance(m, dict)]
-        except ValueError:
-            return steps  # the history batch fails loudly in the normalizer; no context to plan
         start = ensure_utc(scope.date_from).timestamp()
         end = ensure_utc(scope.date_to).timestamp()
         before: list[str] = []
@@ -248,6 +289,8 @@ class SlackExportConnector:
             ts, thread_ts = m.get("ts"), m.get("thread_ts")
             if not isinstance(ts, str) or not isinstance(thread_ts, str):
                 continue
+            if has_lone(ts) or has_lone(thread_ts):
+                continue  # recorded above as a gap reason of the unit
             if thread_ts != ts and _ts_seconds(thread_ts) < start and thread_ts not in before:
                 before.append(thread_ts)
             elif thread_ts == ts and policy is ThreadParentPolicy.INCLUDE_PARENT_AND_THREAD:
@@ -286,6 +329,9 @@ class SlackExportConnector:
     async def fetch(
         self, conn: Connection, unit: WorkUnit, cursor: Cursor | None, *, scope: CollectionScope
     ) -> AsyncIterator[RawBatch]:
+        _, refused = await self._conversation(conn, unit.conversation_id)
+        if refused is not None:
+            raise UncollectableUnitError(unit.unit_key, refused)
         export = await self._export(conn)
         src = archive_source(self._s3, self._settings, export)
         day = await self._day_entry(conn, unit)
@@ -333,6 +379,7 @@ class SlackExportConnector:
                     dg.size,
                 ),
                 select=step.select,
+                gaps=step.gaps,
             )
             index += 1
 

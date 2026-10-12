@@ -403,7 +403,7 @@ class RenderLoader:
             meta = (
                 await s.execute(
                     text(
-                        "SELECT x.kind, x.name FROM export_conversations x"
+                        "SELECT x.kind, x.name, x.exact FROM export_conversations x"
                         " JOIN slack_exports e ON e.id = x.export_id"
                         " WHERE e.connection_id = :c AND x.conversation_id = :v ORDER BY e.id LIMIT 1"
                     ),
@@ -456,13 +456,18 @@ class RenderLoader:
                 purpose=d.get("purpose"),
                 known_names=tuple(names),
             )
+        # an export name holding a lone surrogate is stored as its replacement text with its exact
+        # code units (ADR 0018 §28): the renderer gets the exact name (and writes it valid)
+        name = None if meta is None else meta.name
+        if name is not None and meta is not None and meta.exact and "/name" in meta.exact:
+            name = restore({"name": name}, {"/name": meta.exact["/name"]})["name"]
         return ConversationInfo(
             id=conversation_id,
             slack_type=_EXPORT_KINDS.get(meta.kind) if meta else None,  # type: ignore[arg-type]
             workspace_id=workspace,
-            name=meta.name if meta else None,
+            name=name,
             custodians=tuple(custodians),
-            known_names=(meta.name,) if meta and meta.name else (),
+            known_names=(name,) if name else (),
         )
 
     async def _slice(

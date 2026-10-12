@@ -13,6 +13,9 @@ For each archive the manifest lists (embedded in ``objects/`` or referenced by h
    its SHA-256 and size must equal the evidence record.
 
 Item fragments are then checked against the entry bytes (``body``) like any page.
+
+An embedded archive is read where it lies: a file of a directory package, or a STORED entry of a zip
+package (random access into the entry's bytes; nothing is copied out).
 """
 
 from __future__ import annotations
@@ -24,9 +27,9 @@ import concurrent.futures
 import hashlib
 import os
 from array import array
-from collections.abc import Coroutine, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from edisc_custody.archive import (
     ArchiveError,
@@ -37,6 +40,7 @@ from edisc_custody.archive import (
     locate_directory,
     open_entry,
 )
+from edisc_custody.package_source import DirectorySource, PackageSource, StoredRange, ZipSource
 
 if TYPE_CHECKING:
     from edisc_custody.package import PackageReport
@@ -53,6 +57,14 @@ LIMIT_FIELDS = (
 )
 
 
+class ArchiveSource(Protocol):
+    size: int
+
+    async def read(self, offset: int, length: int) -> bytes: ...
+
+    def close(self) -> None: ...
+
+
 class FileSource:
     """Random access to a local archive file (the reader's ``Source``)."""
 
@@ -65,6 +77,20 @@ class FileSource:
 
     def close(self) -> None:
         os.close(self._fd)
+
+
+class EntrySource:
+    """Random access to an archive embedded as a STORED entry of a zip package (the reader's
+    ``Source``); the entry's CRC-32 and hash are checked when it is streamed first."""
+
+    def __init__(self, stored: StoredRange) -> None:
+        self._stored, self.size = stored, stored.size
+
+    async def read(self, offset: int, length: int) -> bytes:
+        return self._stored.read(offset, length)
+
+    def close(self) -> None:
+        pass  # the package source owns the file
 
 
 def _run[T](coro: Coroutine[Any, Any, T]) -> T:
@@ -82,6 +108,14 @@ def sha256_file(path: Path) -> tuple[str, int]:
     return h.hexdigest(), size
 
 
+def _sha256_member(source: PackageSource, name: str) -> tuple[str, int]:
+    h, size = hashlib.sha256(), 0
+    for chunk in source.chunks(name):
+        h.update(chunk)
+        size += len(chunk)
+    return h.hexdigest(), size
+
+
 def _limits(recorded: Mapping[str, Any] | None) -> ArchiveLimits:
     if not recorded:
         return ArchiveLimits()
@@ -91,7 +125,7 @@ def _limits(recorded: Mapping[str, Any] | None) -> ArchiveLimits:
 class ArchiveEntries:
     def __init__(
         self,
-        root: Path,
+        source: PackageSource,
         manifest: Mapping[str, Any],
         evidence: Mapping[str, Mapping[str, Any]],
         supplied: Sequence[Path],
@@ -99,7 +133,8 @@ class ArchiveEntries:
     ) -> None:
         self._report = report
         self._evidence = evidence
-        self._paths: dict[str, Path] = {}  # archive evidence id -> verified file
+        # archive evidence id -> opener of the verified archive (embedded or supplied)
+        self._opens: dict[str, Callable[[], ArchiveSource]] = {}
         self._limits: dict[str, ArchiveLimits] = {}
         self._entries: dict[str, tuple[Entry, int]] = {}  # entry evidence id -> (entry, data end)
         self._cache: tuple[str, bytes] | None = None
@@ -116,21 +151,24 @@ class ArchiveEntries:
             digest, _ = sha256_file(path)
             by_hash.setdefault(digest, path)
         for archive in archives:
-            self._open_archive(root, archive, by_hash)
-        for archive_id, path in self._paths.items():
-            self._verify_entries(archive_id, path)
+            self._open_archive(source, archive, by_hash)
+        for archive_id in list(self._opens):
+            self._verify_entries(archive_id)
 
     # ------------------------------------------------------------------ archives
     def _open_archive(
-        self, root: Path, archive: Mapping[str, Any], by_hash: Mapping[str, Path]
+        self, source: PackageSource, archive: Mapping[str, Any], by_hash: Mapping[str, Path]
     ) -> None:
         report, sha, size = self._report, str(archive["sha256"]), int(archive["size_bytes"])
         where = f"archive {archive.get('storage_key')} ({sha})"
+        opener: Callable[[], ArchiveSource]
         if archive.get("embedded"):
-            path = root / "objects" / sha
-            if not path.exists():
+            name = f"objects/{sha}"
+            if not source.exists(name):
                 report.errors.append(f"{where}: embedded archive missing from package")
                 return
+            digest, actual = _sha256_member(source, name)  # before any entry is read
+            opener = _embedded(source, name)
         else:
             supplied = by_hash.get(sha)
             if supplied is None:
@@ -138,19 +176,24 @@ class ArchiveEntries:
                     f"{where}: referenced by hash; supply the archive with --archive (no entry was verified)"
                 )
                 return
-            path = supplied
-        digest, actual = sha256_file(path)  # the archive itself, before any entry is read
+            digest, actual = sha256_file(supplied)  # the archive itself, before any entry is read
+            opener = _file(supplied)
         if (digest, actual) != (sha, size):
             report.errors.append(
                 f"{where}: SHA-256/size do not match the record (got {digest}, {actual} bytes); "
                 "no entry was verified"
             )
             return
+        try:
+            opener().close()  # a zip package: the entry must be STORED and in its bounds
+        except ArchiveError as exc:
+            report.errors.append(f"{where}: {exc}; no entry was verified")
+            return
         report.archives_checked += 1
-        self._paths[str(archive["evidence_id"])] = path
+        self._opens[str(archive["evidence_id"])] = opener
         self._limits[str(archive["evidence_id"])] = _limits(archive.get("limits"))
 
-    def _verify_entries(self, archive_id: str, path: Path) -> None:
+    def _verify_entries(self, archive_id: str) -> None:
         wanted = {
             base64.b64decode(rec["entry_raw_name_b64"]): rec
             for rec in self._evidence.values()
@@ -159,14 +202,14 @@ class ArchiveEntries:
         }
         if not wanted:
             return
-        src = FileSource(path)
+        src = self._opens[archive_id]()
         try:
             _run(self._scan(src, wanted, self._limits[archive_id]))
         finally:
             src.close()
 
     async def _scan(
-        self, src: FileSource, wanted: Mapping[bytes, Mapping[str, Any]], limits: ArchiveLimits
+        self, src: ArchiveSource, wanted: Mapping[bytes, Mapping[str, Any]], limits: ArchiveLimits
     ) -> None:
         report = self._report
         try:
@@ -224,7 +267,7 @@ class ArchiveEntries:
             return None
         rec = self._evidence[evidence_id]
         archive_id = str(rec["archive_evidence_id"])
-        src = FileSource(self._paths[archive_id])
+        src = self._opens[archive_id]()
         try:
             data, digest = _run(_read(src, located[0], self._limits[archive_id], located[1]))
         except ArchiveError as exc:
@@ -239,8 +282,21 @@ class ArchiveEntries:
         return data
 
 
+def _embedded(source: PackageSource, name: str) -> Callable[[], ArchiveSource]:
+    if isinstance(source, ZipSource):
+        return lambda: EntrySource(source.stored_range(name))
+    if isinstance(source, DirectorySource):
+        path = source.root / name
+        return lambda: FileSource(path)
+    raise TypeError(f"unsupported package source {source!r}")
+
+
+def _file(path: Path) -> Callable[[], ArchiveSource]:
+    return lambda: FileSource(path)
+
+
 async def _digest(
-    src: FileSource, entry: Entry, limits: ArchiveLimits, end: int
+    src: ArchiveSource, entry: Entry, limits: ArchiveLimits, end: int
 ) -> tuple[str, int]:
     h, size = hashlib.sha256(), 0
     async for chunk in open_entry(src, entry, limits, data_end_limit=end):
@@ -250,7 +306,7 @@ async def _digest(
 
 
 async def _read(
-    src: FileSource, entry: Entry, limits: ArchiveLimits, end: int
+    src: ArchiveSource, entry: Entry, limits: ArchiveLimits, end: int
 ) -> tuple[bytes, str]:
     parts = [c async for c in open_entry(src, entry, limits, data_end_limit=end)]
     data = b"".join(parts)

@@ -1,6 +1,7 @@
 """``edisc-verify``: verify a custody package (job), render package or report package offline (ADR 0008,
-ADR 0015, ADR 0018 §14). A job package may be the downloaded zip: its entries are copied through the
-hardened zip reader into a temporary directory first (the job verifier reads directories).
+ADR 0015, ADR 0018 §14). Every package may be a directory or the downloaded zip, read in place through
+the hardened zip reader (nothing is extracted). All are strict: a file the manifest does not account for
+fails; ``--tolerate-os-metadata`` accepts only OS metadata files, and only in a directory.
 
 Exit codes: 0 verified, 1 verification failed, 2 unreadable/unsupported package.
 """
@@ -8,16 +9,13 @@ Exit codes: 0 verified, 1 verification failed, 2 unreadable/unsupported package.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import sys
-import tempfile
-from collections.abc import Iterator
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from edisc_custody.archive import ArchiveError
 from edisc_custody.package import PackageFormatError, verify_package
-from edisc_custody.package_source import ZipSource, is_zip
+from edisc_custody.package_source import is_zip
 from edisc_custody.render_package import (
     RenderPackageReport,
     is_render_package,
@@ -30,30 +28,6 @@ from edisc_custody.report_package import (
 )
 
 
-@contextlib.contextmanager
-def _as_directory(path: Path | None) -> Iterator[Path | None]:
-    """A job package zip as a temporary directory (entries copied through the hardened reader, every
-    name a plain relative path); a directory (or None) as itself."""
-    if path is None or not is_zip(path):
-        yield path
-        return
-    source = ZipSource(path)
-    try:
-        with tempfile.TemporaryDirectory(prefix="edisc-verify-") as tmp:
-            for name in source.names():
-                parts = PurePosixPath(name).parts
-                if not parts or name.startswith("/") or ".." in parts or name.endswith("/"):
-                    raise PackageFormatError(f"unsafe or unexpected entry name {name!r}")
-                target = Path(tmp, *parts)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with target.open("wb") as fh:
-                    for chunk in source.chunks(name):
-                        fh.write(chunk)
-            yield Path(tmp)
-    finally:
-        source.close()
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="edisc-verify",
@@ -62,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "package",
         type=Path,
-        help="directory produced by the custody export, or a render package (directory or zip)",
+        help="a job custody, render or report package: the directory export or the downloaded zip",
     )
     parser.add_argument("--json", action="store_true", help="print the full report as JSON")
     parser.add_argument(
@@ -90,24 +64,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--tolerate-os-metadata",
         action="store_true",
-        help="render packages, DIRECTORIES only: accept .DS_Store, ._* (AppleDouble), __MACOSX/,"
+        help="DIRECTORIES only (every package kind): accept .DS_Store, ._* (AppleDouble), __MACOSX/,"
         " Thumbs.db and desktop.ini left by a file manager; each is listed. Never applies to a zip."
         " Verify the downloaded zip itself, not an extracted folder, whenever you can",
     )
     args = parser.parse_args(argv)
     try:
-        with _as_directory(args.job_package) as job_dir:
-            if is_render_package(args.package):
-                return _render(
-                    args.package, args.file, job_dir, as_json=args.json,
-                    tolerate=args.tolerate_os_metadata,
-                )  # fmt: skip
-            if is_report_package(args.package):
-                return _report(
-                    args.package, job_dir, as_json=args.json, tolerate=args.tolerate_os_metadata
-                )
-        with _as_directory(args.package) as root:
-            report = verify_package(root or args.package, args.archive)
+        if is_render_package(args.package):
+            return _render(
+                args.package, args.file, args.job_package, as_json=args.json,
+                tolerate=args.tolerate_os_metadata,
+            )  # fmt: skip
+        if is_report_package(args.package):
+            return _report(
+                args.package, args.job_package, as_json=args.json,
+                tolerate=args.tolerate_os_metadata,
+            )  # fmt: skip
+        report = verify_package(
+            args.package, args.archive, tolerate_os_metadata=args.tolerate_os_metadata
+        )
     except (OSError, PackageFormatError, KeyError, ValueError, ArchiveError) as exc:
         sys.stderr.write(f"edisc-verify: cannot read package: {exc}\n")
         return 2
@@ -131,6 +106,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"  {report.archives_checked} archives hash-checked, {report.entries_checked} archive"
                 " entries extracted and verified\n"
             )
+        if args.tolerate_os_metadata and is_zip(args.package):
+            sys.stdout.write(
+                "  --tolerate-os-metadata does not apply to a zip: verified strictly\n"
+            )
+        for name in report.tolerated:
+            sys.stdout.write(f"  TOLERATED {name} (OS metadata, not part of the package)\n")
         for err in report.errors + (chain.errors if chain else []):
             sys.stdout.write(f"  ERROR {err}\n")
     return 0 if report.ok else 1
@@ -183,7 +164,13 @@ def _render(
 
 
 def _report(package: Path, job: Path | None, *, as_json: bool, tolerate: bool) -> int:
-    report: ReportPackageReport = verify_report_package(package, job, tolerate_os_metadata=tolerate)
+    try:
+        report: ReportPackageReport = verify_report_package(
+            package, job, tolerate_os_metadata=tolerate
+        )
+    except (OSError, PackageFormatError, KeyError, ValueError, ArchiveError) as exc:
+        sys.stderr.write(f"edisc-verify: cannot read package: {exc}\n")
+        return 2
     if as_json:
         sys.stdout.write(json.dumps(report.as_dict(), indent=2) + "\n")
         return 0 if report.ok else 1
@@ -207,7 +194,9 @@ def _report(package: Path, job: Path | None, *, as_json: bool, tolerate: bool) -
         )
         if report.recomputed:
             sys.stdout.write(
-                "  chain-derived content RECOMPUTED from the job chain: identical\n"
+                f"  RECOMPUTED from the job chain, identical: units.jsonl byte for byte"
+                f" ({report.recomputed_rows} rows), the unit counts, exceptions and conversations,"
+                " the job, scope, access, pause and actor sections\n"
                 "  checked against recorded digests only (not recomputable offline): "
                 + "; ".join(report.not_recomputed)
                 + "\n"

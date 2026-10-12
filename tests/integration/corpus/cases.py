@@ -32,6 +32,8 @@ class Case:
     source: Literal["live", "export"] = "live"
     export_tier: Literal["full", "public_only"] = "full"
     export_legacy_layout: bool = False  # an older export layout (reply_broadcast, no blocks)
+    # a lone surrogate in conversation 0's channel name or id (ADR 0018 §28; `ExportOptions.hostile`)
+    export_hostile: Literal["channel_name", "channel_id"] | None = None
     custodians: int = (
         0  # >0: custodian scopes (the first N members of conversation 0) instead of a channel scope
     )
@@ -160,6 +162,16 @@ CASES: dict[str, Case] = {
     ),
     "export_public_only": Case(
         _spec(seed=43, dialect="slack_history"), source="export", export_tier="public_only"
+    ),
+    # a channel NAME holding a lone surrogate: text, stored exactly, every message collected and
+    # rendered; the conversation's name in the RSMF is valid with its exact code units
+    "export_hostile_channel_name": Case(
+        _spec(seed=51, dialect="slack_history"), source="export", export_hostile="channel_name"
+    ),
+    # a channel ID holding one: no item can be keyed by it; the conversation is listed under a
+    # stand-in id, each of its day files is a GAP unit with the reason, nothing of it is rendered
+    "export_hostile_channel_id": Case(
+        _spec(seed=52, dialect="slack_history"), source="export", export_hostile="channel_id"
     ),
 }
 

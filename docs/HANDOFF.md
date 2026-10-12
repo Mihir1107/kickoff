@@ -1,4 +1,4 @@
-# Handoff (2026-10-11: fixes before step 5 and M16 step 5 done, CI green; next: a set of fixes the user will send, then M16 step 6 (preview))
+# Handoff (2026-10-11: the fixes before step 6 done (ADR 0018 §28); next: M16 step 6 (preview))
 
 This file alone is enough to build M16. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (read it in full before any
@@ -6,14 +6,39 @@ code); the rest of the plan of record is `docs/ARCHITECTURE.md`, `docs/adr/`, `d
 and `docs/BACKLOG.md`. `docs/plans/m16.md` is the superseded proposal (history only).
 
 ## Current state
-**Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`. Migrations at head: **0032**.
-Renderer **1.3.2**, dummy connector **0.5.0**, normalizer **0.3.0**, report renderer **1.3.0**.
-M16 **steps 1-5 are built** (model, HTML, PDF, loader, custody stream, API + packages + verifier);
-steps 6 (preview) and 7 (docs) are not. The step 3 CI run **38052005091 finished green** (lint,
-typecheck, unit, report-pdf, 4 integration shards). This round: `f84d847` (the fixes before step 5;
-CI run **38129918447 green**: lint, typecheck, unit, production-install, report-pdf natively on amd64
-with the image breaks, 4 integration shards) and `86f6400` (step 5; CI run **38130947326 green**, all
-9 jobs).
+**Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`. Migrations at head: **0033**.
+Renderer **1.3.2**, dummy connector **0.5.0**, normalizer **0.3.0**, report renderer **1.4.0**.
+M16 **steps 1-5 are built** (model, HTML, PDF, loader, custody stream, API + packages + verifier)
+and the fixes before step 6 (§28); steps 6 (preview) and 7 (docs) are not. Earlier rounds: `f84d847`
+(CI 38129918447 green), `86f6400` (step 5, CI 38130947326 green).
+
+## Done: the fixes before step 6 (2026-10-11; ADR 0018 §28; mutation round `m16-pre6`, 24/24)
+1. **Hostile export values never drop data.** Names (channel/user/file/workspace) are text: stored
+   as replacement + exact code units (`export_conversations.exact`), never refused. Structural values
+   are refused as KEYS only: a conversation whose id, team, or (when the winning users.json team holds
+   one) workspace holds a lone surrogate is listed under a stand-in id
+   (`substitute_key`: `lone-surrogate:<hex units>`) and `refused`; each of its day files is a GAP unit
+   with the reason (`UncollectableUnitError`, `work_units.gap_reasons`, collected 0); a hostile `ts`
+   is the one element not collected (`ts_lone_surrogate`), a hostile `thread_ts` leaves every message
+   collected but the unit a gap (`thread_ts_lone_surrogate`; `RawBatch.gaps`). Corpus cases
+   `export_hostile_channel_name` (every message collected and rendered, the name exact in RSMF) and
+   `export_hostile_channel_id` (no message collected, every day file a gap with the reason, the rest
+   of the export normal); `message_keys` and hostile team ids in their own tests. Before: hostile
+   ids/names made the record "invalid" and its messages vanished with NO unit; a hostile team fell
+   back to the export workspace; a hostile `ts` failed the unit; a hostile `thread_ts` crashed
+   planning. Found on the way: `message_page_subjects` ignored `select`.
+2. **Every unit fact in the chain** (new jobs: `job_started.unit_event_format` 2): unit events carry
+   kind, conversation, scopes, access-lost reason, gap reasons; `units_unsettled` at the job's end;
+   the format is decided per job (`facts_for_format`), older jobs print UNKNOWN. `edisc-verify
+   --job-package` rebuilds `units.jsonl` BYTE FOR BYTE plus counts, exceptions, conversations
+   (`recompute.recompute`). Still not recomputable (and why): ADR 0018 §28.2. Found: the file order
+   depended on the database locale (glibc `en_US` vs code points): migration 0033 makes the order
+   columns COLLATE "C".
+3. **Job package verifier**: strict (unlisted files fail; `--tolerate-os-metadata` directories only),
+   zips read in place (audit-hook test: no write, no temp dir), embedded archives read by random access
+   into their STORED entry. BACKLOG item removed (the zip copy was recorded in ADR §27.1, not the
+   BACKLOG). Report renderer 1.4.0: report goldens and PDF goldens (`..._toolchain-e24aecbb3dd4`,
+   recorded in the image under emulation, veraPDF 12/12) recorded.
 
 ## Done: the fixes before step 5, then M16 step 5 (2026-10-11; ADR 0018 §23-§27)
 1. **Lone surrogates (§23).** Traced through every stage with the corpus cases `lone_surrogates` and
@@ -48,8 +73,7 @@ all caught. Also found: a latent sanitiser-fuzz expectation bug (CRLF: each CR g
 the page never holds a CRLF pair); the mutation runner treated "no test ran" as caught (now a
 problem).
 
-## Next: a set of fixes the user will send (wait for them), then M16 step 6 (preview)
-Do the fixes first; stop and report before step 6.
+## Next: M16 step 6 (preview)
 ADR 0018 §1.2, §10, §16.6: `RenderLoader.day_slice(...)` (day-bounded; `_index` loads a whole
 conversation today), the pure preview renderer (`edisc_renderers.preview`, same sanitiser and
 lone-surrogate rules), the route (`evidence.read`, audit + `anchor_now` before the first byte, the

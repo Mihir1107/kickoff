@@ -10,9 +10,11 @@ root, the manifest's outputs, and every ``outputs/<name>``'s SHA-256 and size; a
 names the same SHA-256 and size for each JSONL file. With the job's custody package
 (``--job-package``): the job package verifies, its head and seal are the referenced ones, and the
 report's chain-derived content is RECOMPUTED from the job's events with the report model
-(``edisc_renderers.report.recompute``) and byte-compared; what cannot be recomputed offline (the
-database-sourced columns, observations, renders, the snapshot) is checked against its recorded
-digests only, and the report says so (``not_recomputed``).
+(``edisc_renderers.report.recompute``) and byte-compared: ``units.jsonl`` byte for byte, the unit
+counts, exceptions and conversations (and ``conversations.jsonl``), the job, scope, access, pause and
+actor sections; what cannot be recomputed offline (observations, renders, the snapshot, the
+divergences) is checked against its recorded digests only, and the report says so
+(``not_recomputed``).
 """
 
 from __future__ import annotations
@@ -27,15 +29,21 @@ from typing import Any
 
 from edisc_custody.archive import ArchiveError
 from edisc_custody.chain import Anchor, ChainVerifier, EventRecord, VerificationReport
-from edisc_custody.package import PackageFormatError, PackageReport, verify_package
+from edisc_custody.package import (
+    PackageFormatError,
+    PackageReport,
+    read_manifest,
+    verify_package,
+)
 from edisc_custody.package_source import (
     PackageSource,
     ZipSource,
+    is_os_metadata,
     lines,
     open_source,
     read_all,
 )
-from edisc_custody.render_package import check_job_seal, is_os_metadata
+from edisc_custody.render_package import check_job_seal
 from edisc_custody.report_files import (
     REPORT_GENERATED,
     REPORT_REFUSED,
@@ -46,11 +54,6 @@ from edisc_custody.report_files import (
 REPORT_PACKAGE_FORMAT = "edisc-report-package/1"
 REPORT_FILES = ("events.jsonl", "anchors.jsonl", "job_seal.json")
 MAX_OBJECT_BYTES = 1 << 20  # anchors and seals are small JSON documents
-NOT_RECOMPUTED = (
-    "units.jsonl database columns (kind, scopes, access-lost reason)",
-    "observations.jsonl", "renders.jsonl", "conversations.jsonl",
-    "the snapshot (renders, retention gaps, lock settings, audit events) and the S3 observation",
-)  # fmt: skip
 FINAL = ("completed", "failed", "refused")
 
 
@@ -61,6 +64,7 @@ class ReportPackageReport:
     manifest_sha256: str = ""
     outputs_checked: int = 0
     recomputed: bool = False  # the chain-derived content was recomputed and matched
+    recomputed_rows: int = 0  # units.jsonl rows rebuilt from the chain (and compared byte for byte)
     not_recomputed: tuple[str, ...] = ()
     tolerated: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -80,6 +84,7 @@ class ReportPackageReport:
             "manifest_sha256": self.manifest_sha256,
             "outputs_checked": self.outputs_checked,
             "recomputed": self.recomputed,
+            "recomputed_rows": self.recomputed_rows,
             "not_recomputed": list(self.not_recomputed),
             "errors": self.errors,
             "tolerated": self.tolerated,
@@ -116,17 +121,19 @@ def verify_report_package(
     root: Path, job_package: Path | None = None, *, tolerate_os_metadata: bool = False
 ) -> ReportPackageReport:
     """``root``: the package directory or zip. ``job_package``: the job's custody package
-    (directory), verified, matched, and used to recompute the chain-derived content."""
+    (directory or zip), verified, matched, and used to recompute the chain-derived content."""
     source = open_source(root)
     tolerate = tolerate_os_metadata and not isinstance(source, ZipSource)
     try:
-        return _verify(source, job_package, tolerate)
+        return _verify(source, job_package, tolerate, tolerate_os_metadata)
     finally:
         if isinstance(source, ZipSource):
             source.close()
 
 
-def _verify(source: PackageSource, job_package: Path | None, tolerate: bool) -> ReportPackageReport:
+def _verify(
+    source: PackageSource, job_package: Path | None, tolerate: bool, tolerate_job: bool = False
+) -> ReportPackageReport:
     report = ReportPackageReport()
     manifest_bytes = read_all(source, "manifest.json")
     report.manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
@@ -246,7 +253,10 @@ def _verify(source: PackageSource, job_package: Path | None, tolerate: bool) -> 
 
     # 5. optionally, the job itself, and the chain-derived content recomputed from it
     if job_package is not None:
-        _with_job(report, job_package, tenant_id, job_id, reference, seal, seal_body, outputs)
+        _with_job(
+            report, job_package, tenant_id, job_id, reference, seal, seal_body, outputs,
+            tolerate_job,
+        )  # fmt: skip
     return report
 
 
@@ -294,10 +304,10 @@ def _check_report_json(report: ReportPackageReport, outputs: dict[str, bytes]) -
 def _with_job(
     report: ReportPackageReport, job_package: Path, tenant_id: str, job_id: str,
     reference: dict[str, Any] | None, seal: dict[str, Any], seal_body: bytes | None,
-    outputs: dict[str, bytes],
+    outputs: dict[str, bytes], tolerate_job: bool,
 ) -> None:  # fmt: skip
-    report.job = verify_package(job_package)
-    jm = json.loads((job_package / "manifest.json").read_bytes())
+    report.job = verify_package(job_package, tolerate_os_metadata=tolerate_job)
+    jm = read_manifest(job_package)
     if jm.get("stream_id") != job_id or jm.get("tenant_id") != tenant_id:
         report.errors.append("job package: belongs to another job or tenant")
         return
@@ -318,13 +328,17 @@ def _with_job(
         report.errors.append("recomputation: the report holds no report.json/units.jsonl")
         return
     try:
-        from edisc_renderers.report.recompute import chain_projection, compare, report_projection
+        from edisc_renderers.report.recompute import recompute
     except ImportError as exc:  # never a silent skip: the check was asked for
         report.errors.append(f"recomputation needs edisc-renderers: {exc}")
         return
-    chain = chain_projection(_lines(open_source(job_package), "events.jsonl"))
-    stated = report_projection(outputs["report.json"], outputs["units.jsonl"].splitlines())
-    differences = compare(chain, stated)
-    report.errors += [f"recomputed from the job chain: {d}" for d in differences]
-    report.recomputed = not differences
-    report.not_recomputed = NOT_RECOMPUTED
+    done = recompute(
+        _lines(open_source(job_package), "events.jsonl"),
+        outputs["report.json"],
+        outputs["units.jsonl"],
+        outputs.get("conversations.jsonl"),
+    )
+    report.errors += [f"recomputed from the job chain: {d}" for d in done.differences]
+    report.recomputed = done.ok
+    report.recomputed_rows = done.units_rows
+    report.not_recomputed = done.not_recomputed()

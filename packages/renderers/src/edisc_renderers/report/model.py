@@ -21,7 +21,7 @@ import hashlib
 import heapq
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from typing import Any, Literal
 
@@ -46,7 +46,11 @@ SEVERITY: tuple[str, ...] = (
 _RANK = {s: i for i, s in enumerate(SEVERITY)}
 EXCEPTION_RECON = ("failed", "access_lost", "gap", "surplus", "unverifiable")
 
-UNIT_EVENTS = ("unit_reconciled", "unit_failed")
+UNIT_EVENTS = ("unit_reconciled", "unit_failed", "units_unsettled")
+# `job_started.unit_event_format` from which every unit event carries the unit's database-only facts
+# and unsettled units are recorded (`edisc_worker.pipeline.UNIT_EVENT_FORMAT`, ADR 0018 §28)
+DETAILED_FORMAT = 2
+DIRECTORY_UNIT_KEY = "directory"  # `edisc_worker.pipeline.DIRECTORY_UNIT` (a unit test ties them)
 FINAL_EVENTS = ("job_finished", "job_cancelled")
 OBSERVATION_KINDS = (
     "file_unavailable", "file_became_available", "access_lost", "access_restored",
@@ -99,12 +103,40 @@ def day_label(unit_key: str) -> str | None:
 
 # ------------------------------------------------------------------ units: chain fact vs database row
 @dataclass(frozen=True)
+class UnitDetail:
+    """A unit's facts that only the database held before ADR 0018 §28; recorded in every unit event
+    of jobs started since (`unit_event_format` 2)."""
+
+    kind: str
+    conversation_id: str
+    scopes: tuple[int, ...]  # indexes into `job_started.scopes`
+    access_lost_reason: str | None
+    gap_reasons: tuple[str, ...]
+
+    def record(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind, "conversation_id": self.conversation_id, "scopes": list(self.scopes),
+            "access_lost_reason": self.access_lost_reason, "gap_reasons": list(self.gap_reasons),
+        }  # fmt: skip
+
+
+def _detail(payload: Mapping[str, Any]) -> UnitDetail | None:
+    if "kind" not in payload:
+        return None  # recorded before §28
+    return UnitDetail(
+        str(payload["kind"]), str(payload.get("conversation_id") or ""),
+        tuple(int(i) for i in payload.get("scopes") or ()), payload.get("access_lost_reason"),
+        tuple(str(r) for r in payload.get("gap_reasons") or ()),
+    )  # fmt: skip
+
+
+@dataclass(frozen=True)
 class UnitFact:
     """What the chain says about one unit (or, from a database row, what it should say). Equal
     records mean the database agrees with the chain."""
 
     unit_key: str
-    outcome: Literal["reconciled", "failed"]
+    outcome: Literal["reconciled", "failed", "unsettled"]
     recon_status: str
     expected: int | None = None
     collected: int | None = None
@@ -117,19 +149,51 @@ class UnitFact:
     # the exact error when the chain recorded it with `error_utf16` (a lone surrogate, §23); not
     # part of the record compared with the database, which holds the valid text only
     error_exact: str | None = field(default=None, compare=False)
+    status: str | None = None  # an unsettled unit's status at the end of the job
+    detail: UnitDetail | None = None  # None: recorded before §28 (the chain does not say)
 
     def record(self) -> dict[str, Any]:
-        return {
+        out = {
             "unit_key": self.unit_key, "outcome": self.outcome, "recon_status": self.recon_status,
             "expected": self.expected, "collected": self.collected, "file_gaps": self.file_gaps,
             "no_longer_observed": self.no_longer_observed, "basis": self.basis,
             "day_anomalies": self.day_anomalies, "error_type": self.error_type,
             "error": self.error,
         }  # fmt: skip
+        if self.outcome == "unsettled":
+            out["status"] = self.status
+        if self.detail is not None:
+            out.update(self.detail.record())
+        return out
 
     @property
     def leaf(self) -> int:
         return _leaf(self.record())
+
+
+def unit_facts_from_event(event_type: str, payload: Mapping[str, Any]) -> list[UnitFact]:
+    """Every unit fact of a unit event (`units_unsettled` holds several)."""
+    if event_type == "units_unsettled":
+        return [_unsettled(u) for u in payload.get("units") or []]
+    return [unit_fact_from_event(event_type, payload)]
+
+
+def _unsettled(u: Mapping[str, Any]) -> UnitFact:
+    return UnitFact(
+        str(u["unit_key"]), "unsettled", str(u["recon_status"]),
+        expected=u.get("expected"), collected=u.get("collected"),
+        file_gaps=u.get("file_gaps"), status=str(u["status"]), detail=_detail(u),
+    )  # fmt: skip
+
+
+def facts_for_format(facts: list[UnitFact], detailed: bool) -> list[UnitFact]:
+    """A job's format is decided once, by its `job_started` (§28): a job recorded before it (or
+    started before an upgrade and finished after) states no unit details and no unsettled units from
+    the chain, whatever its later events carry, so the database cross-check compares like with
+    like."""
+    if detailed:
+        return facts
+    return [replace(f, detail=None) for f in facts if f.outcome != "unsettled"]
 
 
 def unit_fact_from_event(event_type: str, payload: Mapping[str, Any]) -> UnitFact:
@@ -142,6 +206,7 @@ def unit_fact_from_event(event_type: str, payload: Mapping[str, Any]) -> UnitFac
             file_gaps=payload.get("file_gaps"),
             no_longer_observed=payload.get("no_longer_observed"),
             basis=payload.get("basis"), day_anomalies=payload.get("day_anomalies"),
+            detail=_detail(payload),
         )  # fmt: skip
     if event_type == "unit_failed":
         error = str(payload.get("error"))
@@ -154,6 +219,7 @@ def unit_fact_from_event(event_type: str, payload: Mapping[str, Any]) -> UnitFac
         return UnitFact(
             key, "failed", ReconStatus.FAILED.value,
             error_type=str(payload.get("error_type")), error=error, error_exact=exact,
+            detail=_detail(payload),
         )  # fmt: skip
     raise ValueError(f"not a unit event: {event_type}")
 
@@ -166,24 +232,43 @@ def split_error(last_error: str | None) -> tuple[str | None, str | None]:
     return (kind, rest[:2000]) if sep else (None, last_error[:2000])
 
 
+def detail_from_row(row: Mapping[str, Any]) -> UnitDetail:
+    return UnitDetail(
+        str(row.get("kind")), str(row.get("conversation_id") or ""),
+        tuple(sorted(int(i) for i in row.get("scopes") or ())), row.get("access_lost_reason"),
+        tuple(sorted(str(r) for r in row.get("gap_reasons") or ())),
+    )  # fmt: skip
+
+
 def unit_fact_from_row(
-    row: Mapping[str, Any], *, no_longer_observed: int, archive_backed: bool
-) -> UnitFact | None:
-    """The database's version of the unit's chain fact; None while the unit is unsettled (no chain
-    event is due yet: pending, running, retry_later, paused)."""
+    row: Mapping[str, Any], *, no_longer_observed: int, archive_backed: bool,
+    detailed: bool = False,
+) -> UnitFact | None:  # fmt: skip
+    """The database's version of the unit's chain fact. ``detailed``: the job records unit details
+    and unsettled units (`unit_event_format` 2, §28), so the row's details are part of the fact and an
+    unsettled unit has one; otherwise None while the unit is unsettled (no chain event is due:
+    pending, running, retry_later, paused)."""
     key, status = str(row["unit_key"]), row["status"]
+    detail = detail_from_row(row) if detailed else None
     if status == UnitStatus.FAILED.value:
         error_type, error = split_error(row.get("last_error"))
-        return UnitFact(key, "failed", ReconStatus.FAILED.value, error_type=error_type, error=error)
+        return UnitFact(key, "failed", ReconStatus.FAILED.value, error_type=error_type, error=error,
+                        detail=detail)  # fmt: skip
     if status != UnitStatus.DONE.value:
-        return None
+        if not detailed:
+            return None
+        return UnitFact(
+            key, "unsettled", str(row["recon_status"]), expected=row.get("expected_count"),
+            collected=row.get("collected_count"), file_gaps=row.get("file_gaps"),
+            status=str(status), detail=detail,
+        )  # fmt: skip
     archive = archive_backed and row.get("kind") != "directory"
     return UnitFact(
         key, "reconciled", str(row["recon_status"]),
         expected=row.get("expected_count"), collected=row.get("collected_count"),
         file_gaps=row.get("file_gaps"), no_longer_observed=no_longer_observed,
         basis="archive" if archive else None,
-        day_anomalies=row.get("day_anomalies") if archive else None,
+        day_anomalies=row.get("day_anomalies") if archive else None, detail=detail,
     )  # fmt: skip
 
 
@@ -305,8 +390,8 @@ class ChainFold:
     # database holds the valid text only, so these are stated from the chain. Memory: O(such units)
     exact_errors: dict[str, UnitFact] = field(default_factory=dict)
 
-    def add(self, e: ChainEvent) -> UnitFact | None:
-        """Fold one event; returns its unit fact for a unit event."""
+    def add(self, e: ChainEvent) -> list[UnitFact]:
+        """Fold one event; returns its unit facts (several for `units_unsettled`)."""
         self.events += 1
         self.actors[(e.event_type, e.actor)] += 1
         if e.event_type == "job_started":
@@ -332,13 +417,22 @@ class ChainFold:
         elif e.event_type == "items_collected":
             self.batches += 1
         elif e.event_type in UNIT_EVENTS:
-            fact = unit_fact_from_event(e.event_type, e.payload)
-            if fact.error_exact is not None:
-                self.exact_errors.setdefault(fact.unit_key, fact)
-            self.units.add(fact)
-            self.outcomes[fact.recon_status] += 1
-            return fact
-        return None
+            facts = facts_for_format(unit_facts_from_event(e.event_type, e.payload), self.detailed)
+            for fact in facts:
+                if fact.error_exact is not None:
+                    self.exact_errors.setdefault(fact.unit_key, fact)
+                self.units.add(fact)
+                self.outcomes[fact.recon_status] += 1
+            return facts
+        return []
+
+    @property
+    def detailed(self) -> bool:
+        """The job records every unit's details and its unsettled units (§28)."""
+        return (
+            self.started is not None
+            and self.started.payload.get("unit_event_format") == DETAILED_FORMAT
+        )
 
     @property
     def final_status(self) -> str | None:
@@ -350,6 +444,16 @@ def scope_refs(started: ChainEvent | None) -> list[dict[str, Any]]:
     return [] if started is None else list(started.payload.get("scopes", []))
 
 
+def kind_of(unit_key: str) -> str:
+    """A unit's kind as its key states it (the chain's unit keys name the directory unit)."""
+    return "directory" if unit_key == DIRECTORY_UNIT_KEY else "conversation_day"
+
+
+def conversation_of(unit_key: str) -> str | None:
+    """The conversation of a `<conversation>/<YYYY-MM-DD>` unit key."""
+    return unit_key.rpartition("/")[0] if day_label(unit_key) is not None else None
+
+
 def unit_row(
     row: Mapping[str, Any],
     *,
@@ -359,31 +463,38 @@ def unit_row(
     divergent: bool,
 ) -> dict[str, Any]:
     """One `units.jsonl` row (§1). ``stated`` is the CHAIN fact when the chain speaks about the unit
-    (it then wins over the row), else None and the row is reported as database-sourced. ``scopes``:
+    (it then wins over the row: every value comes from it), else None and the row is reported as
+    database-sourced. A chain fact recorded before §28 has no details: the kind and conversation are
+    read from the unit key, and the scopes, access-lost reason and gap reasons print UNKNOWN (the
+    chain does not say; the database is never used for them). ``scopes``: for a database-sourced row,
     indexes into `job_started.scopes` of the scopes covering the unit."""
     key = str(row["unit_key"])
-    base = {
-        "unit_key": key,
-        "kind": row.get("kind"),
-        "conversation_id": row.get("conversation_id") or None,
-        "day": day_label(key),
-        "zone": zone,
-        "scopes": list(scopes),
-        "access_lost_reason": row.get("access_lost_reason"),
-        "divergent": divergent,
-    }
+    base = {"unit_key": key, "day": day_label(key), "zone": zone, "divergent": divergent}
     if stated is not None:
         f = stated
+        d = f.detail
+        facts: dict[str, Any] = (
+            {**d.record(), "conversation_id": d.conversation_id or None}
+            if d is not None
+            else {"kind": kind_of(key), "conversation_id": conversation_of(key),
+                  "scopes": UNKNOWN, "access_lost_reason": UNKNOWN, "gap_reasons": UNKNOWN}
+        )  # fmt: skip
+        status = (
+            f.status if f.outcome == "unsettled"
+            else UnitStatus.FAILED.value if f.outcome == "failed" else UnitStatus.DONE.value
+        )  # fmt: skip
         return {
-            **base, "source": "job_chain",
-            "status": UnitStatus.FAILED.value if f.outcome == "failed" else UnitStatus.DONE.value,
+            **base, **facts, "source": "job_chain", "status": status,
             "recon_status": f.recon_status, "expected": f.expected, "collected": f.collected,
             "file_gaps": f.file_gaps, "no_longer_observed": f.no_longer_observed,
             "basis": f.basis, "day_anomalies": f.day_anomalies, "error_type": f.error_type,
             "error": f.error if f.error_exact is None else f.error_exact,
         }  # fmt: skip
     return {
-        **base, "source": "database", "status": row["status"],
+        **base, "source": "database", "kind": row.get("kind"),
+        "conversation_id": row.get("conversation_id") or None, "scopes": list(scopes),
+        "access_lost_reason": row.get("access_lost_reason"),
+        "gap_reasons": sorted(row.get("gap_reasons") or []), "status": row["status"],
         "recon_status": row["recon_status"], "expected": row.get("expected_count"),
         "collected": row.get("collected_count"), "file_gaps": row.get("file_gaps"),
         "no_longer_observed": None, "basis": None, "day_anomalies": None,

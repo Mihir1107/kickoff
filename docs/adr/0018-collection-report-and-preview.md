@@ -948,3 +948,88 @@ and keep running. Breaks: a dev-only import in the API and in the worker.
    tampered report file fails (its recorded hash); and a report built to other facts but internally
    consistent and sealed (a faulty `unit_row`) passes alone and FAILS the recomputation.
 5. Mutation round `m16-api` (17 breaks).
+
+## 28. Fixes before step 6 (2026-10-11): hostile export values, every unit fact in the chain, a strict job verifier; report renderer 1.4.0, migration 0033
+1. **Export ingestion never drops data because of a lone surrogate.** Names are text: a channel
+   (or user, file, workspace) NAME holding one is stored like message text, as its replacement
+   (U+FFFD per surrogate) with its exact UTF-16 code units (`export_conversations.exact`: JSON
+   Pointer -> units; users and files were already lossless through the normalizer, §23); the folder
+   is the replacement text, which is what a UTF-8 writer makes of it *(confirm on real export)*; the
+   render loader restores the exact name, the RSMF writes it valid with `edisc.lone_surrogates`.
+   STRUCTURAL values (they key items) may be refused, never dropped: a conversation whose id holds
+   one is listed under a stand-in id (`lone-surrogate:` + its code units in hex,
+   `edisc_core.lone_surrogates.substitute_key`), marked `refused` (`conversation_id_lone_surrogate`);
+   so is a conversation whose team field holds one (`team_id_lone_surrogate`, never a fallback to
+   another team), and, when the WINNING `users.json` team id holds one (no id names the export's
+   workspace), every conversation without a team of its own (`workspace_id_lone_surrogate`). Each
+   day file of a refused conversation is a unit (`UncollectableUnitError` from the connector): status
+   done, recon `gap`, expected = the day file's elements, collected 0, `gap_reasons` = the reason;
+   its bytes stay in the locked export, none of its messages becomes an item. A message `ts` holding
+   one cannot be an item: the history batch selects the other messages (`message_page_subjects` now
+   honours `select` like the normalizer), the element is unaccounted, the unit is a gap with
+   `ts_lone_surrogate`; a `thread_ts` holding one cannot be looked up for thread context: every
+   message is collected (the derivation keeps the exact value, §23) and the unit is a gap with
+   `thread_ts_lone_surrogate` (`RawBatch.gaps`, recorded in the batch transaction). Validation never
+   indexes either and counts them (`ts_lone_surrogate`, `thread_ts_lone_surrogate`,
+   `metadata_records_with_lone_surrogates`, `conversations_refused` by reason,
+   `users_team_id_lone_surrogate`, `workspace_id_lone_surrogate` in the findings). Before: a hostile
+   id or name made the record "invalid" (counted, its folder then an orphan: its messages were never
+   collected and NO unit reported them); a hostile team silently fell back to the export's workspace
+   (wrong identities); a hostile `ts` failed the whole unit; a hostile `thread_ts` crashed thread
+   planning (`float()`).
+   **What happens to the messages, per corpus case** (`tests/integration/api/test_corpus_export.py`):
+   `export_hostile_channel_name`: every message of the channel is collected and rendered, the name
+   is stored exactly, nothing is refused, the job is `completed_against_archive`;
+   `export_hostile_channel_id`: none of the channel's messages is collected (they stay in the locked
+   export), every one of its day files is a gap unit with `conversation_id_lone_surrogate` (expected
+   = the file's elements, collected 0) under the stand-in id, the other conversations are collected
+   as usual, the job is `completed_with_gaps`; `message_keys` (a dedicated test): the element whose
+   `ts` holds one is the only message not collected (its unit: collected = expected - 1,
+   `ts_lone_surrogate`), the reply whose `thread_ts` holds one is collected (its unit: collected =
+   expected, `thread_ts_lone_surrogate`); hostile team ids: `test_export_collection.py`.
+2. **Every fact the report states is in the chain (new jobs).** `job_started` carries
+   `unit_event_format: 2`; every `unit_reconciled` / `unit_failed` carries the unit's `kind`,
+   `conversation_id`, `scopes` (indexes into `job_started.scopes`, scope rows in creation order),
+   `access_lost_reason` and `gap_reasons` (migration 0033 `work_units.gap_reasons`); the job's end
+   records the units no event settled (`units_unsettled`, 500 per event, before
+   `job_finished`/`job_cancelled`). The report states every unit row from the chain (`source`
+   `job_chain`, unsettled rows included) and the database row is the cross-check (the detail is part
+   of the compared fact). The format is decided ONCE per job by `job_started`: an older job (or one
+   started before the upgrade and finished after) states no details and no unsettled units from the
+   chain, whatever its later events carry (`facts_for_format`), so the cross-check compares like
+   with like; its rows print UNKNOWN for the scopes, access-lost reason and gap reasons, the kind and
+   conversation are read from the unit key, and a unit its chain never mentions (unsettled in a
+   cancelled job) keeps its database row, labelled `source: database`.
+   **File order independent of the database's locale** (found here): `units.jsonl` was ordered by
+   the database's collation; the test images are Alpine (musl: code points) but a glibc `en_US`
+   database orders "a", "B", "é" otherwise, so a report's bytes depended on the host. Migration 0033
+   makes `unit_key` / `conversation_id` COLLATE "C" (`work_units`, `work_unit_scopes`, `job_items`;
+   indexes rebuilt, the two views recreated): code-point order everywhere, as the verifier sorts.
+   **`edisc-verify --job-package` recomputes** (`edisc_renderers.report.recompute.recompute`):
+   `units.jsonl` byte for byte (every row from its chain fact, the zone from `job_started`, the
+   divergent flag from the report's own divergence list), and from those rows the unit counts by
+   status and recon status, the totals, the capped unit exceptions, the conversations section and
+   `conversations.jsonl`; plus the job, scope, access, pause and actor sections as before. A row the
+   report states from the database is taken as written and the verifier names how many. A difference
+   names the row and the differing fields. **Still not recomputable offline, and why:**
+   `observations.jsonl` and the observation counts (the items' derived records: the chain covers
+   items by content hash, not their derived fields); `renders.jsonl` (each render's own stream,
+   captured in the snapshot); the snapshot (retention gaps, lock settings and their S3 observation,
+   the job's evidence statistics, the tenant audit events); the divergences and each row's divergent
+   flag (a comparison with the database); the banner and the clean verdict (they depend on the
+   divergences and retention gaps); normalizer versions (derivations), the identity, versions and
+   integrity sections. These are checked against their recorded digests only.
+3. **The job package verifier is strict and reads zips in place.** `verify_package` takes the
+   directory or the downloaded zip through `package_source` (the hardened reader; nothing is
+   extracted or copied: an audit-hook test fails on any write, directory or temp file); an embedded
+   export archive inside a zip package is read by random access into its STORED entry (a package
+   that compresses it is refused for that archive). Every file the manifest does not account for
+   (the four JSONL files, `objects/<sha256>` of each embedded object and archive) fails the package;
+   `--tolerate-os-metadata` accepts only OS metadata, only in a directory, each listed (the render
+   verifier's rule, now shared: `package_source.is_os_metadata`). Both off the BACKLOG.
+4. Report renderer **1.4.0** (unit rows, the HTML exception table gains the gap and access-lost
+   reasons); goldens `tests/golden/report/1.4.0_unicode-15.0.0_glyphs-4831f454680d/`. Mutation round
+   `m16-pre6`; the `m16-pre5` entry for the old "refuse the record" behaviour is replaced and two
+   `m16-api` entries are retargeted (the temporary-directory copy is gone). Not mutated: the "C"
+   collation (a migration; its test reads the column collations, since musl orders code points
+   anyway).

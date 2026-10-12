@@ -28,6 +28,11 @@ Rounds (ADR 0015):
   (permissions, manual regeneration with who and why, audited downloads anchored before the first
   byte, re-hashed streams), the report package and ``edisc-verify`` (strictness, zipped job packages,
   the recomputation from the job chain).
+- ``m16-pre6``: the fixes before M16 step 6 (ADR 0018 §28): hostile export values never drop data
+  (names kept exactly; a conversation, team or workspace id, a ``ts`` or ``thread_ts`` holding a
+  lone surrogate makes its units gaps with the reason), every unit fact in the job chain (details in
+  unit events, unsettled units, the format decided per job) and ``units.jsonl`` recomputed byte for
+  byte, the job package verifier strict and reading zips in place.
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
   and the blocking-I/O guard ``edisc_core.loopblock``, §24.8), every CPU step moved off the loop, the
   render thread writing nothing (ADR 0015 §24).
@@ -123,6 +128,17 @@ CLI = "packages/custody/src/edisc_custody/cli.py"
 JEX = "packages/custody/src/edisc_custody/job_export.py"
 AJP = "tests/integration/api/test_job_package.py"
 ARP = "tests/integration/api/test_reports.py"
+PS = "packages/custody/src/edisc_custody/package_source.py"
+PA = "packages/custody/src/edisc_custody/package_archives.py"
+RC = "packages/renderers/src/edisc_renderers/report/recompute.py"
+EXW = "workers/collection/src/edisc_worker/exports.py"
+CONX = "packages/connectors/slack_export/src/edisc_connector_slack_export/connector.py"
+TP = "tests/integration/custody/test_package.py"
+AEP = "tests/integration/api/test_export_package.py"
+AEC = "tests/integration/api/test_export_collection.py"
+ACE = "tests/integration/api/test_corpus_export.py"
+RUF = "tests/integration/report/test_unit_facts.py"
+URC = "tests/unit/renderers/test_report_recompute.py"
 
 
 @dataclass(frozen=True)
@@ -235,7 +251,7 @@ CATALOG: list[Mutation] = [
       "    tolerate = tolerate_os_metadata", CP, "never_applies_to_a_zip"),
     m("tolerated_not_listed", "s19-review", C + "render_package.py",
       "            report.tolerated.append(extra)", "            pass", CP, "tolerated_and_listed"),
-    m("tolerate_too_much", "s19-review", C + "render_package.py",
+    m("tolerate_too_much", "s19-review", C + "package_source.py",
       '        or base.startswith("._")', '        or base.startswith(".")', CP, "anything_else"),
     m("divergence_not_recorded", "s19-review", API,
       "        if plan.anchor_divergences:", "        if False:", AP, "anchor_divergence"),
@@ -483,8 +499,10 @@ CATALOG: list[Mutation] = [
       "result = await asyncio.to_thread(\n                    normalize_directory_page, batch.body,",
       "result = normalize_directory_page(\n                    batch.body,", PL, "three_epochs"),
     m("message_subjects_on_loop", "s24-loop", W + "pipeline.py",
-      "subjects = await asyncio.to_thread(message_page_subjects, batch.body, ctx=ctx)",
-      "subjects = message_page_subjects(batch.body, ctx=ctx)", PL, "three_epochs"),
+      "subjects = await asyncio.to_thread(\n                    message_page_subjects, batch.body,"
+      " ctx=ctx, select=batch.select\n                )",
+      "subjects = message_page_subjects(batch.body, ctx=ctx, select=batch.select)", PL,
+      "three_epochs"),
     m("normalize_on_loop", "s24-loop", W + "pipeline.py",
       "result = await asyncio.to_thread(\n                    normalize_messages_page,\n",
       "result = normalize_messages_page(\n", PL, "three_epochs"),
@@ -754,9 +772,6 @@ CATALOG: list[Mutation] = [
       "valid_in_report_json"),
     m("report_states_db_error", "m16-pre5", RM, "            if fact.error_exact is not None:",
       "            if False:", RLS, "lone_surrogate"),
-    m("export_record_with_surrogate", "m16-pre5", LAY,
-      "    if any(isinstance(v, str) and has_lone(v) for v in (cid, name)):", "    if False:", ULA,
-      "conversation_with_a_lone"),
     m("export_key_with_surrogate", "m16-pre5", LAY,
       "    return value if isinstance(value, str) and not has_lone(value) else None",
       "    return value if isinstance(value, str) else None", ULA, "not_storable"),
@@ -830,11 +845,80 @@ CATALOG: list[Mutation] = [
     m("evidence_endpoint_serves_reports", "m16-api", JOBS,
       'row.kind in ("production", "report")', 'row.kind in ("production",)', ARP,
       "never_served_by_the_evidence"),
-    m("verifier_skips_recomputation", "m16-api", RPK, "    differences = compare(chain, stated)",
-      "    differences: list[str] = []", ARP, "other_facts"),
+    m("verifier_skips_recomputation", "m16-api", RPK,
+      '    report.errors += [f"recomputed from the job chain: {d}" for d in done.differences]',
+      "    pass", ARP, "other_facts"),
     m("verifier_accepts_unlisted_files", "m16-api", RPK,
       '            report.errors.append(f"{extra}: not part of this package")', "            pass",
       ARP, "unlisted"),
-    m("verifier_zip_job_package_unread", "m16-api", CLI, "    if path is None or not is_zip(path):",
-      "    if True:", ARP, "recomputes_from_the_job_package"),
+    m("verifier_zip_job_package_unread", "m16-api", PS,
+      "    return ZipSource(path) if is_zip(path) else DirectorySource(path)",
+      "    return DirectorySource(path)", ARP, "recomputes_from_the_job_package"),
+    # ------------------------------------------------------------------ fixes before step 6 (§28)
+    # fix 1: hostile export values never drop data
+    m("export_name_refused", "m16-pre6", LAY,
+      '        exact["/name"] = utf16_units(name)\n',
+      '        exact["/name"] = utf16_units(name)\n        return None\n', ULA, "kept_exactly"),
+    m("export_hostile_id_dropped", "m16-pre6", LAY, "        refused = REFUSED_ID",
+      "        return None", ULA, "stand_in"),
+    m("export_hostile_team_guessed", "m16-pre6", LAY,
+      "            refused = refused or REFUSED_TEAM\n", "", ULA, "stand_in"),
+    m("export_hostile_workspace_used", "m16-pre6", EXW,
+      "            scan.workspace_unkeyable = scan.workspace is None",
+      "            scan.workspace_unkeyable = False", AEC, "lone_surrogates_refuse"),
+    m("export_exact_name_not_stored", "m16-pre6", EXW,
+      '"exact": json.dumps(rec.exact) if rec.exact else None,', '"exact": None,', ACE,
+      "hostile_channel_name"),
+    m("export_hostile_ts_indexed", "m16-pre6", EXW, "                if storable_key(ts) is None:",
+      "                if False:", ACE, "message_keys"),
+    m("refused_conversation_collected", "m16-pre6", CONX,
+      "        if refused is not None:\n            raise UncollectableUnitError",
+      "        if False:\n            raise UncollectableUnitError", ACE, "hostile_channel_id"),
+    m("uncollectable_unit_not_recorded", "m16-pre6", PIPE,
+      "            await self._record_uncollectable(tenant_id, job_id, unit_key, exc.reason)\n", "",
+      ACE, "hostile_channel_id"),
+    m("hostile_ts_not_selected", "m16-pre6", CONX, "            if hostile_ts\n            else None",
+      "            if False\n            else None", ACE, "message_keys"),
+    m("subjects_ignore_select", "m16-pre6", NSL,
+      '        if select is not None and raw.get("ts") not in select:\n            continue\n        mid',
+      "        mid", ACE, "message_keys"),
+    m("batch_gaps_dropped", "m16-pre6", PIPE, '"gr": sorted(set(batch.gaps)),', '"gr": [],', ACE,
+      "message_keys"),
+    m("gap_reasons_ignored_in_recon", "m16-pre6", PIPE, "                and not row.gap_reasons\n",
+      "", ACE, "message_keys"),
+    m("render_export_name_not_restored", "m16-pre6", RLO,
+      '            name = restore({"name": name}, {"/name": meta.exact["/name"]})["name"]',
+      "            pass", ACE, "hostile_channel_name"),
+    # fix 2: every unit fact in the chain, recomputed byte for byte
+    m("unit_event_without_detail", "m16-pre6", PIPE,
+      '                        else {}\n                    ),\n                    **detail,\n',
+      '                        else {}\n                    ),\n', RUF, "every_unit_event"),
+    m("unit_event_format_not_marked", "m16-pre6", PIPE,
+      '                "unit_event_format": UNIT_EVENT_FORMAT,\n', "", RUF, "every_unit_event"),
+    m("unsettled_units_not_recorded", "m16-pre6", PIPE,
+      "for at in range(0, len(unsettled), UNSETTLED_BATCH):",
+      "for at in range(0, 0, UNSETTLED_BATCH):", RUF, "cancelled"),
+    m("unit_row_ignores_chain_detail", "m16-pre6", RM, "            if d is not None\n",
+      "            if False\n", RUF, "every_unit_event"),
+    m("older_job_details_trusted", "m16-pre6", RM, "    if detailed:\n        return facts",
+      "    if True:\n        return facts", URC, "before_the_format"),
+    m("recompute_skips_units_file", "m16-pre6", RC, "    if rebuilt != units_jsonl:",
+      "    if False:", URC, "names_what_differs"),
+    m("recompute_skips_sections", "m16-pre6", RC,
+      "        if canonical_json(mine[section]) != canonical_json(stated[section]):",
+      "        if False:", URC, "names_what_differs"),
+    # fix 3: the job package verifier strict, zips read in place
+    m("job_package_accepts_unlisted", "m16-pre6", PKG,
+      '            report.errors.append(f"{extra}: not part of this package")', "            pass",
+      TP, "manifest_does_not_list"),
+    m("job_package_tolerates_in_zip", "m16-pre6", PKG,
+      "        tolerate = tolerate_os_metadata and not isinstance(source, ZipSource)",
+      "        tolerate = tolerate_os_metadata", TP, "only_in_a_directory"),
+    m("job_package_copied_out", "m16-pre6", PKG,
+      "    source = open_source(path)\n    try:\n        tolerate",
+      "    import tempfile\n\n    tempfile.mkdtemp()\n    source = open_source(path)\n    try:\n"
+      "        tolerate", TP, "in_place"),
+    m("embedded_archive_not_read_in_zip", "m16-pre6", PA,
+      "        return lambda: EntrySource(source.stored_range(name))",
+      "        raise TypeError(name)", AEP, "inside_a_zip"),
 ]  # fmt: skip

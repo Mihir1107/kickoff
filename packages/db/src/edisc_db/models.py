@@ -226,8 +226,9 @@ class WorkUnit(Base):
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     job_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
-    unit_key: Mapped[str] = mapped_column(Text, primary_key=True)
-    conversation_id: Mapped[str] = mapped_column(Text)
+    # code-point order, whatever the host's locale (the report's file order, ADR 0018 §28)
+    unit_key: Mapped[str] = mapped_column(Text(collation="C"), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(Text(collation="C"))
     day: Mapped[date] = mapped_column(Date)
     status: Mapped[str] = mapped_column(Text, server_default=text("'pending'"))
     cursor: Mapped[str | None] = mapped_column(Text)
@@ -248,6 +249,7 @@ class WorkUnit(Base):
     failures: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     archive_accounted: Mapped[int | None] = mapped_column(Integer)
     day_anomalies: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    gap_reasons: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
 
 
 class EvidenceObject(Base):
@@ -464,7 +466,7 @@ class JobItem(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     job_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     item_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
-    unit_key: Mapped[str] = mapped_column(Text)
+    unit_key: Mapped[str] = mapped_column(Text(collation="C"))
     custody_event_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     in_scope: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
@@ -610,7 +612,7 @@ class WorkUnitScope(Base):
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     job_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
-    unit_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    unit_key: Mapped[str] = mapped_column(Text(collation="C"), primary_key=True)
     scope_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
 
 
@@ -724,6 +726,8 @@ class ExportConversation(Base):
     name: Mapped[str | None] = mapped_column(Text)
     metadata_entry: Mapped[str] = mapped_column(Text)
     team_id: Mapped[str | None] = mapped_column(Text)
+    exact: Mapped[dict[str, Any] | None] = mapped_column(JSONB)  # pointer -> UTF-16 code units
+    refused: Mapped[str | None] = mapped_column(Text)
 
 
 class RetentionGap(Base):

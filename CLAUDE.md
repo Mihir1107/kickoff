@@ -205,8 +205,18 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   need a reason and always create a new report; every content route (report file, report package,
   job package `GET /v1/jobs/{id}/package`, `export.read`) audits + `anchor_now` before the first byte.
   Packages: job `edisc-custody-package/3` (`edisc_custody.job_export`, deterministic), report
-  `edisc-report-package/1`; `edisc-verify <report pkg> --job-package <job pkg or zip>` recomputes the
-  chain-derived content (`edisc_renderers.report.recompute`).
+  `edisc-report-package/1`; `edisc-verify <report pkg> --job-package <job pkg or zip>` recomputes
+  `units.jsonl` byte for byte and the sections derived from the chain (`edisc_renderers.report.recompute`).
+- Hostile export values and unit facts (§28): a NAME holding a lone surrogate is text (stored as
+  replacement + exact code units, `export_conversations.exact`); a STRUCTURAL value (conversation,
+  team or workspace id, `ts`, `thread_ts`) may be refused as a key but its units must be GAPS with a
+  specific reason (`work_units.gap_reasons`, `UncollectableUnitError`, `RawBatch.gaps`), never
+  missing, never clean. New jobs record every unit fact in the chain (`unit_event_format` 2: details
+  in unit events, `units_unsettled` at the end); the format is decided once per job by
+  `job_started` (`facts_for_format`). `units.jsonl` must stay recomputable byte for byte from the job
+  package (`edisc_renderers.report.recompute`): a new column the report states goes into the unit
+  events first. Report order columns are COLLATE "C" (never depend on the DB locale). The job
+  package verifier is strict and reads zips in place, like the render and report verifiers.
 - `make test-production-install` (CI job `production-install`): the API and every worker type start
   from a no-dev, non-editable install. A runtime import of a dev-only package fails it.
 

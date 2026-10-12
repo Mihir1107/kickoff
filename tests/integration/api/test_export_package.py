@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import uuid
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,6 +20,7 @@ import pytest
 
 from edisc_custody.export import export_package
 
+from ..custody.test_package import cli_without_writes, zip_directory
 from .conftest import Api, FileHost, TenantCtx, collection_workers
 from .test_export_collection import THREADS, _export_connection, _job, _scope, _zip
 from .test_jobs import make_world
@@ -98,6 +100,25 @@ async def test_embedded_archive_verifies_offline(
     zip_path.write_bytes(bytes(tampered))
     code, out, report = verify(pkg)
     assert code == 1 and "SHA-256/size do not match the record" in out
+    assert report["entries_checked"] == 0
+
+
+async def test_an_embedded_archive_is_read_inside_a_zip_package(
+    export_job: tuple[Api, uuid.UUID, bytes], tenant: TenantCtx, tmp_path: Path
+) -> None:
+    """The downloaded zip is verified where it lies: the embedded export zip is a STORED entry read by
+    random access (no copy, no temporary file); a package zip that compresses it is refused for that
+    archive, never silently extracted."""
+    exp, job_id, _ = export_job
+    pkg = await _package(exp, tenant, job_id, tmp_path / "pkg", "embed")
+    stored = zip_directory(pkg, tmp_path / "job.zip")
+    code, out = cli_without_writes(stored, "--json")
+    assert code == 0, out
+    report = json.loads(out)
+    assert (report["archives_checked"], report["entries_checked"]) == (1, 4)
+    deflated = zip_directory(pkg, tmp_path / "deflated.zip", method=zipfile.ZIP_DEFLATED)
+    code, out, report = verify(deflated)
+    assert code == 1 and "not stored" in out, out
     assert report["entries_checked"] == 0
 
 

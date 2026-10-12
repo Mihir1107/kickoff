@@ -46,6 +46,11 @@ class ExportOptions:
     # the legacy subtype reply_broadcast, thread parents listing their replies (off by default: the
     # default output is unchanged)
     legacy_layout: bool = False
+    # hostile source values (ADR 0018 §28), escaped lone surrogates like a JSON encoder writes them:
+    # "channel_name": conversation 0's name (its folder is what a UTF-8 writer makes of it: U+FFFD);
+    # "channel_id": conversation 0's id in its metadata file; "message_keys": conversation 0, day 0,
+    # element 0's ``ts``, and the next reply's ``thread_ts`` in a later day file. Off by default.
+    hostile: Literal["channel_name", "channel_id", "message_keys"] | None = None
 
 
 @dataclass
@@ -57,14 +62,25 @@ class ExportManifest:
     metadata_files: list[str] = field(default_factory=list)
     conversations: dict[str, str] = field(default_factory=dict)  # folder -> conversation id
     junk: list[str] = field(default_factory=list)  # macOS entries: expected as unknown entries
+    # ``hostile``: what was made hostile, for the oracle ("ts" / "thread_ts" -> (conversation id,
+    # day, original ts); "name" / "id" -> the conversation id)
+    hostile: dict[str, Any] = field(default_factory=dict)
+
+
+HIGH, LOW = chr(0xD83D), chr(0xDC00)  # lone surrogates (`hostile`)
+
+
+def channel_name(conv: Conversation, opts: ExportOptions, index: int) -> str:
+    """The name the metadata file gives the conversation."""
+    name = f"{NON_ASCII[index % len(NON_ASCII)]}-{index}" if opts.non_ascii_names else conv.name
+    return name + HIGH if opts.hostile == "channel_name" and index == 0 else name
 
 
 def folder_name(conv: Conversation, opts: ExportOptions, index: int) -> str:
     if conv.kind == "dm":
         return conv.id
-    if opts.non_ascii_names:
-        return f"{NON_ASCII[index % len(NON_ASCII)]}-{index}"
-    return conv.name
+    # what a UTF-8 writer makes of a name holding a lone surrogate (Node replaces it by U+FFFD)
+    return channel_name(conv, opts, index).replace(HIGH, "\ufffd")
 
 
 def _dump(value: Any) -> bytes:
@@ -132,6 +148,10 @@ def write_export(ds: Dataset, out: BinaryIO, opts: ExportOptions | None = None) 
             add(filename, _dump(by_file[filename]))
             manifest.metadata_files.append(filename)
 
+    if opts.hostile == "channel_name":
+        manifest.hostile["name"] = convs[0][1].id
+    if opts.hostile == "channel_id":
+        manifest.hostile["id"] = convs[0][1].id
     for i, conv in convs:
         folder = folder_name(conv, opts, i)
         manifest.conversations[folder] = conv.id
@@ -142,10 +162,10 @@ def write_export(ds: Dataset, out: BinaryIO, opts: ExportOptions | None = None) 
             msgs = [m for m in ds.unit_messages(conv.id, d, epoch) if m.deleted_ts is None]
             if not msgs:
                 continue
-            add(
-                f"{folder}/{ds.day(d).isoformat()}.json",
-                _dump([_layout(message(ds, m, epoch), m, opts) for m in msgs]),
-            )
+            rows = [_layout(message(ds, m, epoch), m, opts) for m in msgs]
+            if opts.hostile == "message_keys" and i == 0:
+                _hostile_keys(rows, conv.id, d, manifest)
+            add(f"{folder}/{ds.day(d).isoformat()}.json", _dump(rows))
             manifest.day_files += 1
             manifest.messages += len(msgs)
     if opts.padding_days:
@@ -164,6 +184,23 @@ def write_export(ds: Dataset, out: BinaryIO, opts: ExportOptions | None = None) 
             manifest.day_files += 1
     zw.close()
     return manifest
+
+
+def _hostile_keys(
+    rows: list[dict[str, Any]], conv: str, day: int, manifest: ExportManifest
+) -> None:
+    """``hostile="message_keys"``: day 0's first element gets a lone surrogate in its ``ts``; the first
+    reply of a later day in its ``thread_ts``."""
+    if day == 0 and "ts" not in manifest.hostile:
+        manifest.hostile["ts"] = (conv, day, rows[0]["ts"])
+        rows[0]["ts"] += LOW
+        return
+    if day > 0 and "thread_ts" not in manifest.hostile:
+        for row in rows:
+            if row.get("thread_ts") and row["thread_ts"] != row["ts"]:
+                manifest.hostile["thread_ts"] = (conv, day, row["ts"])
+                row["thread_ts"] += HIGH
+                return
 
 
 def _layout(raw: dict[str, Any], m: Any, opts: ExportOptions) -> dict[str, Any]:
@@ -206,8 +243,8 @@ def _conversation(
     if conv.kind == "dm":
         return {"id": conv.id, "created": created, "members": list(conv.members)}
     out: dict[str, Any] = {
-        "id": conv.id,
-        "name": folder_name(conv, opts, index),
+        "id": conv.id + LOW if opts.hostile == "channel_id" and index == 0 else conv.id,
+        "name": channel_name(conv, opts, index),
         "created": created,
         "creator": conv.members[0],
         "is_archived": False,

@@ -107,8 +107,15 @@ def _inputs(*, units: int, conversations: int, status: str = "completed", live: 
         )
         if hard and failed and i == 0:
             error = LONE
+        # §28: the chain states scopes, access-lost and gap reasons (UNKNOWN before it recorded them)
+        detail: dict[str, Any] = (
+            {"scopes": [0], "access_lost_reason": None,
+             "gap_reasons": ["thread_ts_lone_surrogate"] if gap and i % 2 else []}
+            if live else
+            {"scopes": m.UNKNOWN, "access_lost_reason": m.UNKNOWN, "gap_reasons": m.UNKNOWN}
+        )  # fmt: skip
         row = {"unit_key": key_, "kind": "conversation_day", "conversation_id": conv,
-               "day": key_[-10:], "zone": "UTC", "scopes": [0], "access_lost_reason": None,
+               "day": key_[-10:], "zone": "UTC", **detail,
                "divergent": False, "source": "job_chain", "status": "failed" if failed else "done",
                "recon_status": recon, "expected": None if failed else 5,
                "collected": None if failed else (4 if gap else 5),
@@ -164,7 +171,7 @@ CASES: dict[str, Callable[[], m.ReportInputs]] = {
         units=40, conversations=8, status="completed_with_gaps", failed_every=5, gap_every=3,
         hard=True),
     "archive": lambda: _inputs(units=6, conversations=2, status="completed_against_archive"),
-    "pre_change_unknown": lambda: _inputs(units=4, conversations=1, live=False),
+    "pre_change_unknown": lambda: _inputs(units=4, conversations=1, live=False, gap_every=2),
     "custody_failed_divergent": lambda: _inputs(
         units=4, conversations=1, custody_ok=False, divergences=2, retention_gaps=1),
     # at the caps: 1,205 unit exceptions and 1,001 conversations, the remainders named by file
