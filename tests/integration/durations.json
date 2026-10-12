@@ -1043,7 +1043,7 @@
 "tests/integration/test_infra_smoke.py::test_postgres_is_16_with_temporal_databases": 0.02,
 "tests/integration/test_infra_smoke.py::test_temporal_namespace_reachable": 0.02,
 "tests/integration/worker/test_patch_check.py::test_open_workflows_started_before_the_deploy_block_patch_removal": 0.24,
-"tests/integration/worker/test_report_cases.py::test_a_cancelled_job_reports_its_unsettled_units_from_the_database": 1.51,
+"tests/integration/worker/test_report_cases.py::test_a_cancelled_job_reports_its_unsettled_units_from_the_chain": 1.51,
 "tests/integration/worker/test_report_cases.py::test_a_failed_job_still_gets_a_report_that_says_so": 1.5,
 "tests/integration/worker/test_report_cases.py::test_a_pause_records_who_reauthorized_and_for_how_long": 4.8,
 "tests/integration/worker/test_report_cases.py::test_failed_units_are_exceptions_with_their_error": 3.48,

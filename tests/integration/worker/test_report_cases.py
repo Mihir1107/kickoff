@@ -63,9 +63,11 @@ async def test_failed_units_are_exceptions_with_their_error(harness: Harness) ->
     )
 
 
-async def test_a_cancelled_job_reports_its_unsettled_units_from_the_database(
+async def test_a_cancelled_job_reports_its_unsettled_units_from_the_chain(
     harness: Harness,
 ) -> None:
+    """Units no event settled are recorded at the job's end (`units_unsettled`, ADR 0018 §28): the
+    report states every row from the chain, the unsettled ones with their status at cancellation."""
     sp = spec(conversations=4, messages_per_unit=30)
     t = await harness.tenant(sp)
     job_id = await harness.create_job(t, sp)
@@ -89,9 +91,8 @@ async def test_a_cancelled_job_reports_its_unsettled_units_from_the_database(
     built, files = await _report(harness, t.tenant_id, job_id)
     units = files["units.jsonl"]
     assert {r["unit_key"] for r in units} == set(oracle.units(Dataset(sp), 0))
-    unsettled = [r for r in units if r["source"] == "database"]
-    assert unsettled and all(r["status"] not in ("done", "failed") for r in unsettled)
-    assert all(r["source"] == "job_chain" for r in units if r["status"] in ("done", "failed"))
+    unsettled = [r for r in units if r["status"] not in ("done", "failed")]
+    assert unsettled and {r["source"] for r in units} == {"job_chain"}
     assert built.document["job"]["status"] == "cancelled" and not built.clean
     assert built.document["divergences"]["divergences"] == []
     assert built.document["banner"][0].startswith("NOT COMPLETE: status cancelled")
