@@ -2,6 +2,7 @@
 
 import base64
 import json
+import logging
 import stat
 import uuid
 from pathlib import Path
@@ -17,8 +18,10 @@ from edisc_core.envelope import (
     blob_key_info,
 )
 from edisc_core.kms import InvalidCiphertextError, KmsError, LocalKmsClient
+from edisc_core.logs import get_logger
 from edisc_core.redaction import REDACTED, clear_registered_secrets, redact_text
 from edisc_core.settings import Environment, Settings
+from tests.logcapture import captured_logs
 
 TOKEN = "xoxb-UNIT-CANARY-0123456789abcdef"
 T1, T2 = uuid.uuid4(), uuid.uuid4()
@@ -180,10 +183,22 @@ async def test_rewrap_keeps_data_ciphertext_and_moves_key_version(kms: LocalKmsC
 
 
 async def test_sealed_and_opened_secrets_are_redacted_from_logs(kms: LocalKmsClient) -> None:
-    clear_registered_secrets()
+    """Through the production logging pipeline: a value matching no pattern, logged in a field
+    whose key is not sensitive, by structlog and by a stdlib library logger, after sealing."""
     box = SecretBox(kms)
-    await box.seal(SecretStr("opaque-provider-token-no-pattern"), key_id="local:t1", context=ctx())
-    assert redact_text("token=opaque-provider-token-no-pattern") == f"token={REDACTED}"
+    opened = "another-opaque-value-no-pattern"
+    stored = await box.seal(SecretStr(opened), key_id="local:t1", context=ctx())
+    clear_registered_secrets()  # a fresh process that only OPENS this value
+    value = "opaque-provider-value-no-pattern"
+    await box.seal(SecretStr(value), key_id="local:t1", context=ctx())
+    assert (await box.open(stored.blob, context=ctx())).get_secret_value() == opened
+    with captured_logs() as logs:
+        get_logger("t").info("provider said", note=f"value is {value}", other=opened)
+        logging.getLogger("thirdparty.oauth").warning("got %s and %s", value, opened)
+    logs.require("provider said")
+    logs.require("got [REDACTED] and [REDACTED]")
+    assert value not in logs.getvalue() and opened not in logs.getvalue()
+    assert redact_text(f"token={value}") == f"token={REDACTED}"
     clear_registered_secrets()
 
 

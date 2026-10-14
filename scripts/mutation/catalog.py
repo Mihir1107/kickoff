@@ -50,6 +50,10 @@ Rounds (ADR 0015):
   fixed 500 and its message-free log line, log paths without client segments, uvicorn's access log
   off, statement errors without parameters, recorded worker texts redacted on the way out, the
   route refusals that quoted the request.
+- ``m17-logs``: the sweep of every test that asserts on log output (M17, before step 2): each one
+  reads the production logging pipeline (``tests/logcapture.py``) and proves the lines under test
+  reached it before asserting what they must not contain. Each break leaks a value into a log line
+  that the test used to be blind to (``caplog``, an app without the access line, no logging at all).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
   and the blocking-I/O guard ``edisc_core.loopblock``, §24.8), every CPU step moved off the loop, the
   render thread writing nothing (ADR 0015 §24).
@@ -176,6 +180,10 @@ SESS = "packages/db/src/edisc_db/session.py"
 USE = "tests/unit/api/test_safe_errors.py"
 NOE = "tests/integration/api/test_no_echo.py"
 DBS = "tests/integration/db/test_statement_errors.py"
+ENV = "packages/core/src/edisc_core/envelope.py"
+CONN = "apps/api/src/edisc_api/routes/connections.py"
+ACO = "tests/integration/api/test_connections.py"
+UKMS = "tests/unit/core/test_kms_envelope.py"
 
 
 @dataclass(frozen=True)
@@ -1097,4 +1105,35 @@ CATALOG: list[Mutation] = [
       "        raise unprocessable(str(exc)) from exc", NOE, "handler_refusals"),
     m("echo_preview_refusal_detail", "m17-d11", PRV, "exc.code, REFUSED_DETAIL[exc.code]) from exc",
       "exc.code, exc.detail) from exc", APV, "refusals_are_audited"),
+    # ------------------------------------------------------------------ log assertions see the pipeline
+    Mutation("log_credential_before_registration", "m17-logs", CONN, (
+        ("from edisc_core.ids import new_id\n",
+         "from edisc_core.ids import new_id\nfrom edisc_core.logs import get_logger\n"),
+        ("def _tokens(c: Credentials, version: int = 0) -> TokenSet:\n",
+         "def _tokens(c: Credentials, version: int = 0) -> TokenSet:\n"
+         "    get_logger(__name__).info(\"credentials\", note=c.access_token.get_secret_value())\n"),
+    ), ACO, "no_credential_is_ever_returned"),
+    m("log_access_line_query", "m17-logs", APPM, 'route=getattr(route, "path", None),',
+      "route=str(request.url),", USE, "raw_bodies"),
+    m("log_validation_errors_raw", "m17-logs", SE,
+      "        errors = exc.errors() if isinstance(exc, RequestValidationError) else ()\n",
+      "        errors = exc.errors() if isinstance(exc, RequestValidationError) else ()\n"
+      "        log.info(\"validation\", errors=repr(errors))\n", USE, "wrong_body"),
+    m("log_auth_failure_host", "m17-logs", APPM,
+      'log.info("authentication failed", reason=str(exc), path=request_path(request))',
+      'log.info("authentication failed", reason=str(exc), path=request.headers.get("host"))', NOE,
+      "bearer_token_or_host"),
+    Mutation("log_refusal_value", "m17-logs", CONN, (
+        ("from edisc_core.ids import new_id\n",
+         "from edisc_core.ids import new_id\nfrom edisc_core.logs import get_logger\n"),
+        ('        raise unprocessable("unknown source")',
+         '        get_logger(__name__).info("refused", source=body.source)\n'
+         '        raise unprocessable("unknown source")'),
+    ), NOE, "handler_refusals"),
+    m("log_opened_secret_not_registered", "m17-logs", ENV,
+      "        value = raw.decode(\"utf-8\")\n        if len(value) >= MIN_SECRET_LENGTH:\n            register_secret(value)\n",
+      "        value = raw.decode(\"utf-8\")\n", UKMS, "redacted_from_logs"),
+    m("log_sealed_secret_not_registered", "m17-logs", ENV,
+      "            register_secret(value)  # anything we ever seal", "            pass  # anything we ever seal",
+      UKMS, "redacted_from_logs"),
 ]  # fmt: skip

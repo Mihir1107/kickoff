@@ -106,6 +106,32 @@ def warm_routes(app: FastAPI) -> int:
     return built
 
 
+def add_request_context(app: FastAPI) -> None:
+    """Every request gets an id (client-supplied X-Request-Id if sane), bound to all its log lines
+    and returned in the response; routes put it in custody and audit payloads. Writes the access
+    line (uvicorn's own prints the raw request line: switched off in main)."""
+
+    @app.middleware("http")
+    async def _request_context(request: Request, call_next: Any) -> Any:
+        rid = request_id(request)
+        request.state.request_id = rid
+        clear_context()
+        path = request_path(request)  # never a client-chosen segment, never the query string
+        bind_context(request_id=rid, path=path)
+        started = time.monotonic()
+        try:
+            response = await call_next(request)
+            route = request.scope.get("route")
+            log.info(
+                "request", method=request.method, route=getattr(route, "path", None),
+                status=response.status_code, ms=round((time.monotonic() - started) * 1000, 1),
+            )  # fmt: skip
+        finally:
+            clear_context()
+        response.headers["x-request-id"] = rid
+        return response
+
+
 def create_app(settings: Settings, resources: Resources | None = None) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -122,28 +148,7 @@ def create_app(settings: Settings, resources: Resources | None = None) -> FastAP
     if resources is not None:
         app.state.resources = resources
 
-    @app.middleware("http")
-    async def _request_context(request: Request, call_next: Any) -> Any:
-        """Every request gets an id (client-supplied X-Request-Id if sane), bound to all its log lines
-        and returned in the response; routes put it in custody and audit payloads."""
-        rid = request_id(request)
-        request.state.request_id = rid
-        clear_context()
-        path = request_path(request)  # never a client-chosen segment, never the query string
-        bind_context(request_id=rid, path=path)
-        started = time.monotonic()
-        try:
-            response = await call_next(request)
-            route = request.scope.get("route")
-            # the access line (uvicorn's own prints the raw request line: switched off in main)
-            log.info(
-                "request", method=request.method, route=getattr(route, "path", None),
-                status=response.status_code, ms=round((time.monotonic() - started) * 1000, 1),
-            )  # fmt: skip
-        finally:
-            clear_context()
-        response.headers["x-request-id"] = rid
-        return response
+    add_request_context(app)
 
     @app.exception_handler(AuthError)
     async def _auth_error(request: Request, exc: AuthError) -> JSONResponse:

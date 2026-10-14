@@ -4,7 +4,6 @@ disables; matters use their client's connections; credentials never leave the to
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -15,6 +14,7 @@ from temporalio.worker import Worker
 from edisc_core.settings import Environment
 from edisc_core.time import utc_now
 from edisc_db.session import tenant_tx
+from tests.logcapture import captured_logs
 
 from ..worker.conftest import FAST, WORKFLOWS, queue, spec
 from .conftest import SECRETS, Api, TenantCtx, add_principal, secret
@@ -47,24 +47,27 @@ def _connection_body(sp: Any = None, **config: Any) -> dict[str, Any]:
 
 
 async def test_client_admin_creates_a_connection_and_no_credential_is_ever_returned(
-    api: Api, tenant: TenantCtx, caplog: pytest.LogCaptureFixture
+    api: Api, tenant: TenantCtx
 ) -> None:
-    caplog.set_level(logging.DEBUG)
     client, _ = await _client_and_matter(api, tenant)
     _, subject = await add_principal(api, tenant, roles=[("client_admin", "client", client)])
     body = _connection_body()
-    async with api.client(tenant.subdomain, tenant.token(api.settings, subject=subject)) as c:
-        r = await c.post(f"/v1/clients/{client}/connections", json=body)
-        assert r.status_code == 201, r.text
-        conn = r.json()
-        assert conn["status"] == "active" and conn["client_id"] == client
-        assert set(conn) == {
-            "id", "client_id", "source", "external_org_id", "status", "plan_tier",
-            "granted_scopes", "created_at", "updated_at",
-        }  # fmt: skip
-        listed = (await c.get(f"/v1/clients/{client}/connections")).json()
-        assert [x["id"] for x in listed["items"]] == [conn["id"]]
-        assert (await c.get(f"/v1/connections/{conn['id']}")).status_code == 200
+    # opaque values (no redaction pattern matches them): only the route registering them before
+    # anything logs them keeps them out of the log lines
+    body["credentials"] = {"access_token": secret("opaque"), "refresh_token": secret("opaque")}
+    with captured_logs() as logs:
+        async with api.client(tenant.subdomain, tenant.token(api.settings, subject=subject)) as c:
+            r = await c.post(f"/v1/clients/{client}/connections", json=body)
+            assert r.status_code == 201, r.text
+            conn = r.json()
+            assert conn["status"] == "active" and conn["client_id"] == client
+            assert set(conn) == {
+                "id", "client_id", "source", "external_org_id", "status", "plan_tier",
+                "granted_scopes", "created_at", "updated_at",
+            }  # fmt: skip
+            listed = (await c.get(f"/v1/clients/{client}/connections")).json()
+            assert [x["id"] for x in listed["items"]] == [conn["id"]]
+            assert (await c.get(f"/v1/connections/{conn['id']}")).status_code == 200
     token = body["credentials"]["access_token"]
     async with tenant_tx(api.sessions, tenant.tenant_id) as s:
         stored = (
@@ -84,7 +87,9 @@ async def test_client_admin_creates_a_connection_and_no_credential_is_ever_retur
         ]
     assert stored.token_version == 1 and token.encode() not in stored.encrypted_access_token
     assert not any(token in p for p in payloads)  # audit names the connection, never the credential
-    assert not any(s in caplog.text for s in SECRETS)
+    # the lines of this very request reached the production pipeline (else the next line is blind)
+    logs.require("request", method="POST", route="/v1/clients/{client_id}/connections", status=201)
+    assert not [s for s in SECRETS if s in logs.getvalue()]
 
 
 async def test_matter_roles_use_but_cannot_manage_the_clients_connections(

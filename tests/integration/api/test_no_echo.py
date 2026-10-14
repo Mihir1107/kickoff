@@ -178,6 +178,7 @@ async def test_a_canary_in_any_route_and_field_never_comes_back(
                 if _leaks(c, r) or (wrong_shape and r.status_code < 400):
                     leaks.append(f"{method.upper()} {url} [{desc}] -> {r.status_code}")
     assert not leaks, "\n".join(leaks)
+    logs.require("request", done)  # every request's own access line reached this sink
     logged = [line for line in logs.getvalue().splitlines() if c in line]
     assert not logged, "\n".join(logged[:10])
     assert done > 400 and len(spec["paths"]) >= 40  # the whole surface, not a few routes
@@ -189,14 +190,18 @@ async def test_a_canary_as_the_bearer_token_or_host_is_not_logged(
     api: Api, tenant: TenantCtx
 ) -> None:
     c = _canary()
+    host = c.lower()  # a URL's host is lowercased by the client: a mixed-case canary never matches
     with captured_logs() as logs:
         async with api.client(tenant.subdomain, c) as http:
             r = await http.get(f"/v1/clients/{tenant.default_client_id}")
-        async with api.client(c, tenant.token(api.settings)) as http:
+        async with api.client(host, tenant.token(api.settings)) as http:
             r2 = await http.get(f"/v1/clients/{tenant.default_client_id}")
+    assert r2.request.headers["host"].startswith(f"{host}.")  # the canary really was the host
     assert (r.status_code, r2.status_code) == (401, 401)
-    assert not _leaks(c, r) and not _leaks(c, r2)
-    assert c not in logs.getvalue()
+    assert not _leaks(c, r) and not _leaks(host, r2)
+    logs.require("authentication failed", 2)
+    logs.require("request", 2, method="GET", status=401)
+    assert c not in logs.getvalue() and host not in logs.getvalue()
 
 
 async def test_handler_refusals_quote_nothing_the_request_sent(
@@ -232,4 +237,5 @@ async def test_handler_refusals_quote_nothing_the_request_sent(
         "unknown time zone (IANA names of the pinned tzdata)"
     )
     assert not [k for k, r in answers.items() if _leaks(c, r)]
+    logs.require("request", len(answers), status=422)
     assert c not in logs.getvalue()

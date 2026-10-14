@@ -18,6 +18,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_core import PydanticCustomError
 
+from edisc_api.app import add_request_context
 from edisc_api.errors import RecordedText
 from edisc_api.safe_errors import (
     install,
@@ -87,6 +88,7 @@ async def stream(q: str) -> StreamingResponse:
 def _app() -> FastAPI:
     app = FastAPI()
     app.include_router(router)
+    add_request_context(app)  # the production access line: the positive control of the log checks
     install(app, [router])
     return app
 
@@ -127,6 +129,7 @@ async def test_a_wrong_body_is_answered_without_its_values(body: Any) -> None:
             r = await http.post(f"/v1/things/{uuid.uuid4()}", json=body(c))
     assert r.status_code == 422
     _no(c, r)
+    logs.require("request", method="POST", route="/v1/things/{thing_id}", status=422)
     assert c not in logs.getvalue()
     for error in r.json()["detail"]:
         assert set(error) == {"type", "loc", "msg"}  # never input, ctx or url
@@ -152,6 +155,8 @@ async def test_wrong_parameters_and_raw_bodies_are_answered_without_their_values
     assert [r.status_code for r in answers] == [422] * 5 + [400]
     for r in answers:
         _no(c, r)
+    logs.require("request", 5, method="POST", status=422)
+    logs.require("request", method="POST", status=400)
     assert c not in logs.getvalue()
 
 
@@ -206,12 +211,13 @@ async def test_an_unhandled_error_is_a_fixed_500_and_a_log_line_without_its_mess
         with captured_logs() as logs:
             r = await http.get("/v1/boom", params={"q": c})
     assert r.status_code == 500
-    assert r.json() == {"error": "internal_error", "detail": "internal error", "request_id": None}
+    rid = r.headers["x-request-id"]
+    assert r.json() == {"error": "internal_error", "detail": "internal error", "request_id": rid}
     _no(c, r)
     lines = [json.loads(line) for line in logs.getvalue().splitlines()]
     assert c not in logs.getvalue()
     (line,) = [x for x in lines if x["event"] == "unhandled error"]
-    assert line["error_types"] == ["builtins.ValueError"]
+    assert line["error_types"][0] == "builtins.ValueError"  # then the middleware's task group
     assert line["frames"][-1].endswith(" boom") and line["path"] == "/v1/boom"
 
 
