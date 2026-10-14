@@ -12,8 +12,8 @@ on hold (legal review). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
 ## Current state
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`.
 Migrations at head: **0036** (sessions). Renderer **1.3.2**, dummy connector **0.5.0**, normalizer
-**0.3.0**, report renderer **1.5.0**, preview renderer **1.0.0**. M16 is complete; the items before M17 are done (below). CI: see
-`gh run list`; run 38249757099 green on `a755e8e` (every job, report-pdf included).
+**0.3.0**, report renderer **1.5.0**, preview renderer **1.0.0**. CI: run 38544926700 green on `4724354` (step 2; every job, report-pdf and
+production-install included); run 38536427956 on `4a8c05f` failed one test (open, below).
 
 ## Done: M17 decisions, the log sweep, M17 step 2 (2026-10-14)
 **Decisions (user, 2026-10-14; ADR 0016 Amendment 2; m17.md §12):** signed state, alert timing and
@@ -51,6 +51,18 @@ to start outside local/test/ci without `EDISC_API_SESSION_KEYS` (workers never n
 `test-integration-only` deleted the first's dev IdP key: `InvalidSignatureError` 401s in an unrelated
 render-package test). Diagnosed, not re-run to green: `stack_lock.py run` (an exclusive `flock` for
 the whole run) now guards `test-integration-only`; ADR 0015 §24.12.
+
+**OPEN, undiagnosed (CLAUDE.md rule: not re-run to green):** CI run 38536427956 (`4a8c05f`, the
+sweep + amendment) failed ONE test in integration shard 2:
+`tests/integration/custody/test_anchor_claims.py::test_concurrent_writers_produce_one_anchor_per_due_point`,
+a 466 ms event-loop block (257 ms lag sampled, 527 ms CPU on the loop thread, "product"), sampled
+while a writer awaited `BEGIN` in `tenant_tx`. The commit does not touch custody or this test. My
+hypothesis, NOT proven: the test gathers 200 writers on a 20-connection pool; as connections free,
+one loop iteration runs many ready task steps back to back (pool hand-offs, `append`'s hashing), so
+the sampler sees lag without any single blocking call, on a slow runner. Next: reproduce in a loop
+under CPU contention (the reproduction tooling note below), then decide product vs test; record in
+ADR 0015 §24. Not reproduced here: Docker Desktop stopped (disk at 6 GB free) after the step-2
+runs.
 
 **For you (not blocking step 3):**
 1. Browser sign-in is a PUBLIC OIDC client (PKCE, no client secret). Many IdPs want client
