@@ -184,9 +184,10 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
             t,
             ids["matter"],
         )
+        idp = new_id()
         await conn.execute(
             "INSERT INTO tenant_idps (id, tenant_id, issuer, audience, jwks_url) VALUES ($1, $2, 'https://idp', 'edisc', 'https://idp/jwks')",
-            new_id(),
+            idp,
             t,
         )
         principal, group = new_id(), new_id()
@@ -195,6 +196,29 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
             principal,
             t,
             f"sub-{principal}",
+        )
+        # browser sessions (migration 0036)
+        session = new_id()
+        await conn.execute(
+            "INSERT INTO sessions (id, tenant_id, principal_id, idp_id, id_hash, authenticated_at,"
+            " idle_expires_at, absolute_expires_at) VALUES ($1, $2, $3, $4, $5, now(),"
+            " now() + interval '30 minutes', now() + interval '12 hours')",
+            session,
+            t,
+            principal,
+            idp,
+            secrets.token_bytes(32),
+        )
+        await conn.execute(
+            "INSERT INTO login_attempts (id, tenant_id, idp_id, state_hash, handle_hash, key_id,"
+            " nonce, return_to, reauth, prior_session_id, expires_at) VALUES ($1, $2, $3, $4, $5,"
+            " 'dev', 'n', '/', true, $6, now() + interval '10 minutes')",
+            new_id(),
+            t,
+            idp,
+            secrets.token_bytes(32),
+            secrets.token_bytes(32),
+            session,
         )
         await conn.execute(
             "INSERT INTO groups (id, tenant_id, name) VALUES ($1, $2, 'G')", group, t
@@ -392,5 +416,7 @@ TENANT_TABLES = [
     "production_episodes",
     "reports",
     "report_files",
+    "sessions",
+    "login_attempts",
 ]
 ALL_TABLES = ["tenants", *TENANT_TABLES]

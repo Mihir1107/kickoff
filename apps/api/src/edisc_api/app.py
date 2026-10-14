@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+import urllib.parse
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
@@ -21,8 +22,10 @@ from types_aiobotocore_s3 import S3Client
 from edisc_api.auth import Authenticator, AuthError, Caller, JwksCache
 from edisc_api.client_ip import client_ip
 from edisc_api.errors import ApiError
+from edisc_api.oidc import OidcClient
 from edisc_api.safe_errors import install as install_safe_errors
 from edisc_api.safe_errors import request_path
+from edisc_api.sessions import SESSION_COOKIE, Keyring
 from edisc_connector_dummy.connector import DummyConnector
 from edisc_connector_dummy.guard import dummy_permitted, ensure_dummy_permitted
 from edisc_connector_slack_export.connector import SlackExportConnector
@@ -49,9 +52,29 @@ class Resources:
     authenticator: Authenticator
     connectors: Mapping[str, Connector]
     redis: aioredis.Redis | None = None  # auth-failure throttling (None: not throttled, tests only)
+    oidc: OidcClient | None = (
+        None  # browser sign-in (default: over the authenticator's HTTP client)
+    )
+    keyring: Keyring | None = None  # CSRF and PKCE keys (default: from settings)
 
     def __post_init__(self) -> None:
         ensure_dummy_permitted(self.settings.env, self.connectors)
+        if self.keyring is None:  # eager: the API refuses to start without keys (fail closed)
+            self.keyring = Keyring.from_settings(self.settings)
+
+    @property
+    def sign_in(self) -> OidcClient:
+        if self.oidc is None:  # over the authenticator's HTTP client and JWKS cache
+            self.oidc = OidcClient(
+                self.settings, self.authenticator.jwks.http, self.authenticator.jwks
+            )
+        return self.oidc
+
+    @property
+    def keys(self) -> Keyring:
+        if self.keyring is None:
+            raise RuntimeError("Resources.keyring is set in __post_init__")
+        return self.keyring
 
 
 @contextlib.asynccontextmanager
@@ -129,6 +152,10 @@ def add_request_context(app: FastAPI) -> None:
         finally:
             clear_context()
         response.headers["x-request-id"] = rid
+        if SESSION_COOKIE in request.cookies:  # never cached, never shared (ADR 0016 §2)
+            response.headers["cache-control"] = "no-store"
+            vary = response.headers.get("vary")
+            response.headers["vary"] = f"{vary}, Cookie" if vary else "Cookie"
         return response
 
 
@@ -154,7 +181,7 @@ def create_app(settings: Settings, resources: Resources | None = None) -> FastAP
     async def _auth_error(request: Request, exc: AuthError) -> JSONResponse:
         # same response for unknown tenant and any token problem: no subdomain enumeration
         log.info("authentication failed", reason=str(exc), path=request_path(request))
-        await _count_auth_failure(request)
+        await count_auth_failure(request)
         return JSONResponse(
             {"error": "unauthorized"}, status_code=401, headers={"WWW-Authenticate": "Bearer"}
         )
@@ -186,7 +213,7 @@ def _failure_key(request: Request) -> str:
     return f"edisc:authfail:{request.headers.get('host', '')}:{client}"
 
 
-async def _count_auth_failure(request: Request) -> None:
+async def count_auth_failure(request: Request) -> None:
     res: Resources | None = getattr(request.app.state, "resources", None)
     if res is None or res.redis is None:
         return
@@ -196,17 +223,61 @@ async def _count_auth_failure(request: Request) -> None:
         await res.redis.expire(key, 60)
 
 
-async def caller(request: Request) -> Caller:
-    """The authenticated caller. Too many recent failures from this address for this host: 429 before
-    any token or tenant lookup (slows credential stuffing and subdomain probing)."""
+async def check_auth_throttle(request: Request) -> None:
+    """429 when this (host, address) failed authentication too often in the last minute."""
     res = resources(request)
     if res.redis is not None:
         failures = await res.redis.get(_failure_key(request))
         if failures is not None and int(failures) >= res.settings.api_auth_failures_per_minute:
             raise ApiError(429, "too_many_requests", "too many failed authentication attempts")
-    return await res.authenticator.authenticate(
-        request.headers.get("host"), request.headers.get("authorization")
+
+
+async def caller(request: Request) -> Caller:
+    """The authenticated caller. Too many recent failures from this address for this host: 429 before
+    any token or tenant lookup (slows credential stuffing and subdomain probing)."""
+    res = resources(request)
+    await check_auth_throttle(request)
+    host, authorization = request.headers.get("host"), request.headers.get("authorization")
+    session_id = request.cookies.get(SESSION_COOKIE)
+    if session_id is not None and authorization is not None:  # before either is evaluated
+        raise ApiError(
+            400, "ambiguous_credentials", "send the session cookie or a bearer token, not both"
+        )
+    if session_id is None:
+        return await res.authenticator.authenticate(host, authorization)
+    # the cookie is ambient: only requests the tenant's own pages make (or the user typed) may use it
+    site = request.headers.get("sec-fetch-site")
+    if site is not None and site not in ("same-origin", "none"):
+        raise ApiError(403, "cross_site", "cookie-authenticated requests must be same-origin")
+    caller = await res.authenticator.authenticate_session(
+        host, session_id, touch=not getattr(request.state, "passive", False)
     )
+    if request.method not in SAFE_METHODS:
+        if not res.keys.csrf_valid(session_id, request.headers.get("x-csrf-token")):
+            raise ApiError(403, "csrf", "missing or invalid X-CSRF-Token")
+        if request_origin(request) != tenant_origin(res.settings, host):
+            raise ApiError(403, "csrf", "Origin is not this tenant")
+    return caller
+
+
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def tenant_origin(settings: Settings, host: str | None) -> str:
+    """The origin of the tenant host the request reached (the host was matched to the tenant)."""
+    return f"{settings.api_public_scheme}://{(host or '').lower()}"
+
+
+def request_origin(request: Request) -> str | None:
+    """``Origin``, else the origin of ``Referer`` (ADR 0016 §3); None when neither is usable."""
+    origin = request.headers.get("origin")
+    if origin is not None:
+        return origin.lower()
+    referer = request.headers.get("referer")
+    if not referer:
+        return None
+    parts = urllib.parse.urlsplit(referer)
+    return f"{parts.scheme}://{parts.netloc}".lower() if parts.scheme and parts.netloc else None
 
 
 CallerDep = Annotated[Caller, Depends(caller)]

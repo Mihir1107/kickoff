@@ -285,7 +285,7 @@ async def create_render_route(
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         job = await _job_for_render(s, job_id)
         await authorize(s, caller, P.EXPORT_CREATE, Scope("matter", job.matter_id))
-        require_recent_sign_in(caller)
+        signed_in = require_recent_sign_in(caller, res.settings)
         if job.sealed_at is None:
             raise ApiError(409, "job_not_sealed", f"job is {job.status}: only sealed jobs render")
         if job.matter_closed is not None:
@@ -317,6 +317,7 @@ async def create_render_route(
                 payload={"render_id": str(render_id), "job_id": str(job_id),
                          "matter_id": str(job.matter_id), "options": options.as_payload(),
                          "options_hash": options_hash(options), "created": made.created,
+                         "authenticated_at": signed_in,
                          **({"idempotency_key": idempotency_key} if idempotency_key else {})},
                 request_id=rid,
             )  # fmt: skip

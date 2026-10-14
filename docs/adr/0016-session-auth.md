@@ -2,8 +2,9 @@
 
 Status: **Accepted** (2026-10-03), **amended 2026-10-12** (Amendment 1 below: the M17 plan review,
 decisions D1, D2, D3, D5, D10, D11) and **2026-10-14** (Amendment 2: D4, D6-D9, D12-D14, the
-access-lost bounds, operator-only moves, Slack's terms). Not implemented yet (M17), except A8 (no error path echoes a
-request value: M17 step 0). Builds on ADR 0013 (tenant from the
+access-lost bounds, operator-only moves, Slack's terms). Implemented so far: A8 (no error path
+echoes a request value: M17 step 0) and §1-§4 with A1 (browser sessions: M17 step 2, notes at the
+end); the rest is M17 steps 5-8. Builds on ADR 0013 (tenant from the
 host, OIDC, scoped roles) and decision 7 of `docs/plans/phase-2.md` (server-side sessions, httpOnly
 cookies, CSRF, revocation, no tokens in the browser). It fixes the details the frontend
 (`feat/web-ui`, `apps/web/src/api/pending.ts`) had to assume, adopting its assumptions.
@@ -421,3 +422,62 @@ amendment wins.
   offers `require()` (a positive control on the very lines under test); the request middleware is
   `edisc_api.app.add_request_context`, shared by the unit app. Mutation round `m17-logs` (7 breaks,
   all caught; 4 of them passed the tests as they were).
+
+## Implementation notes: M17 step 2, browser sessions (2026-10-14)
+
+Built: migration 0036 (`sessions`, `login_attempts`, `tenant_idps.login_client_id`), `edisc_api.sessions`
+(primitives), `edisc_api.oidc` (relying party), `edisc_api.routes.auth` (login, callback, logout, CSRF),
+the session routes (`GET /v1/me/sessions`, `POST /v1/me/sessions/{id}/revoke`,
+`POST /v1/principals/{id}/sessions/revoke`), the cookie path of the caller dependency, and
+`require_recent_sign_in` made real on every action of §4. Not built here (later steps): SSE and the
+download cut-off (A5, step 5), install flows (step 6), token submission (step 7, on hold: A2.10).
+
+Choices made while building (each one a deviation from, or a detail the plan left open):
+1. **The PKCE verifier is not stored.** It is `HMAC(server key, login cookie handle)`; the attempt
+   row records the key id. The plan proposed an encrypted column; this way the row holds no secret
+   at all and only the browser's handle plus our key rebuild the verifier.
+2. **Sign-in is a public OIDC client** (authorization code + PKCE S256, no client secret). Many IdPs
+   require client authentication for a web application. Production needs `private_key_jwt` with a
+   platform key (no per-tenant secret to store): BACKLOG, required before production.
+3. **Fetch metadata:** a cookie-authenticated request whose `Sec-Fetch-Site` is present and not
+   `same-origin` or `none` is refused (403 `cross_site`), `same-site` included: a sibling tenant
+   subdomain is same-site and would otherwise carry the Strict cookie. Absent header (old clients):
+   allowed, CSRF still applies to state changes.
+4. **One sign-in IdP per tenant** (`login_client_id`, unique per tenant): the login route takes no
+   parameter naming an IdP. A tenant without one answers the generic 401.
+5. **ID token keys come from the registered `jwks_url`**, never from the discovery document's
+   `jwks_uri` or the token. The discovery document's `issuer` must equal the registered issuer; its
+   endpoints must be https; redirects are not followed.
+6. **Callback failures:** the bounce page to `/?auth_error=<code>` with status 400 (`invalid`,
+   `expired`, `denied`), 401 (`unknown_user`, `inactive`) or 403 (`reauth_mismatch`). Every failure
+   records the attempt's outcome, is audited `login_failed` (reason + a fixed detail code; actor
+   `anonymous` when no principal was resolved) and counts in the per-(host, address)
+   authentication-failure throttle. The IdP's `error` is recorded as one of a fixed set of codes
+   (else `other`); `error_description` is never read.
+7. **Sign-in rotates whatever session the browser held at the START** (the Strict cookie does not
+   reach the callback), whoever it belonged to, revoked `rotated` in the session's transaction.
+8. **Deactivating a principal needs a recent sign-in** (§2: "all of these ... need a recent
+   sign-in") and its audit event lists the sessions it ended.
+9. **Time is the database's:** expiry, idle and the once-a-minute activity write are evaluated with
+   `now()` in SQL. Expired sessions are not marked; `idle`/`absolute` stay in the reason list for an
+   archiving job (BACKLOG) and are never written today. The idle expiry never passes the absolute
+   one (a CHECK, and the activity write's `LEAST`), so the absolute term of the lookup is defence in
+   depth that no test can observe alone: its mutation entry breaks the CHECK instead.
+10. **Passive requests** (`request.state.passive`) authenticate without moving the idle expiry: the
+    hook the SSE stream (step 5) uses (A2.4, D6).
+11. **Revoking one's own session:** another principal's session id is 404, an already revoked one 409
+    `already_revoked`; ending the CURRENT session never needs a recent sign-in.
+
+Tests: `tests/integration/api/test_sessions.py` (74: sign-in, cookie flags, the bounce page, every
+callback refusal, `return_to` table, fixation, rotation, re-authentication, cookie + bearer, another
+tenant's cookie and state, expiries, the activity write, deactivation, CSRF token / Origin / Referer /
+bearer exemption, fetch metadata, logout, own and admin revocation, recent sign-in on every covered
+route for bearer `auth_time`, bearer `iat` and sessions, both throttles, three crash points),
+`tests/integration/api/test_sessions_browser.py` (A1 in Chromium, Firefox and WebKit over real
+HTTPS through a CONNECT proxy, with a control proving the harness withholds the Strict cookie
+cross-site), `tests/unit/api/test_session_primitives.py`, `tests/integration/db/test_session_guards.py`
+(on a database migrated from scratch in the test, so the migration's triggers and CHECKs are what is
+tested). Mutation round `m17-sessions`: 35 breaks, all caught (the first run left three uncaught:
+the fixation test planted a Strict cookie, which a browser withholds on the cross-site callback
+anyway, now planted as an attacker would (SameSite=None); the absolute-expiry term, see note 9; the
+guard tests ran on the already migrated database, so a migration edit changed nothing).

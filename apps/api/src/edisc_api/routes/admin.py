@@ -12,9 +12,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_core import PydanticCustomError
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, ResourcesDep
+from edisc_api.auth import require_recent_sign_in
 from edisc_api.authz import ROLES, TENANT, P, Scope, ancestors, authorize, perm
 from edisc_api.errors import conflict, not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, page_of
@@ -138,6 +140,7 @@ async def deactivate_principal(
 ) -> PrincipalOut:
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await authorize(s, caller, P.TENANT_ADMIN, TENANT)
+        signed_in = require_recent_sign_in(caller, res.settings)
         row = (
             await s.execute(
                 text(
@@ -149,12 +152,64 @@ async def deactivate_principal(
         ).one_or_none()
         if row is None:
             raise not_found()
+        # every session of the principal, in the deactivation's own transaction (ADR 0016 §2)
+        ended = await revoke_sessions(s, principal_id, caller.actor, "principal_deactivated")
         await audit.record(
             s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="principal_deactivated",
-            payload={"principal_id": str(principal_id)}, request_id=rid,
+            payload={"principal_id": str(principal_id), "sessions_revoked": [str(i) for i in ended],
+                     "authenticated_at": signed_in},
+            request_id=rid,
         )  # fmt: skip
     await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
     return PrincipalOut(**row._mapping)
+
+
+async def revoke_sessions(
+    s: AsyncSession, principal_id: uuid.UUID, actor: str, reason: str
+) -> list[uuid.UUID]:
+    """End every live session of the principal (one statement: all of them or, on rollback, none)."""
+    return list(
+        (
+            await s.execute(
+                text(
+                    "UPDATE sessions SET revoked_at = now(), revoked_by = :by, revoke_reason = :r"
+                    " WHERE principal_id = :p AND revoked_at IS NULL RETURNING id"
+                ),
+                {"p": principal_id, "by": actor, "r": reason},
+            )
+        ).scalars()
+    )
+
+
+class SessionsRevokedOut(Strict):
+    principal_id: uuid.UUID
+    revoked: list[uuid.UUID]
+
+
+@router.post(
+    "/principals/{principal_id}/sessions/revoke", response_model=SessionsRevokedOut,
+    openapi_extra=ADMIN,
+)  # fmt: skip
+async def revoke_principal_sessions(
+    principal_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
+) -> SessionsRevokedOut:
+    async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        await authorize(s, caller, P.TENANT_ADMIN, TENANT)
+        signed_in = require_recent_sign_in(caller, res.settings)
+        exists = (
+            await s.execute(text("SELECT 1 FROM principals WHERE id = :i"), {"i": principal_id})
+        ).first()
+        if exists is None:
+            raise not_found()
+        ended = await revoke_sessions(s, principal_id, caller.actor, "admin")
+        await audit.record(
+            s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="sessions_revoked",
+            payload={"principal_id": str(principal_id), "sessions_revoked": [str(i) for i in ended],
+                     "reason": "admin", "authenticated_at": signed_in},
+            request_id=rid,
+        )  # fmt: skip
+    await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
+    return SessionsRevokedOut(principal_id=principal_id, revoked=ended)
 
 
 @router.get("/principals", response_model=Page[PrincipalOut], openapi_extra=ADMIN)
@@ -215,6 +270,7 @@ async def add_member(
 ) -> None:
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await authorize(s, caller, P.TENANT_ADMIN, TENANT)
+        signed_in = require_recent_sign_in(caller, res.settings)
         try:
             async with s.begin_nested():
                 await s.execute(
@@ -227,7 +283,8 @@ async def add_member(
             raise conflict("unknown group or principal, or already a member") from exc
         await audit.record(
             s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="group_member_added",
-            payload={"group_id": str(group_id), "principal_id": str(body.principal_id)}, request_id=rid,
+            payload={"group_id": str(group_id), "principal_id": str(body.principal_id),
+                     "authenticated_at": signed_in}, request_id=rid,
         )  # fmt: skip
     await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
 
@@ -244,6 +301,7 @@ async def remove_member(
 ) -> None:
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await authorize(s, caller, P.TENANT_ADMIN, TENANT)
+        signed_in = require_recent_sign_in(caller, res.settings)
         ended = (
             await s.execute(
                 text(
@@ -257,7 +315,8 @@ async def remove_member(
             raise not_found()
         await audit.record(
             s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="group_member_removed",
-            payload={"group_id": str(group_id), "principal_id": str(principal_id)}, request_id=rid,
+            payload={"group_id": str(group_id), "principal_id": str(principal_id),
+                     "authenticated_at": signed_in}, request_id=rid,
         )  # fmt: skip
     await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
 
@@ -270,6 +329,7 @@ async def assign_role(
 ) -> AssignmentOut:
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await authorize(s, caller, P.TENANT_ADMIN, TENANT)
+        signed_in = require_recent_sign_in(caller, res.settings)
         if (
             body.scope_type != "tenant"
             and await ancestors(s, Scope(body.scope_type, body.scope_id)) is None
@@ -295,7 +355,8 @@ async def assign_role(
             s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="role_assigned",
             payload={"assignment_id": str(row.id), "principal_id": str(body.principal_id) if body.principal_id else None,
                      "group_id": str(body.group_id) if body.group_id else None, "role": body.role,
-                     "scope_type": body.scope_type, "scope_id": str(body.scope_id) if body.scope_id else None},
+                     "scope_type": body.scope_type, "scope_id": str(body.scope_id) if body.scope_id else None,
+                     "authenticated_at": signed_in},
             request_id=rid,
         )  # fmt: skip
     await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
@@ -310,6 +371,7 @@ async def revoke_role(
 ) -> AssignmentOut:
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await authorize(s, caller, P.TENANT_ADMIN, TENANT)
+        signed_in = require_recent_sign_in(caller, res.settings)
         row = (
             await s.execute(
                 text(
@@ -325,7 +387,7 @@ async def revoke_role(
             raise not_found()
         await audit.record(
             s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="role_revoked",
-            payload={"assignment_id": str(assignment_id)}, request_id=rid,
+            payload={"assignment_id": str(assignment_id), "authenticated_at": signed_in}, request_id=rid,
         )  # fmt: skip
     await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
     return AssignmentOut(**row._mapping)

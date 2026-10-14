@@ -140,8 +140,9 @@ test-report-pdf: ## M16 PDF in the pinned linux/amd64 report image (needs make t
 
 test-integration-only: ## Run integration tests on an ALREADY RUNNING test stack (make test-env-up); keeps it
 	@$(STACK_LOCK) require $(TEST_LOCK)
-	@rm -rf $(TEST_TMP) && mkdir -p $(TEST_TMP)
-	$(TEST_RUN) pytest $(TESTS) -m "$(INTEGRATION_MARKERS)" --basetemp=$(TEST_TMP)/pytest $(PYTEST_ARGS)
+	@# one run at a time on the stack: each wipes the shared --basetemp (scripts/stack_lock.py, run)
+	$(STACK_LOCK) run $(TEST_LOCK).run --fresh-dir $(TEST_TMP) -- env $(TEST_RUN) \
+	  pytest $(TESTS) -m "$(INTEGRATION_MARKERS)" --basetemp=$(TEST_TMP)/pytest $(PYTEST_ARGS)
 
 check: lint typecheck test ## Everything CI runs without services
 

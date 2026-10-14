@@ -13,7 +13,7 @@ from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
 from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
-from edisc_api.auth import Caller
+from edisc_api.auth import Caller, require_recent_sign_in
 from edisc_api.authz import TENANT, P, Scope, authorize, perm, permissions, roles_at, visible_ids
 from edisc_api.errors import conflict, forbidden, not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, page_of
@@ -261,6 +261,7 @@ async def close_matter(
     a held matter cannot close). Reversible by a tenant admin (``.../reopen``)."""
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await authorize(s, caller, P.MATTER_CREATE, Scope("matter", matter_id))
+        signed_in = require_recent_sign_in(caller, res.settings)
         await ensure_matter_open(s, matter_id)
         running: int = (
             await s.execute(
@@ -279,7 +280,7 @@ async def close_matter(
         )
         await audit.record(
             s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="matter_closed",
-            payload={"matter_id": str(matter_id)}, request_id=rid,
+            payload={"matter_id": str(matter_id), "authenticated_at": signed_in}, request_id=rid,
         )  # fmt: skip
         row = (await s.execute(text(MATTER_ONE), {"i": matter_id})).one()
     await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
@@ -296,6 +297,7 @@ async def close_client(
     tenant admin (``.../reopen``)."""
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await authorize(s, caller, P.CLIENT_CREATE, Scope("client", client_id))
+        signed_in = require_recent_sign_in(caller, res.settings)
         await ensure_client_open(s, client_id)
         row = (await s.execute(text(CLIENT_ONE), {"i": client_id})).one()
         if row.is_default:
@@ -314,7 +316,7 @@ async def close_client(
         )
         await audit.record(
             s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="client_closed",
-            payload={"client_id": str(client_id)}, request_id=rid,
+            payload={"client_id": str(client_id), "authenticated_at": signed_in}, request_id=rid,
         )  # fmt: skip
         row = (await s.execute(text(CLIENT_ONE), {"i": client_id})).one()
     await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
@@ -371,6 +373,7 @@ async def reopen_matter(
     body = body or ReopenIn()
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await authorize(s, caller, P.MATTER_READ, Scope("matter", matter_id))
+        signed_in = require_recent_sign_in(caller, res.settings)
         await _require_tenant_admin(s, caller)
         row = (await s.execute(text(MATTER_ONE), {"i": matter_id})).one()
         if row.closed_at is None:
@@ -398,7 +401,8 @@ async def reopen_matter(
         await audit.record(
             s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="matter_reopened",
             payload={"matter_id": str(matter_id), "closed_at": closed.closed_at.isoformat(),
-                     "closed_by": closed.closed_by, "retention_until": until.isoformat()},
+                     "closed_by": closed.closed_by, "retention_until": until.isoformat(),
+                     "authenticated_at": signed_in},
             request_id=rid,
         )  # fmt: skip
         row = (await s.execute(text(MATTER_ONE), {"i": matter_id})).one()
@@ -417,6 +421,7 @@ async def reopen_client(
     exports are protected again at once (lapsed ones re-locked if they still exist, gaps recorded)."""
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await authorize(s, caller, P.CLIENT_READ, Scope("client", client_id))
+        signed_in = require_recent_sign_in(caller, res.settings)
         await _require_tenant_admin(s, caller)
         closed = (await s.execute(
             text("SELECT closed_at, closed_by FROM clients WHERE id = :i"), {"i": client_id}
@@ -430,7 +435,7 @@ async def reopen_client(
         await audit.record(
             s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="client_reopened",
             payload={"client_id": str(client_id), "closed_at": closed.closed_at.isoformat(),
-                     "closed_by": closed.closed_by},
+                     "closed_by": closed.closed_by, "authenticated_at": signed_in},
             request_id=rid,
         )  # fmt: skip
         row = (await s.execute(text(CLIENT_ONE), {"i": client_id})).one()

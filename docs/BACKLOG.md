@@ -6,6 +6,12 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - Automate starting render workers of old renderer/Unicode/tzdata triples on an unroutable episode
   (a Job per triple, scale to zero when idle); v1 is a manual runbook (ADR 0017 §3).
 - Re-run WORM acceptance tests against real AWS S3 Object Lock before production.
+- **[required before production]** Browser sign-in authenticates our client to the IdP with
+  `private_key_jwt` (a platform key in KMS, its JWKS published for the IdPs; no per-tenant secret
+  stored). M17 step 2 signs in as a public client with PKCE only (ADR 0016, step-2 note 2), which
+  many IdPs refuse for web applications.
+- Archive ended `sessions` and `login_attempts` rows after a retention period (no-delete rule:
+  an owner-run archiving job, like the other insert-only tables; ADR 0016 step-2 note 9).
 - **[required before production]** IdP-side deprovisioning reaches sessions without waiting for
   the 12 h absolute lifetime (ADR 0016 A2.6, M17 decision D8): SCIM deprovisioning (a principal
   deactivated by the IdP ends its sessions in the deactivation's transaction, like an admin

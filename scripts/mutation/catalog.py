@@ -54,6 +54,11 @@ Rounds (ADR 0015):
   reads the production logging pipeline (``tests/logcapture.py``) and proves the lines under test
   reached it before asserting what they must not contain. Each break leaks a value into a log line
   that the test used to be blind to (``caplog``, an app without the access line, no logging at all).
+- ``m17-sessions``: browser sessions (M17 step 2, ADR 0016 §1-§4, A1, A2.5): fixation, both expiries,
+  revocation, the active principal, the throttled activity write, cookie flags, one credential per
+  request, CSRF token and Origin, fetch metadata, single-use state, the login cookie handle, the
+  nonce, every ``return_to`` rule, the re-authentication checks, the bounce page (in real browsers),
+  deactivation revoking sessions, recent sign-in, the start throttle, the guard triggers.
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
   and the blocking-I/O guard ``edisc_core.loopblock``, §24.8), every CPU step moved off the loop, the
   render thread writing nothing (ADR 0015 §24).
@@ -184,6 +189,16 @@ ENV = "packages/core/src/edisc_core/envelope.py"
 CONN = "apps/api/src/edisc_api/routes/connections.py"
 ACO = "tests/integration/api/test_connections.py"
 UKMS = "tests/unit/core/test_kms_envelope.py"
+AUTH = "apps/api/src/edisc_api/auth.py"
+AUR = "apps/api/src/edisc_api/routes/auth.py"
+SESP = "apps/api/src/edisc_api/sessions.py"
+OIDC = "apps/api/src/edisc_api/oidc.py"
+ADM = "apps/api/src/edisc_api/routes/admin.py"
+SES = "tests/integration/api/test_sessions.py"
+SESB = "tests/integration/api/test_sessions_browser.py"
+USP = "tests/unit/api/test_session_primitives.py"
+DSG = "tests/integration/db/test_session_guards.py"
+M36 = "packages/db/migrations/versions/0036_browser_sessions.py"
 
 
 @dataclass(frozen=True)
@@ -1136,4 +1151,97 @@ CATALOG: list[Mutation] = [
     m("log_sealed_secret_not_registered", "m17-logs", ENV,
       "            register_secret(value)  # anything we ever seal", "            pass  # anything we ever seal",
       UKMS, "redacted_from_logs"),
+    # ------------------------------------------------------------------ browser sessions (M17 step 2)
+    m("sess_fixation_planted_id_kept", "m17-sessions", AUR,
+      "    session_value, session_row = new_token(), new_id()",
+      "    session_value, session_row = request.cookies.get(SESSION_COOKIE) or new_token(), new_id()",
+      SES, "planted_session_id"),
+    m("sess_prior_not_rotated", "m17-sessions", AUR, "        if prior is not None:\n            rotated = (",
+      "        if False:\n            rotated = (", SES, "revokes_the_session_the_browser_held"),
+    m("sess_idle_expiry_unchecked", "m17-sessions", AUTH,
+      '" AND s.idle_expires_at > now() AND s.absolute_expires_at > now()"',
+      '" AND s.absolute_expires_at > now()"', SES, "expired_session_is_refused and idle"),
+    # the query's absolute-expiry term is redundant by construction (idle <= absolute: the CHECK, and
+    # the activity write's LEAST): breaking it alone is unobservable, so the CHECK is what is broken
+    m("sess_idle_past_absolute_allowed", "m17-sessions", M36,
+      "    CONSTRAINT ck_sessions_expiry CHECK (idle_expires_at <= absolute_expires_at\n        AND absolute_expires_at > created_at),",
+      "    CONSTRAINT ck_sessions_expiry CHECK (absolute_expires_at > created_at),", DSG,
+      "without_a_reason"),
+    m("sess_revocation_unchecked", "m17-sessions", AUTH, '" WHERE s.id_hash = :h AND s.revoked_at IS NULL"',
+      '" WHERE s.id_hash = :h"', SES, "logout_revokes"),
+    m("sess_inactive_principal_accepted", "m17-sessions", AUTH, "            if row is None or not row.active:",
+      "            if row is None:", SES, "inactive_principal_is_refused_even"),
+    m("sess_activity_write_unthrottled", "m17-sessions", AUTH,
+      " AND last_seen_at < now() - interval '60 seconds'\"", "\"", SES, "at_most_once_a_minute"),
+    m("sess_idle_past_absolute", "m17-sessions", AUTH,
+      "LEAST(now() + make_interval(secs => :idle), absolute_expires_at)", "now() + make_interval(secs => :idle)",
+      SES, "at_most_once_a_minute"),
+    m("sess_cookie_not_httponly", "m17-sessions", SESP, "Path=/; Secure; HttpOnly; SameSite", "Path=/; Secure; SameSite",
+      SES, "strict_host_only_session"),
+    m("sess_cookie_not_secure", "m17-sessions", SESP, "Path=/; Secure; HttpOnly; SameSite", "Path=/; HttpOnly; SameSite",
+      SES, "strict_host_only_session"),
+    m("sess_cookie_domain_added", "m17-sessions", SESP, "Max-Age={max_age}; Path=/;",
+      "Max-Age={max_age}; Domain=edisc.localhost; Path=/;", SES, "strict_host_only_session"),
+    m("sess_cookie_lax", "m17-sessions", AUR, '                   same_site="Strict"),',
+      '                   same_site="Lax"),', SES, "strict_host_only_session"),
+    m("sess_cookie_lax_in_browsers", "m17-sessions", AUR, '                   same_site="Strict"),',
+      '                   same_site="Lax"),', SESB, "chromium"),
+    m("sess_cookie_and_bearer_accepted", "m17-sessions", APPM,
+      "    if session_id is not None and authorization is not None:  # before either is evaluated",
+      "    if False:  # before either is evaluated", SES, "cookie_and_bearer_together"),
+    m("csrf_token_not_compared", "m17-sessions", SESP,
+      "        return hmac.compare_digest(expected.encode(), mac.encode())", "        return True", SES,
+      "need_the_token_and_the_tenant_origin"),
+    m("csrf_origin_unchecked", "m17-sessions", APPM,
+      "        if request_origin(request) != tenant_origin(res.settings, host):",
+      "        if False:", SES, "need_the_token_and_the_tenant_origin"),
+    m("csrf_required_from_bearer", "m17-sessions", APPM, "    if session_id is None:\n        return await",
+      "    if session_id is None and request.method in SAFE_METHODS:\n        return await", SES,
+      "need_the_token_and_the_tenant_origin"),
+    m("fetch_metadata_unchecked", "m17-sessions", APPM,
+      '    if site is not None and site not in ("same-origin", "none"):',
+      "    if False:", SES, "another_site_or_a_sibling_subdomain"),
+    m("fetch_metadata_same_site_allowed", "m17-sessions", APPM,
+      '    if site is not None and site not in ("same-origin", "none"):',
+      '    if site is not None and site not in ("same-origin", "same-site", "none"):', SES,
+      "another_site_or_a_sibling_subdomain"),
+    m("cookie_responses_cacheable", "m17-sessions", APPM,
+      '            response.headers["cache-control"] = "no-store"\n            vary',
+      "            vary", SES, "strict_host_only_session"),
+    m("login_state_reusable", "m17-sessions", AUR, '" WHERE state_hash = :h AND consumed_at IS NULL"',
+      '" WHERE state_hash = :h"', SES, "state_is_single_use"),
+    m("login_handle_unchecked", "m17-sessions", AUR,
+      "    if handle is None or not well_formed(handle) or token_hash(handle) != attempt.handle_hash:",
+      "    if handle is None:", SES, "another_browsers_login_cookie"),
+    m("login_expiry_unchecked", "m17-sessions", AUR, "    if not attempt.fresh:", "    if False:", SES,
+      "expired_attempt"),
+    m("login_nonce_unchecked", "m17-sessions", OIDC,
+      '        if not isinstance(claims["nonce"], str) or claims["nonce"] != nonce:',
+      '        if not isinstance(claims["nonce"], str):', SES, "does_not_check_out"),
+    m("return_to_double_slash", "m17-sessions", SESP, 'candidate.startswith(("//", "/\\\\"))',
+      'candidate.startswith("/\\\\")', USP, "refuses_everything"),
+    m("return_to_not_decoded", "m17-sessions", SESP, "    for candidate in (value, urllib.parse.unquote(value)):",
+      "    for candidate in (value,):", SES, "not_a_same_origin_path"),
+    m("return_to_controls_kept", "m17-sessions", SESP, '        if "\\\\" in candidate or _CONTROL.search(candidate):',
+      '        if "\\\\" in candidate:', USP, "refuses_everything"),
+    m("return_to_unbounded", "m17-sessions", SESP, "    if len(value.encode(\"utf-8\", \"surrogatepass\")) > MAX_RETURN_TO_BYTES:",
+      "    if False:", SES, "not_a_same_origin_path"),
+    m("reauth_other_principal", "m17-sessions", AUR, "        or prior.principal_id != principal.id\n", "", SES,
+      "other_principal"),
+    m("reauth_stale_auth_time", "m17-sessions", AUR, "        or claims.auth_time <= a.started_at\n", "", SES,
+      "stale_auth_time"),
+    m("callback_303_not_bounce", "m17-sessions", AUR,
+      "    response = HTMLResponse(bounce_page(target), status_code=status, headers=BOUNCE_HEADERS)",
+      "    response = RedirectResponse(target, status_code=303)", SESB, "chromium"),
+    m("deactivation_keeps_sessions", "m17-sessions", ADM,
+      '        ended = await revoke_sessions(s, principal_id, caller.actor, "principal_deactivated")',
+      "        ended: list[uuid.UUID] = []", SES, "deactivated_principal"),
+    m("recent_sign_in_not_required", "m17-sessions", AUTH, "    at = caller.authenticated_at\n",
+      "    at = caller.authenticated_at\n    return at.isoformat() if at else ''\n", SES,
+      "every_sensitive_action"),
+    m("login_starts_unthrottled", "m17-sessions", AUR, "    await _count_start(request, res)\n", "", SES,
+      "starts_are_capped"),
+    m("session_revocation_not_final", "m17-sessions", M36,
+      "    IF OLD.revoked_at IS NOT NULL THEN\n        RAISE EXCEPTION 'sessions: a revoked session is final'",
+      "    IF false THEN\n        RAISE EXCEPTION 'sessions: a revoked session is final'", DSG, "revoked_session_is_final"),
 ]  # fmt: skip

@@ -21,6 +21,7 @@ import json
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from edisc_api.errors import ApiError
+from edisc_api.sessions import token_hash, well_formed
 from edisc_core.logs import get_logger
 from edisc_core.settings import Settings
 from edisc_db.session import tenant_tx
@@ -55,6 +58,10 @@ class Caller:
     issuer: str
     subject: str
     group_ids: frozenset[uuid.UUID]
+    # when the person last proved who they are: the session's sign-in, or the bearer token's
+    # auth_time (else iat). None: unknown, so never "recent" (ADR 0016 §4)
+    authenticated_at: datetime | None = None
+    session_id: uuid.UUID | None = None  # the session row (cookie callers only)
 
     @property
     def actor(self) -> str:
@@ -62,13 +69,21 @@ class Caller:
         return f"{self.kind}:{self.principal_id}"
 
 
-def require_recent_sign_in(caller: Caller) -> None:
+def require_recent_sign_in(caller: Caller, settings: Settings) -> str:
     """ADR 0016 §4: sensitive actions need a sign-in no older than ``EDISC_API_REAUTH_MAX_AGE_SECONDS``
-    (401 ``reauth_required`` otherwise). Every covered action calls this, inside its transaction and
-    before any change. Until the M17 sessions exist the caller carries no ``authenticated_at``, so it
-    does nothing; M17 adds the field (session sign-in time, or the bearer token's ``auth_time``/``iat``)
-    and the check here, and the covered routes need no change."""
-    return None
+    (401 ``reauth_required`` otherwise; the UI then signs in again with ``reauth=1``). Every covered
+    action calls this inside its transaction and before any change, and records the returned
+    ``authenticated_at`` (ISO 8601) in its audit event."""
+    at = caller.authenticated_at
+    age = (datetime.now(UTC) - at).total_seconds() if at is not None else None
+    if (
+        at is None
+        or age is None
+        or age > settings.api_reauth_max_age_seconds
+        or age < -settings.api_jwt_leeway_seconds
+    ):
+        raise ApiError(401, "reauth_required", "this action needs a recent sign-in")
+    return at.isoformat()
 
 
 def host_subdomain(host: str | None, base_domain: str) -> str | None:
@@ -275,7 +290,64 @@ class Authenticator:
                 {"ext": [str(g) for g in external_groups], "p": principal.id},
             )
             group_ids: frozenset[uuid.UUID] = frozenset(result.scalars())
-        return Caller(tenant_id, principal.id, principal.kind, issuer, subject, group_ids)
+        signed_in = claims.get("auth_time", claims["iat"])
+        authenticated_at = (
+            datetime.fromtimestamp(signed_in, UTC)
+            if isinstance(signed_in, int | float) and not isinstance(signed_in, bool)
+            else None
+        )
+        return Caller(
+            tenant_id, principal.id, principal.kind, issuer, subject, group_ids, authenticated_at
+        )
+
+    async def authenticate_session(
+        self, host: str | None, session_id: str, *, touch: bool = True
+    ) -> Caller:
+        """The cookie path (ADR 0016 §2): the row of this id's hash, live (not revoked, neither
+        expiry passed, by the DATABASE clock) and its principal active. RLS hides other tenants'
+        sessions, so a cookie replayed on another tenant's host is a plain 401. ``touch``: this is a
+        request the user made (an open event stream is not, ADR 0016 A2.4), so ``last_seen_at`` and
+        the idle expiry move, at most once a minute (the guard in the statement, no read-modify-write
+        race), never past the absolute expiry."""
+        tenant_id = await self.tenant_for_host(host)
+        if not well_formed(session_id):
+            raise AuthError("malformed session id")
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            row = (
+                await s.execute(
+                    text(
+                        "SELECT s.id, s.authenticated_at, s.idp_groups, p.id AS principal_id, p.kind,"
+                        " p.issuer, p.subject, p.active FROM sessions s"
+                        " JOIN principals p ON p.id = s.principal_id"
+                        " WHERE s.id_hash = :h AND s.revoked_at IS NULL"
+                        " AND s.idle_expires_at > now() AND s.absolute_expires_at > now()"
+                    ),
+                    {"h": token_hash(session_id)},
+                )
+            ).one_or_none()
+            if row is None or not row.active:
+                raise AuthError("unknown, expired or revoked session")
+            if touch:
+                await s.execute(
+                    text(
+                        "UPDATE sessions SET last_seen_at = now(),"
+                        " idle_expires_at = LEAST(now() + make_interval(secs => :idle), absolute_expires_at)"
+                        " WHERE id = :i AND revoked_at IS NULL AND last_seen_at < now() - interval '60 seconds'"
+                    ),
+                    {"i": row.id, "idle": self.settings.api_session_idle_seconds},
+                )
+            result = await s.execute(
+                text(
+                    "SELECT id FROM groups WHERE external_id = ANY(:ext)"
+                    " UNION SELECT group_id FROM group_members WHERE principal_id = :p AND removed_at IS NULL"
+                ),
+                {"ext": list(row.idp_groups), "p": row.principal_id},
+            )
+            group_ids: frozenset[uuid.UUID] = frozenset(result.scalars())
+        return Caller(
+            tenant_id, row.principal_id, row.kind, row.issuer, row.subject, group_ids,
+            row.authenticated_at, row.id,
+        )  # fmt: skip
 
 
 def jwks_document(settings: Settings) -> dict[str, Any]:

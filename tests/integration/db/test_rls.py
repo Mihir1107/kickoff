@@ -28,6 +28,8 @@ COPY_OVERRIDES = {
     "export_threads": "'export_id', gen_random_uuid()",
     "render_files": "'render_id', gen_random_uuid()",
     "render_natives": "'ord', 99",
+    "sessions": "'id', gen_random_uuid(), 'id_hash', sha256(gen_random_uuid()::text::bytea)",
+    "login_attempts": "'id', gen_random_uuid(), 'state_hash', sha256(gen_random_uuid()::text::bytea)",
 }
 UPDATABLE = {
     "matters": "name",
@@ -41,6 +43,7 @@ UPDATABLE = {
     "slack_exports": "updated_at",
     "export_upload_parts": "updated_at",
     "renders": "updated_at",
+    "sessions": "last_seen_at",
 }
 
 

@@ -41,6 +41,8 @@ from edisc_worker.contracts import EXPORTS_QUEUE, task_queue
 from edisc_worker.exports import ExportActivities
 from edisc_worker.workflows import CollectionJobWorkflow, CollectUnitWorkflow, ExportIngestWorkflow
 
+from .oidc import IDP_HOST, TEST_IDP
+
 Sessions = async_sessionmaker[AsyncSession]
 AUDIENCE = "edisc-api"
 
@@ -138,7 +140,10 @@ async def make_api(
 ) -> AsyncIterator[Api]:
     """The API over the given database sessions (the `api` fixture's, or another database's: the
     tailored-collation corpus test, ``tests/integration/corpus/test_collation.py``)."""
-    http = httpx.AsyncClient()
+    TEST_IDP.settings = api_settings
+    TEST_IDP.reset()
+    # the IdP's server-side endpoints (discovery, code exchange) answer through the test provider
+    http = httpx.AsyncClient(mounts={f"all://{IDP_HOST}": TEST_IDP.transport()})
     redis = aioredis.from_url(api_settings.redis_url)
     resources = Resources(
         api_settings,

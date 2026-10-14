@@ -162,7 +162,7 @@ async def request_report(
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         job = await _job(s, job_id)
         await authorize(s, caller, P.REPORT_CREATE, Scope("matter", job.matter_id))
-        require_recent_sign_in(caller)
+        signed_in = require_recent_sign_in(caller, res.settings)
         if job.sealed_at is None:
             raise ApiError(409, "job_not_sealed", f"job is {job.status}: only sealed jobs report")
         if job.matter_closed is not None:
@@ -178,7 +178,7 @@ async def request_report(
             s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="report_requested",
             payload={"report_id": str(made.report_id), "job_id": str(job_id),
                      "matter_id": str(job.matter_id), "reason": body.reason, "paper": body.paper,
-                     "identity": dict(identity)},
+                     "identity": dict(identity), "authenticated_at": signed_in},
             request_id=rid,
         )  # fmt: skip
     await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)

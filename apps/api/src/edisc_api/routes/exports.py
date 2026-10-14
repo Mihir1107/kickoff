@@ -35,7 +35,7 @@ from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
 from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
-from edisc_api.auth import Caller
+from edisc_api.auth import Caller, require_recent_sign_in
 from edisc_api.authz import TENANT, P, Permission, Scope, authorize, perm, permissions, roles_at
 from edisc_api.errors import ApiError, RecordedDetail, conflict, forbidden, not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, page_of
@@ -215,6 +215,7 @@ async def create_export(
         await ensure_client_open(s, client_id)
         if overrides and P.TENANT_ADMIN not in permissions(await roles_at(s, caller, [TENANT])):
             raise forbidden("overriding archive limits needs a tenant admin")
+        signed_in = require_recent_sign_in(caller, res.settings) if overrides else None
     if body.size_bytes > limits["max_archive_bytes"]:
         raise ApiError(
             413, "export_too_large", f"exports are at most {limits['max_archive_bytes']} bytes"
@@ -246,7 +247,7 @@ async def create_export(
             await audit.record(
                 s, tenant_id=caller.tenant_id, actor=caller.actor,
                 event_type="export_limits_overridden",
-                payload={"export_id": str(export_id),
+                payload={"export_id": str(export_id), "authenticated_at": signed_in,
                          "overrides": {k: {"default": defaults[k], "override": v}
                                        for k, v in sorted(overrides.items())}},
                 request_id=rid,

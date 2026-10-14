@@ -337,6 +337,33 @@ class Settings(BaseSettings):
         description="per client address and host; then 429 until the minute passes",
     )
 
+    # Browser sessions (ADR 0016 §1-§4, Amendment 2 A2.5; M17 step 2)
+    api_session_absolute_seconds: int = Field(default=12 * 3600, ge=60)
+    api_session_idle_seconds: int = Field(default=30 * 60, ge=60)
+    api_reauth_max_age_seconds: int = Field(
+        default=600, ge=30, description="sensitive actions need a sign-in no older than this"
+    )
+    api_login_attempt_seconds: int = Field(default=600, ge=60, le=3600)
+    api_login_starts_per_window: int = Field(
+        default=20,
+        ge=1,
+        description="sign-ins started per client address and host per login-attempt lifetime;"
+        " then 429 (a burst cannot create unbounded login_attempts rows)",
+    )
+    api_session_keys: dict[str, SecretStr] = Field(
+        default_factory=dict,
+        description="kid -> server key (>= 32 bytes) for CSRF tokens and PKCE verifiers. The API"
+        " refuses to start without them outside local/test/ci (workers never need them); keep the"
+        " previous kid for one absolute session lifetime after a rotation",
+    )
+    api_session_key_id: str | None = Field(
+        default=None, description="the kid of api_session_keys used for new tokens"
+    )
+    api_public_scheme: Literal["https", "http"] = Field(
+        default="https",
+        description="scheme of the tenant origin (the Origin check); http only in local/test/ci",
+    )
+
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "edisc"
 
@@ -351,6 +378,22 @@ class Settings(BaseSettings):
             raise ValueError(
                 "EDISC_API_DEV_IDP is only permitted when EDISC_ENV is local, test or ci"
             )
+        if not self.env.is_disposable and self.api_public_scheme != "https":
+            raise ValueError("EDISC_API_PUBLIC_SCHEME must be https outside local/test/ci")
+        if (
+            self.api_session_key_id is not None
+            and self.api_session_key_id not in self.api_session_keys
+        ):
+            raise ValueError(
+                "EDISC_API_SESSION_KEY_ID does not name a key of EDISC_API_SESSION_KEYS"
+            )
+        for kid, key in self.api_session_keys.items():
+            if len(key.get_secret_value().encode()) < 32 or "." in kid or not kid:
+                raise ValueError(
+                    "each EDISC_API_SESSION_KEYS entry: a kid without '.', >= 32 bytes"
+                )
+        if self.api_session_idle_seconds > self.api_session_absolute_seconds:
+            raise ValueError("EDISC_API_SESSION_IDLE_SECONDS must not exceed the absolute lifetime")
         if self.evidence_retention_extend_floor_days > self.evidence_retention_window_days:
             raise ValueError(
                 "EDISC_EVIDENCE_RETENTION_EXTEND_FLOOR_DAYS must not exceed EDISC_EVIDENCE_RETENTION_WINDOW_DAYS"

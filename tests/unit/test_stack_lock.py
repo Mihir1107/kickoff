@@ -61,3 +61,23 @@ def test_require_fails_when_no_stack_is_up(
     assert "no edisc-test stack is up" in capsys.readouterr().err
     sl.acquire(lock, "a")
     assert sl.require(lock) == 0
+
+
+def test_a_second_run_on_the_stack_fails_fast_while_the_first_holds_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two runs would wipe each other's --basetemp (found 2026-10-14): the second refuses."""
+    import fcntl
+    import sys
+
+    lock, fresh = tmp_path / "run.lock", tmp_path / "basetemp"
+    fresh.mkdir()
+    (fresh / "first-runs-file").write_text("x")
+    with lock.open("a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)  # the first run
+        assert sl.run(lock, [sys.executable, "-c", "pass"], fresh) == 5
+        assert (fresh / "first-runs-file").exists()  # not wiped
+    assert "another integration run" in capsys.readouterr().err
+    # released (as the kernel does when the holder dies): the next run wipes, runs, returns its status
+    assert sl.run(lock, [sys.executable, "-c", "raise SystemExit(7)"], fresh) == 7
+    assert fresh.exists() and not (fresh / "first-runs-file").exists()

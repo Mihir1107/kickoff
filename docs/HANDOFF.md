@@ -1,18 +1,76 @@
-# Handoff (2026-10-12: M17 decisions taken, ADR 0016 Amendment 1, M17 step 0 built (no error path echoes a request value); next: the open M17 decisions, then M17 step 2 (sessions))
+# Handoff (2026-10-14: every M17 decision taken (ADR 0016 Amendment 2), log-assertion sweep, M17 step 2 built (browser sessions); next: M17 step 3 (permissions, roles, jobs list, custody events, groups, cursor digests))
 
 This file alone is enough to continue. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisions §1-§18, notes
 §19-§30 and §32, **every deviation in §31**); the rest of the plan of record is `docs/ARCHITECTURE.md`,
 `docs/adr/`, `docs/plans/phase-2.md` and `docs/BACKLOG.md`. M16 summary:
 `docs/runs/2026-10-12-m16-complete.md`. Expert guide: `docs/VERIFYING.md`. Demo: `docs/DEMO.md`.
-**M17 plan: `docs/plans/m17.md`** (reviewed; decisions in its §12; design changes in ADR 0016
-Amendment 1). Step 0 is built; the rest is not.
+**M17 plan: `docs/plans/m17.md`** (every decision taken: its §12; design changes in ADR 0016
+Amendments 1 and 2; step 2's build notes at the end of ADR 0016). Steps 0 and 2 are built; step 7 is
+on hold (legal review). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
 
 ## Current state
-**Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`. Migrations at head: **0035**.
-Renderer **1.3.2**, dummy connector **0.5.0**, normalizer **0.3.0**, report renderer **1.5.0**,
-preview renderer **1.0.0**. M16 is complete; the items before M17 are done (below). CI: see
+**Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`.
+Migrations at head: **0036** (sessions). Renderer **1.3.2**, dummy connector **0.5.0**, normalizer
+**0.3.0**, report renderer **1.5.0**, preview renderer **1.0.0**. M16 is complete; the items before M17 are done (below). CI: see
 `gh run list`; run 38249757099 green on `a755e8e` (every job, report-pdf included).
+
+## Done: M17 decisions, the log sweep, M17 step 2 (2026-10-14)
+**Decisions (user, 2026-10-14; ADR 0016 Amendment 2; m17.md §12):** signed state, alert timing and
+Slack exports outside the one-workspace rule approved; access-lost deadline 24 h..90 days (default 7
+days); moving an external id between tenants = operator CLI only (no API route; a reason; both
+tenants' audit streams; both tenants' admins alerted; a test that no route exposes it); D4 approved
++ a 500-concurrent-stream measurement in step 5 (DB queries/s, p99; docs/runs); D6, D7, D9 (frontend
+renders unknown enum values safely: below), D14 approved; D8 to BACKLOG, required before production
+(SCIM, back-channel logout); D12 default kept pending mentor; D13 confirmed no. New: Slack's 1
+request/minute `conversations.history` limit for non-Marketplace apps (tier detection reported as a
+job condition, never a silent crawl) in ADR 0016 A2.9 and `docs/plans/phase-3.md`; the internal-app
+token exception is **pending legal review**: step 7 not built, no ready-made app manifest shipped.
+
+**Log-assertion sweep (commit `41dc6e3`, round `m17-logs`, 7/7):** every test asserting on log
+output now reads the production pipeline and proves its lines arrived (`tests/logcapture.py`: a
+capture that fails when empty + `require()` positive controls). Four were blind: the connection
+credential test (`caplog`), the canary-as-host check (the client lowercases hosts), the unit 422
+checks (their app had no access line, so the capture was empty), the KMS "redacted from logs" test
+(never logged). Each blind one was broken once against its old version (passed) and its new version
+(caught). The request middleware is now `edisc_api.app.add_request_context`.
+
+**Step 2, browser sessions (round `m17-sessions`, 35/35; three were uncaught at first and their tests were fixed, ADR 0016 step-2 notes):** migration 0036
+(`sessions`, `login_attempts`, `tenant_idps.login_client_id`), `edisc_api.sessions`, `edisc_api.oidc`,
+`edisc_api.routes.auth` (login, callback with the A1 bounce page, logout, CSRF), own/admin session
+routes, deactivation ending sessions in its transaction, the cookie path of the caller dependency
+(one credential, fetch metadata, CSRF token + Origin), `require_recent_sign_in` real on every §4
+action. The choices made while building are numbered in ADR 0016 "Implementation notes: M17 step 2"
+(**read them: two need you**, below). Tests: `test_sessions.py` (74), `test_sessions_browser.py`
+(Chromium, Firefox, WebKit over real HTTPS through a CONNECT proxy; CI now installs all three),
+`test_session_primitives.py`, `test_session_guards.py`. Settings: `EDISC_API_SESSION_*`,
+`EDISC_API_REAUTH_MAX_AGE_SECONDS`, `EDISC_API_LOGIN_*`, `EDISC_API_PUBLIC_SCHEME`; the API refuses
+to start outside local/test/ci without `EDISC_API_SESSION_KEYS` (workers never need them).
+
+**Found on the way:** two runs on one up test stack wipe each other's `--basetemp` (the second
+`test-integration-only` deleted the first's dev IdP key: `InvalidSignatureError` 401s in an unrelated
+render-package test). Diagnosed, not re-run to green: `stack_lock.py run` (an exclusive `flock` for
+the whole run) now guards `test-integration-only`; ADR 0015 §24.12.
+
+**For you (not blocking step 3):**
+1. Browser sign-in is a PUBLIC OIDC client (PKCE, no client secret). Many IdPs want client
+   authentication for web apps: `private_key_jwt` with a platform key is in the BACKLOG as required
+   before production. Say if you want it sooner.
+2. Cookie requests with `Sec-Fetch-Site: same-site` are refused too (a sibling tenant subdomain is
+   same-site and would carry the Strict cookie); only `same-origin` and `none` pass.
+
+## Frontend requirements (for `feat/web-ui`; the backend never edits `apps/web`)
+- **Unknown enum values (D9, ADR 0016 A2.7):** a response enum value the UI does not know renders
+  as a neutral "unknown (value)" presentation: never a crash, never treated as a known value. New
+  response enum values are not breaking changes for the API.
+- **Sign-in (M17 step 2):** go to `/v1/auth/login?return_to=<path>` (a same-origin path; 400
+  `invalid_return_to` otherwise), `reauth=1` when an action answered 401 `reauth_required`. The
+  callback answers a bounce page that lands on `return_to`; failures land on `/?auth_error=<code>`
+  (`denied`, `expired`, `invalid`, `unknown_user`, `inactive`, `reauth_mismatch`).
+- Every state-changing request sends `X-CSRF-Token` from `GET /v1/auth/csrf` (re-fetch after any
+  sign-in: the token is bound to the session) and is same-origin. Logout: `POST /v1/auth/logout`.
+  Sessions: `GET /v1/me/sessions` (`current`, `live`), `POST /v1/me/sessions/{id}/revoke`.
+- `pending.ts`'s `CsrfOut` matches what shipped.
 
 ## Done: before M17 (2026-10-12; ADR 0018 §32; mutation round `m16-export`, 8/8)
 1. **The export in the report.** `job_started.export` (new jobs) records the export's size, entry
@@ -76,7 +134,11 @@ preview renderer **1.0.0**. M16 is complete; the items before M17 are done (belo
   callback's `tenant` parameter** (otherwise one customer can bind another customer's consented Entra
   tenant); revocation cuts in-flight downloads; revoked tokens end as `access_lost` units.
 
-## Next: the open decisions (D4, D6, D7, D8, D9, D12, D14; confirm D13), then M17 step 2 (sessions, migration 0036)
+## Next: M17 step 3 (`/me/permissions`, `/roles`, `GET /v1/jobs`, custody events, groups, cursor filter digests)
+Then step 4 (OpenAPI + oasdiff), step 5 (SSE + `SessionWatch` + the download cut-off + the
+500-stream measurement), step 6 (install flows, migration 0037, the relay, the operator-only move
+CLI with its no-route test), step 8 (directory snapshots, `check-connections`, the pause deadline
+24 h..90 d). Step 7 waits for legal review.
 
 ## Done: the fixes before step 7 (2026-10-12; ADR 0018 §30; mutation round `m16-pre7`, 15/15)
 1. **Collation.** Every ORDER BY reaching output bytes reviewed; migration 0035: the remaining

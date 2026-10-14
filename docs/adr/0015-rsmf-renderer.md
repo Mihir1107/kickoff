@@ -1218,3 +1218,14 @@ what was done and why.
     (CLAUDE.md). If it recurs on CI (a dedicated runner, not this laptop), the frames must be
     examined again; the candidate mitigation is warming the workflow sandbox at worker start (one
     throwaway instance), like `warm_routes` for the API.
+12. **Two runs on one up test stack wiped each other's files (2026-10-14, diagnosed, test-harness
+    fix).** During M17 step 2 two render-package tests failed once with 401
+    `invalid token: InvalidSignatureError` while a second `make test-integration-only` (another file)
+    ran alongside the full API suite. Both runs start by wiping the shared `--basetemp`, which holds
+    the session's dev IdP key (`api-kms0/dev-idp-key.pem`): the second run deleted it mid-run, and
+    each process regenerated a key at the same path, so a token signed under one was verified under
+    the other. Passed alone (5/5). The stack lock (item 6) stops two STACKS, not two runs on one
+    stack. Fix: `stack_lock.py run` holds an exclusive `flock` for the whole `test-integration-only`
+    command (released by the kernel however the process ends) and recreates the basetemp only once
+    it holds it; a second run exits 5 before touching anything (`tests/unit/test_stack_lock.py`, and
+    proven with two overlapping `make` runs). The mutation runner goes through the same target.

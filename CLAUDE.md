@@ -67,6 +67,31 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   request sent; our validators raise `PydanticCustomError("edisc_...", "<static>")`; worker texts in
   answers are `RecordedText`. `test_no_echo.py` fuzzes every route from the OpenAPI document.
 
+## Browser sessions (M17 step 2, ADR 0016 + Amendments 1-2 + step-2 notes)
+- A request carries the session cookie (`__Host-edisc_session`) OR a bearer token; both: 400
+  `ambiguous_credentials` before either is evaluated. Only the SHA-256 of the 256-bit id is stored
+  (`sessions`, FORCE RLS, guard trigger: identity immutable, revocation final, clock only forward).
+  Validity is checked per request with the DATABASE clock; the activity write is at most once a
+  minute and never past the absolute expiry; `request.state.passive` (SSE) never moves it.
+- Cookie requests: `Sec-Fetch-Site` other than `same-origin`/`none` is 403 `cross_site` (GETs too:
+  content routes have side effects); state changes need `X-CSRF-Token` (HMAC of the session id,
+  keyring `EDISC_API_SESSION_KEYS`, kid-prefixed) AND Origin/Referer = the tenant origin. Responses
+  get `Cache-Control: no-store`, `Vary: Cookie`. Bearer requests are exempt from CSRF.
+- Sign-in (`edisc_api.routes.auth`, `edisc_api.oidc`): one sign-in IdP per tenant
+  (`tenant_idps.login_client_id`); `return_to` validated, stored, never rewritten; the attempt is
+  consumed in the statement that finds it; the PKCE verifier is DERIVED from the login cookie handle
+  (never stored); ID token keys only from the registered `jwks_url`. The callback answers the
+  bounce page (200 + meta refresh), never a 303 (A1; `test_sessions_browser.py` proves it in
+  Chromium, Firefox and WebKit). A new session id at every sign-in; the browser's previous session
+  is revoked `rotated` in the same transaction. Failures: fixed codes, audited, throttled.
+- `require_recent_sign_in(caller, settings)` on every ADR 0016 §4 action (and principal
+  deactivation) inside its transaction, before any change; its return value (`authenticated_at`)
+  goes in that action's audit payload. A new sensitive route does the same and joins the table in
+  `test_sessions.py::_sensitive_requests`.
+- Deactivation and admin revocation end every session in their own transaction. Nothing is deleted.
+- Test IdP: `tests/integration/api/oidc.py` (mounted on the API fixture's HTTP client) and
+  `sessions_flow.py` (sign-in helpers, a cookie jar that withholds Strict cookies cross-site).
+
 ## Slack exports (M14, ADR 0014)
 - Upload: `POST /v1/clients/{c}/exports` → `PUT /v1/exports/{id}/parts/{n}` (Content-Digest sha-256) →
   `POST .../complete`. The `ExportIngestWorkflow` (queue `exports`, `edisc_worker.exports`) hashes the staged

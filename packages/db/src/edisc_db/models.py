@@ -499,7 +499,14 @@ class TenantIdp(Base):
     __tablename__ = "tenant_idps"
     __table_args__ = (
         UniqueConstraint("tenant_id", "issuer"),
+        UniqueConstraint("tenant_id", "id"),
         ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),
+        Index(
+            "uq_tenant_idps_one_login",
+            "tenant_id",
+            unique=True,
+            postgresql_where=text("login_client_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
@@ -509,6 +516,78 @@ class TenantIdp(Base):
     jwks_url: Mapped[str] = mapped_column(Text)
     groups_claim: Mapped[str] = mapped_column(Text, server_default=text("'groups'"))
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    login_client_id: Mapped[str | None] = mapped_column(Text)
+
+
+class BrowserSession(Base):
+    """``sessions`` (migration 0036): the server side of the session cookie (ADR 0016 §2)."""
+
+    __tablename__ = "sessions"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        UniqueConstraint("id_hash"),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "principal_id"], ["principals.tenant_id", "principals.id"]
+        ),
+        ForeignKeyConstraint(["tenant_id", "idp_id"], ["tenant_idps.tenant_id", "tenant_idps.id"]),
+        Index(
+            "ix_sessions_live_principal",
+            "tenant_id",
+            "principal_id",
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    principal_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    idp_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    id_hash: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    authenticated_at: Mapped[datetime] = mapped_column(TZ)
+    last_seen_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    idle_expires_at: Mapped[datetime] = mapped_column(TZ)
+    absolute_expires_at: Mapped[datetime] = mapped_column(TZ)
+    idp_groups: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
+    user_agent: Mapped[str | None] = mapped_column(Text)
+    ip_first: Mapped[str | None] = mapped_column(Text)
+    request_id: Mapped[str | None] = mapped_column(Text)
+    revoked_at: Mapped[datetime | None] = mapped_column(TZ)
+    revoked_by: Mapped[str | None] = mapped_column(Text)
+    revoke_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class LoginAttempt(Base):
+    """``login_attempts`` (migration 0036): one started sign-in; no secret is stored."""
+
+    __tablename__ = "login_attempts"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        UniqueConstraint("state_hash"),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),
+        ForeignKeyConstraint(["tenant_id", "idp_id"], ["tenant_idps.tenant_id", "tenant_idps.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "prior_session_id"], ["sessions.tenant_id", "sessions.id"]
+        ),
+        ForeignKeyConstraint(["tenant_id", "session_id"], ["sessions.tenant_id", "sessions.id"]),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    idp_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    state_hash: Mapped[bytes] = mapped_column(LargeBinary)
+    handle_hash: Mapped[bytes] = mapped_column(LargeBinary)
+    key_id: Mapped[str] = mapped_column(Text)
+    nonce: Mapped[str] = mapped_column(Text)
+    return_to: Mapped[str] = mapped_column(Text)
+    reauth: Mapped[bool] = mapped_column(Boolean)
+    prior_session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    started_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    expires_at: Mapped[datetime] = mapped_column(TZ)
+    consumed_at: Mapped[datetime | None] = mapped_column(TZ)
+    outcome: Mapped[str | None] = mapped_column(Text)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
 
 
 class Principal(Base):

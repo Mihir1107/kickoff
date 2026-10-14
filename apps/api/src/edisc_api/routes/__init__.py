@@ -12,6 +12,7 @@ def register(app: FastAPI) -> list[Any]:
     """Include every router; returns them (``safe_errors.install`` reads their routes)."""
     from edisc_api.routes import (
         admin,
+        auth,
         connections,
         exports,
         hierarchy,
@@ -24,7 +25,7 @@ def register(app: FastAPI) -> list[Any]:
     )
 
     routers = [
-        me.router, hierarchy.router, admin.router, connections.router, jobs.router, exports.router,
+        me.router, auth.router, hierarchy.router, admin.router, connections.router, jobs.router, exports.router,
         renders.router, reports.router, job_package.router, preview.router,
     ]  # fmt: skip
     for router in routers:
