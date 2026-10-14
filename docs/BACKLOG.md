@@ -6,6 +6,11 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - Automate starting render workers of old renderer/Unicode/tzdata triples on an unroutable episode
   (a Job per triple, scale to zero when idle); v1 is a manual runbook (ADR 0017 §3).
 - Re-run WORM acceptance tests against real AWS S3 Object Lock before production.
+- **[required before production]** IdP-side deprovisioning reaches sessions without waiting for
+  the 12 h absolute lifetime (ADR 0016 A2.6, M17 decision D8): SCIM deprovisioning (a principal
+  deactivated by the IdP ends its sessions in the deactivation's transaction, like an admin
+  deactivation) and OIDC back-channel logout (a verified `logout_token` revokes the sessions of its
+  `sub`/`sid`).
 - **[required before production]** Verify the vendored sRGB2014 ICC profile (SHA-256 `384b832d…c0a`, the copy WeasyPrint 70.0 bundles) byte for byte against the official file from color.org (scripted downloads got HTML in S1; download in a browser), and record the result in the profile's `SOURCE.md` (ADR 0018 §5.6).
 - Report reproductions (ADR 0017 §4 applied to reports, ADR 0018 §6).
 - **[required before production; needs cloud]** Report image delivery (ADR 0018 §22.8, §6): push

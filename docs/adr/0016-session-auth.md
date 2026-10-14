@@ -1,7 +1,8 @@
 # ADR 0016: Browser sessions, CSRF, re-authentication and source install flows
 
 Status: **Accepted** (2026-10-03), **amended 2026-10-12** (Amendment 1 below: the M17 plan review,
-decisions D1, D2, D3, D5, D10, D11). Not implemented yet (M17), except A8 (no error path echoes a
+decisions D1, D2, D3, D5, D10, D11) and **2026-10-14** (Amendment 2: D4, D6-D9, D12-D14, the
+access-lost bounds, operator-only moves, Slack's terms). Not implemented yet (M17), except A8 (no error path echoes a
 request value: M17 step 0). Builds on ADR 0013 (tenant from the
 host, OIDC, scoped roles) and decision 7 of `docs/plans/phase-2.md` (server-side sessions, httpOnly
 cookies, CSRF, revocation, no tokens in the browser). It fixes the details the frontend
@@ -271,7 +272,7 @@ M17 step 0 (built).
   §3), now with a reason class: `credentials_revoked`, `credentials_expired`, `consent_withdrawn`,
   `platform_credential_expired` (OUR certificate: an operations alert, never the customer's fault).
 - **Deadline:** a TENANT setting `reauth_deadline_hours`, default **168 (7 days)**, changed by a
-  tenant admin (audited, bounded 1 h..90 days). A paused job past it, or on the explicit audited
+  tenant admin (audited, bounded 24 h..90 days: A2.2). A paused job past it, or on the explicit audited
   action `POST /v1/jobs/{id}/finish-without-access` (`job.resume`, a reason, recent sign-in), closes
   every unit not yet reconciled as **`access_lost`** with the reason class, each unit's fact in the
   chain (`unit_reconciled`, ADR 0018 §28 format), and finishes `completed_with_gaps`. Nothing is
@@ -347,3 +348,76 @@ M17 step 0 (built).
   second server key (state MAC) to rotate.
 - Minus: no customer can bind a workspace or Entra tenant that another customer of ours already
   holds without an operator; legitimate moves need that operator step.
+
+## Amendment 2 (2026-10-14): the remaining M17 decisions, and Slack's terms
+
+Decided by the product owner on 2026-10-14. Where this amendment and the text above disagree, this
+amendment wins.
+
+### A2.1 Approved as written in Amendment 1
+- The signed state of A3 (`v1.<kid>.<install id>.<expiry>.<mac>`, MAC over install id, expiry,
+  tenant, principal and nonce).
+- The alert timing of A6 (one alert at the pause, one 24 h before the deadline or at half of it
+  when the deadline is under 48 h, each once per pause).
+- Slack export uploads stay outside the one-workspace rule of A4 (they carry no authenticated
+  workspace id; the report's export section says so).
+
+### A2.2 The access-lost deadline (amends A6)
+- The tenant setting `reauth_deadline_hours` is bounded **24 hours .. 90 days** (was 1 h .. 90 days),
+  default **7 days** (168 h). A value outside the bounds is refused (422, a fixed text), never
+  clamped.
+
+### A2.3 Moving an external id between tenants (amends A4)
+- **Operator CLI only; no API route** in any environment. The CLI requires a reason, records the move
+  in BOTH tenants' audit streams (the source tenant's event names the destination tenant and the
+  reverse, plus the operator and the reason), and raises an alert to the tenant admins of BOTH
+  tenants. The source tenant's connections on that id must be revoked first.
+- Test: no route exposes it: the OpenAPI document and the app's route table hold no path or
+  operation that writes the cross-tenant registry other than the bind of a new install, and the
+  registry's definer functions are not reachable from the `edisc_app` role except that bind.
+
+### A2.4 Live updates (D4, D6)
+- D4 approved: the SSE source polls (1 s per job per API process while it has subscribers);
+  revocation bound 15 s; LISTEN/NOTIFY only if measurements require it. **M17 step 5 measures 500
+  concurrent streams** (database queries per second and p99 event latency, on the test stack) and
+  records it in `docs/runs/`.
+- D6 approved: an open SSE stream never keeps a session alive.
+
+### A2.5 Session numbers (D7)
+- Approved: absolute 12 h, idle 30 min, re-auth window 10 min (§2, §4).
+
+### A2.6 Back-channel logout and SCIM (D8)
+- BACKLOG, **required before production**: SCIM deprovisioning and OIDC back-channel logout. Until
+  then the bound on an IdP-side disablement is the 12 h absolute lifetime.
+
+### A2.7 API compatibility (D9), directory page size (D14)
+- D9 approved: a new enum value in a RESPONSE is not breaking (surfaced in review). **The frontend
+  must render unknown enum values safely** (a neutral "unknown" presentation, never a crash, never
+  a value treated as a known one); recorded in the frontend requirements (HANDOFF).
+- D14 approved: directory pages hold at most 500 entries; other lists stay at 200.
+
+### A2.8 Directory names (D12), one Slack workspace in two tenants (D13)
+- D12: the plan's default stands (`connection.read`, or `job.start` on a matter of the client),
+  pending the mentor (same question as ADR 0018 §17 (b)).
+- D13: confirmed **no** (already decided by A4).
+
+### A2.9 Slack's limit on conversation history for non-Marketplace apps
+- Since May 2025 Slack limits `conversations.history` for apps distributed outside the Slack
+  Marketplace to 1 request per minute; internal customer-built apps and Marketplace apps keep
+  Tier 3. The live connector (Phase 3) detects the tier it is on and reports it as a job condition;
+  it never crawls silently. Details in `docs/plans/phase-3.md`.
+
+### A2.10 The internal-app token exception (§6) is pending legal review
+- Slack's terms treat templated custom apps as commercial distribution, so §6 is **pending legal
+  review**. Until it is cleared, M17 step 7 (token submission) is not built, and nothing is built
+  that ships customers a ready-made Slack app manifest.
+
+### A2.11 Note: the log-assertion sweep (before M17 step 2)
+- Every test asserting on log output was checked to read the production logging pipeline. Four were
+  blind: the connection-credential check used `caplog` (structlog lines never reach it); the
+  "canary as host" check compared a mixed-case canary with a host the client lowercases; the unit
+  422 checks ran an app without the access-line middleware, so the capture held nothing; the KMS
+  "redacted from logs" test never logged. `tests/logcapture.py` now fails on an empty capture and
+  offers `require()` (a positive control on the very lines under test); the request middleware is
+  `edisc_api.app.add_request_context`, shared by the unit app. Mutation round `m17-logs` (7 breaks,
+  all caught; 4 of them passed the tests as they were).
