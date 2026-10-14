@@ -280,3 +280,39 @@ async def test_a_stall_without_cpu_on_the_loops_thread_is_recorded_but_does_not_
 
 async def _sleeping_coroutine(seconds: float) -> None:
     time.sleep(seconds)  # noqa: ASYNC251  (stands for a thread the OS did not schedule)
+
+
+def test_a_send_wrapped_by_the_blocking_io_guard_is_still_a_socket_call() -> None:
+    """ADR 0015 §24.13: in tests every transport send runs through `loopblock`'s wrapper, whose
+    frame sat on top of the transport's `self._sock.send`, so the sample was never recognised."""
+    import asyncio.selector_events as se
+
+    from edisc_core import loopblock
+
+    lines = open(se.__file__).read().splitlines()  # noqa: SIM115
+    lineno = next(i for i, line in enumerate(lines, 1) if "self._sock.send(" in line)
+
+    def frame(path: str, line: int, back: object) -> object:
+        code = type("Code", (), {"co_filename": path, "co_flags": 0, "co_qualname": "write",
+                                 "co_name": "write"})()  # fmt: skip
+        return type("Frame", (), {"f_code": code, "f_lineno": line, "f_back": back})()
+
+    wrapped = frame(loopblock.__file__, 156, frame(se.__file__, lineno, None))
+    assert loopguard.classify(wrapped)[0] == "idle"  # type: ignore[arg-type]
+
+
+def _idle(total_ms: float | None, cpu_ms: float | None) -> loopguard.Block:
+    return loopguard.Block(
+        id="b", pid=1, lag_ms=300, origin="idle", blamed="send (waiting for I/O)", task=None,
+        stack="", total_ms=total_ms, cpu_ms=cpu_ms,
+    )  # fmt: skip
+
+
+def test_an_idle_sample_counts_only_when_the_loops_thread_was_measured_busy() -> None:
+    """The CI failure of §24.13: sampled on a BEGIN's non-blocking send, 466 ms, 527 ms of CPU on
+    the loop's thread (forty connections' SCRAM handshakes in one turn). A sample is one instant;
+    the CPU time says whether the loop was working."""
+    assert _idle(466, 527).counts
+    assert not _idle(466, 20).counts  # descheduled: excused
+    assert not _idle(None, None).counts  # still open: never assumed busy
+    assert not _idle(466, None).counts  # ended by the loop stopping: CPU unknown

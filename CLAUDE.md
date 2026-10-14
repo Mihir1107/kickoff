@@ -369,6 +369,9 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   Temporal time out a LIVE attempt, and every retry repeats it (ADR 0015 §23). A thread cannot be
   cancelled: what runs in one must be pure and write nothing (no DB, S3, files); writes stay on the
   loop. Work that must be killable or memory-limited (the report PDF) runs in a child process.
+- Database pools are FIXED (`max_overflow=0`) and warmed at startup (`edisc_db.session.warm_pool`):
+  a new asyncpg connection runs its SCRAM handshake on the loop. A warmed pool opening a connection
+  for a new slot is churn and fails the test (`loopblock.report_product`; ADR 0015 §24.13).
 - Every test fails if the event loop was blocked longer than `EDISC_TEST_LOOP_BLOCK_MS` (250 ms;
   `tests/conftest.py`, `edisc_core.loopguard`), in the test process or in any worker it spawned, with
   the blocked stack in the failure. Every function the product runs in a thread is listed in

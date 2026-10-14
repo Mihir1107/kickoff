@@ -19,7 +19,7 @@ from edisc_connectors_base.ratelimit import RateLimiter
 from edisc_core.settings import Settings
 from edisc_db.bootstrap import bootstrap
 from edisc_db.migrate import upgrade
-from edisc_db.session import create_engine, session_factory
+from edisc_db.session import create_engine, session_factory, warm_pool
 from edisc_evidence.s3 import s3_client
 from tests.integration import artifacts
 
@@ -154,6 +154,7 @@ async def app_sessions(
     settings: Settings, migrated: None
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     engine = create_engine(settings, "app", pool_size=40)
+    await warm_pool(engine)
     yield session_factory(engine)
     await engine.dispose()
 
@@ -163,6 +164,7 @@ async def sweeper_sessions(
     settings: Settings, migrated: None
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     engine = create_engine(settings, "sweeper", pool_size=2)
+    await warm_pool(engine)
     yield session_factory(engine)
     await engine.dispose()
 

@@ -6,10 +6,6 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - Automate starting render workers of old renderer/Unicode/tzdata triples on an unroutable episode
   (a Job per triple, scale to zero when idle); v1 is a manual runbook (ADR 0017 §3).
 - Re-run WORM acceptance tests against real AWS S3 Object Lock before production.
-- **[required before production]** Browser sign-in authenticates our client to the IdP with
-  `private_key_jwt` (a platform key in KMS, its JWKS published for the IdPs; no per-tenant secret
-  stored). M17 step 2 signs in as a public client with PKCE only (ADR 0016, step-2 note 2), which
-  many IdPs refuse for web applications.
 - Archive ended `sessions` and `login_attempts` rows after a retention period (no-delete rule:
   an owner-run archiving job, like the other insert-only tables; ADR 0016 step-2 note 9).
 - **[required before production]** IdP-side deprovisioning reaches sessions without waiting for
@@ -136,12 +132,3 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
   §29) once the render's whole-job reconciliation is fed per day.
 - Re-measure the preview's forced anchor per page view on the cloud VM with production S3 latencies
   (docs/runs/2026-10-12-preview-audit-burst.md; group commit is the fallback of ADR 0018 §10).
-- **[open; paired with the loop-guard exemption]** Fix the SCRAM connection bursts. asyncpg
-  authenticates every NEW connection with SCRAM-SHA-256 on the event loop (4,096 PBKDF2 iterations in
-  Python-level HMAC calls: tens of ms each, 285 ms seen during a burst of new connections under
-  load). Production workers open pooled connections on demand, so a burst of activities can stall
-  heartbeats. Fix: a pool MINIMUM size (connections opened before the worker polls, and kept), a
-  WARM-UP at worker and API start (open the minimum in the background before serving), and/or a cap
-  on new connections per second. The test loop guard currently EXEMPTS this as `library` time
-  (`edisc_core.loopguard`, ADR 0015 §24.3 and §24.7); when the pools are warmed, narrow or remove that
-  exemption so a regression is caught again. Both halves stay open until done together.

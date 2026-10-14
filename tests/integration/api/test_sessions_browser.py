@@ -14,6 +14,10 @@ browser behaviour, so it is tested in browsers, over real HTTPS:
 
 The control at the end proves the harness enforces SameSite: a cross-site navigation straight from
 the IdP page to the tenant arrives WITHOUT the session cookie.
+
+The ``__Host-`` prefix is tested the same way: a neighbouring tenant's subdomain and the parent
+domain never receive the session cookie (a ``Domain`` cookie, the control, does reach them), and a
+same-site request back from the neighbour carries it and is refused (ADR 0016 §2, step-2 note 3).
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ from playwright.async_api import async_playwright
 
 from edisc_api.app import create_app
 from edisc_api.auth import Authenticator
+from edisc_api.sessions import SESSION_COOKIE
 
 from .conftest import Api, TenantCtx
 from .oidc import TEST_IDP
@@ -133,10 +138,34 @@ def _idp_page(tenant_host: str, subject: str) -> ASGI:
     return app
 
 
-@pytest.mark.parametrize("engine", ["chromium", "firefox", "webkit"])
-async def test_the_first_page_after_the_bounce_is_signed_in(
+@dataclasses.dataclass
+class _Seen:
+    """One request as the server got it."""
+
+    host: str
+    path: str
+    cookie: bool  # the session cookie was sent
+    fetch_site: str | None
+    status: int | None = None
+
+
+@dataclasses.dataclass
+class _Harness:
+    host: str
+    seen: list[_Seen]
+    context: Any
+    page: Any
+
+    def at(self, host: str) -> list[_Seen]:
+        return [r for r in self.seen if r.host == host]
+
+
+@contextlib.asynccontextmanager
+async def _signed_in_browser(
     api: Api, tenant: TenantCtx, engine: str, tmp_path: Path
-) -> None:
+) -> AsyncIterator[_Harness]:
+    """A browser through the CONNECT proxy, signed in on the tenant host through the real flow
+    (the bounce page). Every request the server gets is recorded, whatever its host."""
     await enable_login(api, tenant)
     TEST_IDP.authorize_base = f"https://{IDP}"
     settings = api.settings.model_copy(update={"api_base_domain": BASE})
@@ -145,14 +174,26 @@ async def test_the_first_page_after_the_bounce_is_signed_in(
         authenticator=Authenticator(settings, api.sessions, api.resources.authenticator.jwks),
     )  # fmt: skip
     host = f"{tenant.subdomain}.{BASE}"
-    seen: list[tuple[str, bool]] = []  # (path, session cookie sent), as the server got them
+    seen: list[_Seen] = []
     api_app = create_app(settings, resources)
 
     async def recording(scope: Scope, receive: Any, send: Any) -> None:
-        if scope["type"] == "http" and scope["path"] != "/favicon.ico":  # Firefox asks for one
-            cookie = dict(scope["headers"]).get(b"cookie", b"")
-            seen.append((scope["path"], b"__Host-edisc_session=" in cookie))
-        await api_app(scope, receive, send)
+        if scope["type"] != "http" or scope["path"] == "/favicon.ico":  # Firefox asks for one
+            await api_app(scope, receive, send)
+            return
+        headers = dict(scope["headers"])
+        site = headers.get(b"sec-fetch-site")
+        row = _Seen(headers.get(b"host", b"").decode().split(":")[0], scope["path"],
+                    f"{SESSION_COOKIE}=".encode() in headers.get(b"cookie", b""),
+                    site.decode() if site else None)  # fmt: skip
+        seen.append(row)
+
+        async def sending(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                row.status = message["status"]
+            await send(message)
+
+        await api_app(scope, receive, sending)
 
     cert, key = _certificate(tmp_path)
     port = _free_port()
@@ -176,26 +217,84 @@ async def test_the_first_page_after_the_bounce_is_signed_in(
                 assert urllib.parse.urlsplit(page.url).netloc == IDP
                 async with page.expect_navigation(url=f"https://{host}/v1/me"):
                     await page.click("#continue")
-                body = await page.inner_text("body")
-                assert str(tenant.admin_id) in body, body  # signed in on the first page
-                assert ("/v1/auth/callback", False) in seen  # Strict cookie not on the callback
-                assert seen[-1] == ("/v1/me", True)  # ... but on the bounce's navigation
-                cookies = {c["name"]: c for c in await context.cookies(f"https://{host}")}
-                session = cookies["__Host-edisc_session"]
-                assert session["httpOnly"] and session["secure"] and session["sameSite"] == "Strict"
-                assert "__Host-edisc_login" not in cookies
-
-                # control: from the IdP's page straight to the tenant (cross-site): no cookie sent
-                await page.goto(f"https://{IDP}/authorize?{_dummy_authorize(host)}")
-                await page.click("#straight")
-                await page.wait_for_url(f"https://{host}/v1/me")
-                assert seen[-1] == ("/v1/me", False), seen[-3:]
-                assert "unauthorized" in await page.inner_text("body")
+                yield _Harness(host, seen, context, page)
             finally:
                 await browser.close()
     finally:
         server.should_exit = True
         await serving
+
+
+@pytest.mark.parametrize("engine", ["chromium", "firefox", "webkit"])
+async def test_the_first_page_after_the_bounce_is_signed_in(
+    api: Api, tenant: TenantCtx, engine: str, tmp_path: Path
+) -> None:
+    async with _signed_in_browser(api, tenant, engine, tmp_path) as b:
+        host, page = b.host, b.page
+        body = await page.inner_text("body")
+        assert str(tenant.admin_id) in body, body  # signed in on the first page
+        paths = [(r.path, r.cookie) for r in b.seen]
+        assert ("/v1/auth/callback", False) in paths  # Strict cookie not on the callback
+        assert paths[-1] == ("/v1/me", True)  # ... but on the bounce's navigation
+        cookies = {c["name"]: c for c in await b.context.cookies(f"https://{host}")}
+        session = cookies["__Host-edisc_session"]
+        assert session["httpOnly"] and session["secure"] and session["sameSite"] == "Strict"
+        assert "__Host-edisc_login" not in cookies
+
+        # control: from the IdP's page straight to the tenant (cross-site): no cookie sent
+        await page.goto(f"https://{IDP}/authorize?{_dummy_authorize(host)}")
+        await page.click("#straight")
+        await page.wait_for_url(f"https://{host}/v1/me")
+        assert (b.seen[-1].path, b.seen[-1].cookie) == ("/v1/me", False), b.seen[-3:]
+        assert "unauthorized" in await page.inner_text("body")
+
+
+@pytest.mark.parametrize("engine", ["chromium", "firefox", "webkit"])
+async def test_the_session_cookie_never_reaches_another_subdomain(
+    api: Api, tenant: TenantCtx, engine: str, tmp_path: Path
+) -> None:
+    """``__Host-``: Secure, ``Path=/``, no ``Domain``, so the browser keeps the cookie to exactly
+    the tenant's host. A neighbouring tenant's subdomain and the parent domain never receive it,
+    neither by a typed address nor by a same-site link. Second layer: a request a neighbouring
+    subdomain's page sends back to the tenant IS same-site (the Strict cookie goes with it), and the
+    API refuses it (403 ``cross_site``, ADR 0016 step-2 note 3)."""
+    async with _signed_in_browser(api, tenant, engine, tmp_path) as b:
+        host, page = b.host, b.page
+        assert b.seen[-1].path == "/v1/me" and b.seen[-1].cookie  # signed in on the tenant host
+        neighbour, parent = f"neighbour-{tenant.subdomain}.{BASE}", BASE
+        # control: a cookie WITH Domain (what __Host- forbids) does reach the neighbour, so an
+        # absent session cookie below is the browser's host-only rule, not the harness
+        await b.context.add_cookies([{"name": "domain_wide", "value": "1", "domain": f".{BASE}",
+                                      "path": "/", "secure": True, "sameSite": "Lax"}])  # fmt: skip
+
+        await page.goto(f"https://{neighbour}/v1/me")  # typed (Sec-Fetch-Site: none)
+        await page.goto(f"https://{parent}/v1/me")
+        await page.goto(f"https://{host}/v1/me")  # a same-site link from the tenant's page
+        await page.evaluate(f"""() => {{ const a = document.createElement("a");
+            a.href = "https://{neighbour}/v1/me?via=link"; document.body.append(a); a.click(); }}""")
+        await page.wait_for_url(f"https://{neighbour}/v1/me?via=link")
+        visits = b.at(neighbour) + b.at(parent)
+        assert len(b.at(neighbour)) == 2 and len(b.at(parent)) == 1, visits
+        assert not any(r.cookie for r in visits), visits
+        domain_wide = await page.evaluate("() => document.cookie")
+        assert "domain_wide=1" in domain_wide  # the control cookie WAS delivered to the neighbour
+        assert "edisc_session" not in domain_wide  # httpOnly: never readable by any page
+        jar = {c["name"]: c for c in await b.context.cookies(f"https://{host}")}
+        session = jar[SESSION_COOKIE]
+        assert SESSION_COOKIE.startswith("__Host-")
+        assert session["domain"] == host and session["path"] == "/"  # host-only (no Domain)
+
+        # second layer: the neighbour's page calls the tenant with credentials (same-site)
+        before = len(b.at(host))
+        await page.evaluate(f"""() => fetch("https://{host}/v1/me",
+            {{credentials: "include", mode: "no-cors"}}).catch(() => null)""")
+        for _ in range(100):
+            if len(b.at(host)) > before and b.at(host)[-1].status is not None:
+                break
+            await asyncio.sleep(0.05)
+        call = b.at(host)[-1]
+        assert call.fetch_site == "same-site" and call.cookie, call  # the Strict cookie went along
+        assert call.status == 403, call  # ... and the API refused it
 
 
 def _dummy_authorize(host: str) -> str:

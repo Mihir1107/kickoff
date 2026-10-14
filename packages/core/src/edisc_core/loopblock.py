@@ -86,6 +86,8 @@ class Violation:
     stack: str
 
     def describe(self) -> str:
+        if self.kind == "database pool churn":
+            return f"{self.kind} (pid {self.pid}): {self.detail} in {self.where}\n{self.stack}"
         return (
             f"blocking I/O on the event loop (pid {self.pid}, {self.origin}): {self.kind} "
             f"-- {self.detail}; move it to a thread (CLAUDE.md, ADR 0015 §23, §24.7) in "
@@ -125,6 +127,21 @@ def _flag(cfg: _Config, kind: str, detail: str) -> None:
         return
     stack = "".join(traceback.format_stack(caller))
     cfg.report(Violation(uuid.uuid4().hex, os.getpid(), kind, detail, origin, where, stack))
+
+
+def report_product(kind: str, detail: str) -> None:
+    """Report a violation that is ours whatever the stack says (no attribution). Used for database
+    pool churn (`edisc_db.session`): a connection opened after warm-up runs asyncpg's SCRAM
+    handshake on the loop, which the timing guard excuses as the driver's cost ("library") when its
+    sample lands there; churn itself is always our pool's configuration, so it is reported here
+    (ADR 0015 §24.13). A no-op unless a guard is installed (tests, and workers a test spawned)."""
+    cfg = _current()
+    if cfg is None:
+        return
+    caller = sys._getframe(1)
+    stack = "".join(traceback.format_stack(caller))
+    where = f"{caller.f_code.co_filename}:{caller.f_lineno} in {caller.f_code.co_qualname}"
+    cfg.report(Violation(uuid.uuid4().hex, os.getpid(), kind, detail, "product", where, stack))
 
 
 # -- socket -----------------------------------------------------------------------------------------

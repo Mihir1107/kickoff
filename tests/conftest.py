@@ -112,7 +112,7 @@ class _State:
         """Called at a stall's detection and again at its end (with its CPU time)."""
         if block.total_ms is not None:
             self._log("pytest", [block])
-        if block.origin in ("product", "unattributed"):
+        if block.origin in ("product", "unattributed", "idle"):  # idle counts if busy (§24.13)
             with self.lock:
                 self.pending[block.id] = block
 

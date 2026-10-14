@@ -438,7 +438,8 @@ Choices made while building (each one a deviation from, or a detail the plan lef
    at all and only the browser's handle plus our key rebuild the verifier.
 2. **Sign-in is a public OIDC client** (authorization code + PKCE S256, no client secret). Many IdPs
    require client authentication for a web application. Production needs `private_key_jwt` with a
-   platform key (no per-tenant secret to store): BACKLOG, required before production.
+   platform key (no per-tenant secret to store). *(2026-10-14: moved from the BACKLOG into M17 as
+   step 3b, before frontend wiring: `docs/plans/m17.md` §1.6.)*
 3. **Fetch metadata:** a cookie-authenticated request whose `Sec-Fetch-Site` is present and not
    `same-origin` or `none` is refused (403 `cross_site`), `same-site` included: a sibling tenant
    subdomain is same-site and would otherwise carry the Strict cookie. Absent header (old clients):
@@ -467,6 +468,13 @@ Choices made while building (each one a deviation from, or a detail the plan lef
     hook the SSE stream (step 5) uses (A2.4, D6).
 11. **Revoking one's own session:** another principal's session id is 404, an already revoked one 409
     `already_revoked`; ending the CURRENT session never needs a recent sign-in.
+12. **Host-only, proven in browsers (2026-10-14):** the session cookie is `__Host-edisc_session`
+    (`Secure`, `Path=/`, no `Domain`). `test_the_session_cookie_never_reaches_another_subdomain`
+    (Chromium, Firefox, WebKit) signs in on a tenant host and shows that a neighbouring tenant's
+    subdomain (typed, and by a same-site link) and the parent domain never receive it, while a control
+    cookie with `Domain` does; and that a credentialed request from the neighbour's page back to the
+    tenant carries the Strict cookie (same-site) and is refused 403 `cross_site` (note 3, the second
+    layer). Mutation round `m17-host-cookie` (a domain-wide cookie; `same-site` allowed): both caught.
 
 Tests: `tests/integration/api/test_sessions.py` (74: sign-in, cookie flags, the bounce page, every
 callback refusal, `return_to` table, fixation, rotation, re-authentication, cookie + bearer, another

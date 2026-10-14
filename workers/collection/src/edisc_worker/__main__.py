@@ -35,7 +35,7 @@ from edisc_core import loopblock, loopguard
 from edisc_core.logs import configure_logging, get_logger
 from edisc_core.settings import Settings
 from edisc_db.connection_tokens import reconcile_token_refreshes
-from edisc_db.session import create_engine, session_factory
+from edisc_db.session import create_engine, session_factory, warm_pool
 from edisc_evidence.s3 import s3_client
 from edisc_worker.activities import Activities
 from edisc_worker.contracts import EXPORTS_QUEUE, MAINTENANCE_QUEUE, task_queue
@@ -86,10 +86,12 @@ async def activities_for(
     settings: Settings, sources: Sequence[str], client: Client
 ) -> AsyncIterator[tuple[Activities, MaintenanceActivities]]:
     engine = create_engine(settings, "app")
-    sweeper = create_engine(settings, "sweeper", pool_size=1)
+    sweeper = create_engine(settings, "sweeper", pool_size=2)
     redis = aioredis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=5)
     http = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
     try:
+        await warm_pool(engine)
+        await warm_pool(sweeper)
         sessions = session_factory(engine)
         result = await reconcile_token_refreshes(session_factory(sweeper), sessions)
         log.info("token refresh journal reconciled", **result)

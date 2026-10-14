@@ -10,8 +10,10 @@ late by more than the threshold, samples the loop thread's stack while it is sti
 reports a `Block`. The block is attributed to the innermost COROUTINE frame on that stack (the async
 function that made the blocking synchronous call): product code (`packages/`, `apps/`, `workers/`
 sources) or anything unattributable counts; a test's own coroutine (test setup that builds data
-synchronously), a loop sampled inside its selector (waiting for I/O on a host that did not
-schedule it) and asyncpg's SCRAM handshake for a new connection are recorded but do not count. A
+synchronously) and asyncpg's SCRAM handshake for a new connection are recorded but do not count
+(new connections are churn, failed by `loopblock.report_product`, ADR 0015 §24.13); a loop
+sampled inside its selector or a non-blocking socket call counts only if its thread was busy for
+the stall (measured, not assumed): a sample is one instant of a stall. A
 stall also counts only if the loop's thread was on the CPU for at least `BUSY_SHARE` of it (its
 `time.thread_time()` across the stall): CPU-bound work on the loop burns that time, a process the OS
 did not schedule does not. Blocking system calls on the loop burn none either: ruff's ASYNC rules
@@ -56,6 +58,7 @@ PRODUCT_ROOTS: tuple[str, ...] = tuple(
 )
 TEST_ROOTS: tuple[str, ...] = (str(_REPO / "tests") + os.sep, str(_REPO / "scripts") + os.sep)
 _ASYNC = inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR
+_LOOPBLOCK = str(Path(__file__).with_name("loopblock.py"))
 
 
 @dataclass(frozen=True)
@@ -85,6 +88,12 @@ class Block:
 
     @property
     def counts(self) -> bool:
+        """An ``idle`` sample (the loop in its selector or a non-blocking socket call) is excused
+        only when the loop's thread did NOT run for the stall: a sample is one instant, and a loop
+        that burnt the CPU for the whole stall was working, wherever the sample landed (a burst of
+        new connections' handshakes sampled on a BEGIN's send, ADR 0015 §24.13)."""
+        if self.origin == "idle":
+            return self.cpu_ms is not None and self.busy  # measured, never assumed
         return self.origin in ("product", "unattributed") and self.busy
 
     def describe(self) -> str:
@@ -128,6 +137,12 @@ def _awaited_frames(task: object) -> list[FrameType]:
     return frames
 
 
+def _unwrapped(frame: FrameType) -> FrameType:
+    if frame.f_code.co_filename == _LOOPBLOCK and frame.f_back is not None:
+        return frame.f_back  # the blocking-I/O guard's wrapper around the transport's call
+    return frame
+
+
 def _waiting(frame: FrameType) -> bool:
     path = frame.f_code.co_filename
     if path.endswith(f"{os.sep}selectors.py"):
@@ -156,8 +171,8 @@ def classify(
     decides. A loop sampled inside its selector, or inside a NON-BLOCKING socket call of the
     transport, is waiting for I/O, not blocked: it was late because the OS did not schedule the
     process in time (a loaded or swapping host)."""
-    if frame is not None and _waiting(frame):
-        return "idle", f"{frame.f_code.co_filename}:{frame.f_lineno} (waiting for I/O)"
+    if frame is not None and _waiting(inner := _unwrapped(frame)):
+        return "idle", f"{inner.f_code.co_filename}:{inner.f_lineno} (waiting for I/O)"
     stack: list[FrameType] = []
     while frame is not None:
         stack.append(frame)
@@ -350,7 +365,7 @@ def install_from_env(
     def report(block: Block) -> None:
         if block.total_ms is None:
             log(block.describe())
-        if directory is not None and block.origin in ("product", "unattributed"):
+        if directory is not None and block.origin in ("product", "unattributed", "idle"):
             write_block(directory, block)  # at detection, then again with its end
 
     guard = LoopGuard(loop, float(raw), report)

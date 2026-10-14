@@ -9,11 +9,12 @@ every Temporal activity.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
+import weakref
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from sqlalchemy import text
+from sqlalchemy import Engine, event, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -21,8 +22,45 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import ConnectionPoolEntry, Pool
 
+from edisc_core import loopblock
+from edisc_core.logs import get_logger
 from edisc_core.settings import Settings
+
+log = get_logger(__name__)
+
+# connections a WARMED pool opened for a new pool slot (process-wide; tests fail on any: ADR 0015
+# §24.13). A reconnect of an invalidated slot (pre-ping, a terminated session) is not counted.
+_churn = 0
+_warmed: weakref.WeakSet[Pool] = weakref.WeakSet()
+
+
+def pool_churn() -> int:
+    """How many connections warmed pools of this process opened for a new slot so far."""
+    return _churn
+
+
+def _count_churn(engine: Engine) -> Callable[[object, ConnectionPoolEntry], None]:
+    ref = weakref.ref(engine)
+
+    def on_connect(dbapi_conn: object, record: ConnectionPoolEntry) -> None:
+        global _churn
+        info = record.record_info  # survives invalidation (.info does not); None only when detached
+        if info is None:
+            return
+        first, info["edisc_connected"] = not info.get("edisc_connected"), True
+        owner = ref()
+        if first and owner is not None and owner.pool in _warmed:
+            _churn += 1
+            log.warning("db pool opened a connection after warm-up")
+            loopblock.report_product(
+                "database pool churn",
+                "a warmed pool opened a connection for a new slot (asyncpg's SCRAM handshake runs"
+                " on the event loop; pools are fixed and warmed at startup: ADR 0015 §24.13)",
+            )
+
+    return on_connect
 
 
 def create_engine(
@@ -30,8 +68,13 @@ def create_engine(
     role: Literal["app", "owner", "superuser", "sweeper"] = "app",
     *,
     db: str | None = None,
-    pool_size: int = 10,
+    pool_size: int = 20,
 ) -> AsyncEngine:
+    """A FIXED pool of ``pool_size`` connections (no overflow): a new asyncpg connection runs the
+    SCRAM handshake (4,096 PBKDF2 iterations in Python, ~4 ms of CPU here, more on CI runners) ON
+    THE EVENT LOOP, so overflow connections opened and closed per burst stalled the loop by
+    hundreds of milliseconds (ADR 0015 §24.13). Call :func:`warm_pool` at startup. Waiters queue
+    for a free connection instead."""
     url = settings.pg_dsn(role, db=db).replace("postgresql://", "postgresql+asyncpg://", 1)
     server_settings = {"search_path": f"{settings.pg_schema},pg_temp"}
     if role in ("app", "sweeper"):
@@ -41,16 +84,34 @@ def create_engine(
         server_settings["idle_in_transaction_session_timeout"] = str(
             settings.pg_idle_in_transaction_timeout_ms
         )
-    return create_async_engine(
+    engine = create_async_engine(
         url,
         pool_size=pool_size,
-        max_overflow=pool_size,
+        max_overflow=0,
         pool_pre_ping=True,
         # a statement error's text never carries its parameters: it reaches logs, unit errors in the
         # chain and API answers (ADR 0016 amendment, D11); the SQLSTATE stays on the error
         hide_parameters=True,
         connect_args={"server_settings": server_settings},
     )
+    event.listen(engine.sync_engine, "connect", _count_churn(engine.sync_engine))
+    return engine
+
+
+async def warm_pool(engine: AsyncEngine) -> None:
+    """Open every connection of the pool now, ONE AT A TIME (each handshake is its own short turn
+    of the loop, never a burst), and mark the pool warmed: any later connection for a new slot is
+    churn (:func:`pool_churn`)."""
+    pool = engine.sync_engine.pool
+    held = []
+    try:
+        for _ in range(pool.size()):  # type: ignore[attr-defined]
+            held.append(await engine.connect())
+            await held[-1].exec_driver_sql("SELECT 1")
+    finally:
+        for conn in held:
+            await conn.close()
+    _warmed.add(pool)
 
 
 # SQLSTATEs that mean "try the whole transaction again": nothing was committed.

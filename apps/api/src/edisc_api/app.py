@@ -35,7 +35,7 @@ from edisc_core.envelope import SecretBox
 from edisc_core.kms import LocalKmsClient
 from edisc_core.logs import bind_context, clear_context, get_logger
 from edisc_core.settings import Settings
-from edisc_db.session import create_engine, session_factory
+from edisc_db.session import create_engine, session_factory, warm_pool
 from edisc_evidence.s3 import s3_client
 
 log = get_logger(__name__)
@@ -84,6 +84,7 @@ async def build_resources(settings: Settings) -> AsyncIterator[Resources]:
     redis = aioredis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=5)
     http = httpx.AsyncClient()
     try:
+        await warm_pool(engine)
         sessions = session_factory(engine)
         temporal = await Client.connect(
             settings.temporal_address, namespace=settings.temporal_namespace

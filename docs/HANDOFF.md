@@ -52,24 +52,18 @@ to start outside local/test/ci without `EDISC_API_SESSION_KEYS` (workers never n
 render-package test). Diagnosed, not re-run to green: `stack_lock.py run` (an exclusive `flock` for
 the whole run) now guards `test-integration-only`; ADR 0015 §24.12.
 
-**OPEN, undiagnosed (CLAUDE.md rule: not re-run to green):** CI run 38536427956 (`4a8c05f`, the
-sweep + amendment) failed ONE test in integration shard 2:
-`tests/integration/custody/test_anchor_claims.py::test_concurrent_writers_produce_one_anchor_per_due_point`,
-a 466 ms event-loop block (257 ms lag sampled, 527 ms CPU on the loop thread, "product"), sampled
-while a writer awaited `BEGIN` in `tenant_tx`. The commit does not touch custody or this test. My
-hypothesis, NOT proven: the test gathers 200 writers on a 20-connection pool; as connections free,
-one loop iteration runs many ready task steps back to back (pool hand-offs, `append`'s hashing), so
-the sampler sees lag without any single blocking call, on a slow runner. Next: reproduce in a loop
-under CPU contention (the reproduction tooling note below), then decide product vs test; record in
-ADR 0015 §24. Not reproduced here: Docker Desktop stopped (disk at 6 GB free) after the step-2
-runs.
+**DIAGNOSED AND FIXED (2026-10-14, ADR 0015 §24.13):** CI run 38536427956's anchor-claims stall
+(466 ms, 527 ms of loop CPU, sampled on a `BEGIN` send) was database pool churn: `create_engine`
+had `max_overflow=pool_size`, so every burst opened and closed dozens of connections, each running
+asyncpg's Python PBKDF2 SCRAM handshake on the loop. Reproduced (old settings 4/10 fail under 8 busy
+cores, the fix 0/10; a scratch Postgres measurement: stall = number of new connections). Fix: fixed
+pools warmed at startup (`warm_pool`), churn after warm-up fails tests (`loopblock.report_product`),
+and the guard counts an "idle" sample when the loop thread was measured busy. Round `s24-pool` 7/7.
 
-**For you (not blocking step 3):**
-1. Browser sign-in is a PUBLIC OIDC client (PKCE, no client secret). Many IdPs want client
-   authentication for web apps: `private_key_jwt` with a platform key is in the BACKLOG as required
-   before production. Say if you want it sooner.
-2. Cookie requests with `Sec-Fetch-Site: same-site` are refused too (a sibling tenant subdomain is
-   same-site and would carry the Strict cookie); only `same-origin` and `none` pass.
+**Resolved (user, 2026-10-14):** `private_key_jwt` is M17 step 3b (plan §1.6, off the BACKLOG); the
+`__Host-` session cookie is proven host-only in three browsers
+(`test_the_session_cookie_never_reaches_another_subdomain`, ADR 0016 step-2 note 12; round
+`m17-host-cookie` 2/2), the `same-site` refusal kept as the second layer.
 
 ## Frontend requirements (for `feat/web-ui`; the backend never edits `apps/web`)
 - **Unknown enum values (D9, ADR 0016 A2.7):** a response enum value the UI does not know renders

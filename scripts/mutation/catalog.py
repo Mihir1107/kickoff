@@ -59,6 +59,11 @@ Rounds (ADR 0015):
   request, CSRF token and Origin, fetch metadata, single-use state, the login cookie handle, the
   nonce, every ``return_to`` rule, the re-authentication checks, the bounce page (in real browsers),
   deactivation revoking sessions, recent sign-in, the start throttle, the guard triggers.
+- ``s24-pool``: fixed, warmed database pools and the churn report (ADR 0015 §24.13); the timing
+  guard counting an idle sample when the loop's thread was measured busy, through the blocking-I/O
+  guard's wrapper.
+- ``m17-host-cookie``: the session cookie is host-only (``__Host-``, no ``Domain``) and a same-site
+  request from a neighbouring subdomain is refused, both in real browsers (ADR 0016 §2).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
   and the blocking-I/O guard ``edisc_core.loopblock``, §24.8), every CPU step moved off the loop, the
   render thread writing nothing (ADR 0015 §24).
@@ -90,6 +95,7 @@ AC = "tests/integration/api/test_content_reads_anchored.py"
 CN = "tests/integration/custody/test_render_package_natives.py"
 CP = "tests/integration/custody/test_render_package.py"
 LG = "packages/core/src/edisc_core/loopguard.py"
+IPOOL = "tests/integration/db/test_pool.py"
 DC = "packages/connectors/dummy/src/edisc_connector_dummy/connector.py"
 ULG = "tests/unit/core/test_loopguard.py"
 LB = "packages/core/src/edisc_core/loopblock.py"
@@ -1244,4 +1250,34 @@ CATALOG: list[Mutation] = [
     m("session_revocation_not_final", "m17-sessions", M36,
       "    IF OLD.revoked_at IS NOT NULL THEN\n        RAISE EXCEPTION 'sessions: a revoked session is final'",
       "    IF false THEN\n        RAISE EXCEPTION 'sessions: a revoked session is final'", DSG, "revoked_session_is_final"),
+    # ------------------------------------------------------------------ pool churn (ADR 0015 §24.13)
+    m("pool_overflow_back", "s24-pool", SESS, "        max_overflow=0,\n",
+      "        max_overflow=pool_size,\n", IPOOL),
+    m("pool_never_marked_warm", "s24-pool", SESS, "    _warmed.add(pool)\n", "    pass\n", IPOOL,
+      "new_slot"),
+    m("pool_churn_not_reported", "s24-pool", SESS, "            loopblock.report_product(\n",
+      "            (lambda *a: None)(\n", IPOOL, "new_slot"),
+    m("pool_reconnect_is_churn", "s24-pool", SESS,
+      'first, info["edisc_connected"] = not info.get("edisc_connected"), True',
+      'first, info["edisc_connected"] = True, True', IPOOL, "reconnect"),
+    m("guard_idle_never_counts", "s24-pool", LG,
+      "            return self.cpu_ms is not None and self.busy  # measured, never assumed\n",
+      "            return False\n", ULG, "measured_busy"),
+    m("guard_idle_assumed_busy", "s24-pool", LG,
+      "            return self.cpu_ms is not None and self.busy  # measured, never assumed\n",
+      "            return self.busy\n", ULG, "measured_busy"),
+    m("guard_wrapper_hides_send", "s24-pool", LG,
+      "        return frame.f_back  # the blocking-I/O guard's wrapper around the transport's call\n",
+      "        return frame\n", ULG, "wrapped_by_the_blocking"),
+    # ------------------------------------------------------------------ host-only session cookie
+    Mutation("session_cookie_domain_wide", "m17-host-cookie", SESP, (
+        ('SESSION_COOKIE = "__Host-edisc_session"', 'SESSION_COOKIE = "edisc_session"'),
+        ('    return f"{name}={value}; Max-Age={max_age}; Path=/; Secure; HttpOnly; SameSite={same_site}"',
+         '    domain = "; Domain=edisc-browser.test" if name == SESSION_COOKIE else ""\n'
+         '    return f"{name}={value}; Max-Age={max_age}; Path=/{domain}; Secure; HttpOnly; SameSite={same_site}"'),
+    ), SESB, "another_subdomain and chromium"),
+    m("same_site_fetch_allowed", "m17-host-cookie", APPM,
+      'if site is not None and site not in ("same-origin", "none"):',
+      'if site is not None and site not in ("same-origin", "none", "same-site"):', SESB,
+      "another_subdomain and webkit"),
 ]  # fmt: skip

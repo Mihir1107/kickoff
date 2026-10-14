@@ -1229,3 +1229,49 @@ what was done and why.
     command (released by the kernel however the process ends) and recreates the basetemp only once
     it holds it; a second run exits 5 before touching anything (`tests/unit/test_stack_lock.py`, and
     proven with two overlapping `make` runs). The mutation runner goes through the same target.
+13. **The anchor-claims stall, third time: connection churn, fixed at the source (2026-10-14).** CI
+    run 38536427956 (`4a8c05f`, a commit touching neither custody nor the test) failed
+    `test_concurrent_writers_produce_one_anchor_per_due_point` once: 466 ms stall, 527 ms of CPU on
+    the loop's thread (busy for all of it, so not a descheduled runner), sampled 257 ms in, in
+    `tenant_tx` awaiting `BEGIN`, on the transport's NON-BLOCKING `self._sock.send` (the artifact had
+    no worker logs: the test runs in the pytest process; the stack came from the job log). Not the
+    exempted handshake frame, but the handshakes nonetheless:
+    - **Why connections were created:** the pool was NOT fixed. `create_engine` set
+      `max_overflow=pool_size` (the test fixture: 40 + 40; API and workers: 10 + 10, sweeper 1 + 1).
+      200 writers (each a `tenant_tx` for `append`, then `anchor_if_due`'s own) hold up to 80
+      connections; the 40 overflow ones are opened in the burst and CLOSED when returned to a full
+      pool, so every burst (every run of this test, and any burst of activities or requests in
+      production) opened and discarded forty connections. Each runs asyncpg's SCRAM handshake on the
+      loop: PBKDF2 with 4,096 `hmac.new` calls in Python (`asyncpg/protocol/scram.pyx`), 4 ms of CPU
+      per connection on this laptop (0.35 ms in C `hashlib.pbkdf2_hmac`), more on a runner. Their
+      server messages arrive together, so one loop turn runs dozens of handshakes back to back from
+      read callbacks; the 250 ms sample lands on whatever ran at that instant, here a `BEGIN` send.
+    - **Measured** (a scratch Postgres 14 with `scram-sha-256`, the test's shape: 200 writers x two
+      transactions, `edisc_core.loopguard` at 50 ms, three runs each): pool 40 + 40 overflow:
+      40 connections opened AND 40 closed per burst, worst stall 195-331 ms, wall 453-463 ms; 40 + 40
+      cold: 79 opened, 321-331 ms; FIXED 80 not warmed: 79 opened, 406 ms (the first burst); fixed
+      and warmed, 20, 40 or 80: 0 opened, no stall over 50 ms, wall 100-116 ms. The stall is the
+      number of NEW connections, nothing else. The real test under 8 busy cores, 10 runs each: old
+      pool settings 4 of 10 failed exactly like CI (284-1,113 ms of loop CPU); the fix 0 of 10.
+    - **Fix (product):** `create_engine` builds a FIXED pool (`max_overflow=0`) at the old peak
+      capacity (API and workers 20, sweeper 2); `warm_pool` opens every connection at startup ONE AT
+      A TIME (no burst) in `build_resources` and the worker's `activities_for`, and in the test
+      fixtures. Waiters queue for a connection instead of opening one (8x faster in the measurement).
+    - **The exemption no longer hides churn:** a warmed pool that opens a connection for a NEW slot
+      logs a warning and reports a `loopblock` violation "database pool churn" through
+      `loopblock.report_product` (ours whatever the stack says, never attributed), so the test, or
+      the test whose spawned worker churned, fails. A reconnect of an invalidated slot (pre-ping, a
+      terminated session) is not churn (`record_info` survives invalidation). The `library`
+      exemption for driver read callbacks stays (wire-protocol parsing has no frame of ours): it can
+      now excuse only an UNWARMED engine's first connections (scripts, the admin CLI, a few tests'
+      own engines), never a product pool after start.
+    - **A guard hole found on the way:** the classifier's "idle" rule (a sample in a non-blocking
+      socket call = waiting for I/O) never matched in tests, because `loopblock` wraps the transport's
+      send and its wrapper frame sat on top. Seeing through the wrapper alone would have excused THIS
+      stall as idle. Now: the wrapper is looked through, and an idle sample counts unless the loop's
+      thread was MEASURED not busy (a sample is one instant; the CPU time says whether the loop was
+      working; an open stall or one ended by the loop stopping has no measurement and stays excused).
+    - Tests: `tests/integration/db/test_pool.py` (a 200-writer burst on a warmed pool opens nothing;
+      production pools are fixed; a reconnect is not churn; a new slot is reported), two cases in
+      `tests/unit/core/test_loopguard.py`. Mutation round `s24-pool` (7 breaks, all caught). The
+      BACKLOG item "Fix the SCRAM connection bursts" is done and removed.
