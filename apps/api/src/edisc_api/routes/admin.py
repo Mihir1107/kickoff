@@ -264,6 +264,66 @@ async def create_group(
     return GroupOut(**row._mapping)
 
 
+@router.get("/groups", response_model=Page[GroupOut], openapi_extra=ADMIN)
+async def list_groups(
+    caller: CallerDep, res: ResourcesDep, cursor: CursorQ = None, limit: LimitQ = 50
+) -> Page[GroupOut]:
+    after = decode(cursor)
+    async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        await authorize(s, caller, P.TENANT_ADMIN, TENANT)
+        rows = (
+            await s.execute(
+                text(
+                    "SELECT id, name, external_id, created_at FROM groups"
+                    " WHERE (CAST(:after AS uuid) IS NULL OR id > :after) ORDER BY id LIMIT :n"
+                ),
+                {"after": after, "n": limit + 1},
+            )
+        ).all()
+    return page_of([GroupOut(**r._mapping) for r in rows], limit, lambda g: g.id)
+
+
+class MemberOut(Strict):
+    id: uuid.UUID  # the membership (a principal re-added later is a new membership)
+    principal_id: uuid.UUID
+    display_name: str
+    active: bool  # the principal's own state
+    added_at: datetime
+    removed_at: datetime | None
+
+
+@router.get("/groups/{group_id}/members", response_model=Page[MemberOut], openapi_extra=ADMIN)
+async def list_members(
+    group_id: uuid.UUID,
+    caller: CallerDep,
+    res: ResourcesDep,
+    include_removed: bool = False,
+    cursor: CursorQ = None,
+    limit: LimitQ = 50,
+) -> Page[MemberOut]:
+    """Current members; with ``include_removed`` also ended memberships (nothing is deleted)."""
+    after = decode(cursor)
+    async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        await authorize(s, caller, P.TENANT_ADMIN, TENANT)
+        exists = (
+            await s.execute(text("SELECT 1 FROM groups WHERE id = :g"), {"g": group_id})
+        ).first()
+        if exists is None:
+            raise not_found()
+        rows = (
+            await s.execute(
+                text(
+                    "SELECT gm.id, gm.principal_id, p.display_name, p.active, gm.added_at,"
+                    " gm.removed_at FROM group_members gm JOIN principals p ON p.id = gm.principal_id"
+                    " WHERE gm.group_id = :g AND (CAST(:all AS boolean) OR gm.removed_at IS NULL)"
+                    " AND (CAST(:after AS uuid) IS NULL OR gm.id > :after) ORDER BY gm.id LIMIT :n"
+                ),
+                {"g": group_id, "all": include_removed, "after": after, "n": limit + 1},
+            )
+        ).all()
+    return page_of([MemberOut(**r._mapping) for r in rows], limit, lambda m: m.id)
+
+
 @router.post("/groups/{group_id}/members", status_code=204, openapi_extra=ADMIN)
 async def add_member(
     group_id: uuid.UUID, body: MemberIn, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep

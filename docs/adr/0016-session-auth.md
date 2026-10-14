@@ -489,3 +489,44 @@ tested). Mutation round `m17-sessions`: 35 breaks, all caught (the first run lef
 the fixation test planted a Strict cookie, which a browser withholds on the cross-site callback
 anyway, now planted as an attacker would (SameSite=None); the absolute-expiry term, see note 9; the
 guard tests ran on the already migrated database, so a migration edit changed nothing).
+
+## Implementation notes: M17 step 3, the UI's reads (2026-10-14)
+
+Built (`docs/plans/m17.md` §3.1, §3.2, §3.4, §3.5; migration 0037): `GET /v1/me/permissions`,
+`GET /v1/roles`, `GET /v1/jobs`, `GET /v1/jobs/{id}/custody/events`, `GET /v1/groups`,
+`GET /v1/groups/{id}/members`, and cursors bound to their request. Choices made while building:
+1. **Cursor binding is app-wide.** `edisc_api.pagination.bind_cursors` (a dependency of the whole
+   app) digests the route template, the path parameters and every query parameter but `cursor` and
+   `limit`; `encode`/`decode` read it from a context variable, so every list route, old and new, is
+   bound without passing anything, and a new route cannot forget it. A mismatch is 422
+   `cursor_mismatch`; an unreadable cursor stays 422 `unprocessable`. Cursors stay unsigned (§3.2).
+   The cursor format changed (`{"p", "f"}`): cursors issued before this release are refused, which
+   costs a client one restart of its listing.
+2. **The jobs list's visibility is `authorize`'s rule, as a join:** a live role assignment (direct or
+   through a group) granting `job.read` at the job's matter or its client, or at the tenant. A role
+   at a WORKSPACE makes the matter visible (`visible_ids`) but not its jobs, because `GET
+   /v1/jobs/{id}` authorizes at the matter; the list follows the GET, and a test checks for every
+   role that the listed jobs are exactly those the GET answers.
+3. **Filters:** `status`, `clean_basis` (`source` = `completed`, `archive` =
+   `completed_against_archive`; contradicting a `status` filter gives an empty page), `client_id`,
+   `matter_id`, `connection_id`, `source`, and `[from, to)` ranges on `created_at` and `finished_at`
+   (timezone-aware only: a naive time is 422). A filter naming an invisible client or matter gives an
+   empty page, never a 404 (no existence leak through the filter).
+4. **Custody events:** keyset on `seq`, `limit` at most 500, a 1 MiB payload budget measured in SQL
+   (`octet_length(payload::text)` over the window) before any payload is fetched; a single event over
+   the budget is a page on its own. Each event carries `prev_hash` and `event_hash` so a client can
+   follow the chain. `custody.read`, authorized at the job's matter.
+5. **Groups:** members are listed by membership (a principal removed and re-added has two rows);
+   `include_removed=true` adds ended memberships. Both routes need `tenant.admin`, like the rest of
+   tenant administration (404/403 per `authorize`).
+6. **`/me/permissions`** groups the caller's live assignments by scope (the tenant as scope id null,
+   ordered first in its type by the nil UUID), with the roles and `authz.permissions` of them; a
+   hint for the UI, never an authorization. **`/roles`** is generated from `ROLE_PERMISSIONS`.
+7. **Lists build their rows in three statements per page** (`_jobs_out`), not three per job; the
+   per-matter jobs list uses the same code.
+
+Tests: `tests/integration/api/test_ui_reads.py` (17), the access matrix in `test_authz.py` gained
+the custody events, job and group routes (the world now has connections, jobs and a group), the
+no-echo fuzzer covers the new routes and filters from the OpenAPI document. Mutation round
+`m17-reads`: 17 breaks, all caught (the first run left `cursor_route_unbound` uncaught: every
+route case also changed a parameter; a case where only the route differs was added).

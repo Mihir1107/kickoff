@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from edisc_api.app import create_app
 from edisc_api.authz import ROLE_PERMISSIONS, P, Permission
+from edisc_core.ids import new_id
 from edisc_core.kms import LocalKmsClient
 from edisc_core.time import utc_now
 from edisc_db.session import tenant_tx
@@ -37,6 +38,11 @@ class World:
     m1: uuid.UUID
     m2: uuid.UUID
     w1: uuid.UUID
+    conn1: uuid.UUID  # a dummy connection of c1
+    conn2: uuid.UUID  # ... of c2
+    j1: uuid.UUID  # a job on m1 (through conn1)
+    j2: uuid.UUID  # a job on m2
+    group: uuid.UUID
 
 
 async def build_world(api: Api, t: TenantCtx) -> World:
@@ -56,7 +62,23 @@ async def build_world(api: Api, t: TenantCtx) -> World:
             )
         ).json()["id"]
         w1 = (await c.post(f"/v1/matters/{m1}/workspaces", json={"name": "W1"})).json()["id"]
-    return World(*(uuid.UUID(x) for x in (c1, c2, m1, m2, w1)))
+        group = (await c.post("/v1/groups", json={"name": f"G {uuid.uuid4()}"})).json()["id"]
+    conn1, conn2, j1, j2 = new_id(), new_id(), new_id(), new_id()
+    async with tenant_tx(api.sessions, t.tenant_id) as s:
+        for conn, client in ((conn1, c1), (conn2, c2)):
+            await s.execute(
+                text("INSERT INTO connections (id, tenant_id, client_id, source, external_org_id,"
+                     " status) VALUES (:i, :t, :c, 'dummy', 'org', 'active')"),
+                {"i": conn, "t": t.tenant_id, "c": client},
+            )  # fmt: skip
+        for job, matter, conn in ((j1, m1, conn1), (j2, m2, conn2)):
+            await s.execute(
+                text("INSERT INTO collection_jobs (id, tenant_id, matter_id, connection_id, status,"
+                     " connector_version, requested_by) VALUES (:i, :t, :m, :c, 'running', '0',"
+                     " 'tests')"),
+                {"i": job, "t": t.tenant_id, "m": matter, "c": conn},
+            )  # fmt: skip
+    return World(*(uuid.UUID(str(x)) for x in (c1, c2, m1, m2, w1, conn1, conn2, j1, j2, group)))
 
 
 # where each role is assigned in the matrix
@@ -121,13 +143,21 @@ CASES: list[tuple[Permission, str, str, str, dict[str, Any] | None]] = [
     (P.MATTER_READ, "m1", "get", "/v1/matters/{m1}/workspaces", None),
     (P.TENANT_ADMIN, "tenant", "get", "/v1/principals", None),
     (P.TENANT_ADMIN, "tenant", "get", "/v1/role-assignments", None),
+    # M17 step 3: custody events by the job's matter, groups at the tenant
+    (P.CUSTODY_READ, "m1", "get", "/v1/jobs/{j1}/custody/events", None),
+    (P.CUSTODY_READ, "m2", "get", "/v1/jobs/{j2}/custody/events", None),
+    (P.JOB_READ, "m1", "get", "/v1/jobs/{j1}", None),
+    (P.JOB_READ, "m2", "get", "/v1/jobs/{j2}", None),
+    (P.TENANT_ADMIN, "tenant", "get", "/v1/groups", None),
+    (P.TENANT_ADMIN, "tenant", "get", "/v1/groups/{group}/members", None),
 ]
 
 
 @pytest.mark.parametrize("role", list(PLACEMENT))
 async def test_access_matrix(api: Api, tenant: TenantCtx, role: str) -> None:
     world = await build_world(api, tenant)
-    ids = {"c1": world.c1, "c2": world.c2, "m1": world.m1, "m2": world.m2, "w1": world.w1}
+    ids = {"c1": world.c1, "c2": world.c2, "m1": world.m1, "m2": world.m2, "w1": world.w1,
+           "j1": world.j1, "j2": world.j2, "group": world.group}  # fmt: skip
     place = PLACEMENT[role]
     roles = [] if place is None else [(role, place[0], None if place[1] is None else ids[place[1]])]
     _, subject = await add_principal(api, tenant, roles=roles)
@@ -213,6 +243,7 @@ async def test_changes_are_audited_with_the_acting_principal(api: Api, tenant: T
         "audit.matter_created",
         "audit.matter_created",
         "audit.workspace_created",
+        "audit.group_created",
     ]
     assert all(r.actor == f"user:{tenant.admin_id}" for r in rows[1:])
     assert all("request_id" in r.payload for r in rows[1:])

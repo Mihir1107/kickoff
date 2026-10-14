@@ -26,9 +26,29 @@ from temporalio.service import RPCError, RPCStatusCode
 from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller
-from edisc_api.authz import P, Permission, Scope, authorize, perm
+from edisc_api.authz import (
+    ROLE_PERMISSIONS,
+    TENANT,
+    P,
+    Permission,
+    Scope,
+    authorize,
+    perm,
+    permissions,
+    roles_at,
+)
 from edisc_api.errors import RecordedText, conflict, not_found, unprocessable
-from edisc_api.pagination import CursorQ, LimitQ, Page, decode, decode_text, encode_text, page_of
+from edisc_api.pagination import (
+    CursorQ,
+    LimitQ,
+    Page,
+    decode,
+    decode_keys,
+    decode_text,
+    encode_keys,
+    encode_text,
+    page_of,
+)
 from edisc_api.routes.hierarchy import ensure_matter_open
 from edisc_connector_dummy.guard import source_permitted
 from edisc_connector_slack_export.archive_access import open_archive_entry
@@ -182,54 +202,49 @@ async def _authorize_job(
 
 
 async def _job_out(s: AsyncSession, job_id: uuid.UUID) -> JobOut:
-    job = (
-        await s.execute(
-            text(
-                "SELECT id, matter_id, connection_id, workspace_id, status, requested_by, rerun_of, created_at,"
-                " finished_at, sealed_at, status_detail FROM collection_jobs WHERE id = :j"
-            ),
-            {"j": job_id},
-        )
-    ).one()
-    units = {
-        r.k: r.n
+    return (await _jobs_out(s, [job_id]))[0]
+
+
+async def _jobs_out(s: AsyncSession, ids: list[uuid.UUID]) -> list[JobOut]:
+    """Jobs as the API states them, in ``ids``' order: three statements for a whole page."""
+    if not ids:
+        return []
+    jobs = {
+        r.id: r
         for r in (
             await s.execute(
                 text(
-                    "SELECT status AS k, count(*) AS n FROM work_units WHERE job_id = :j"
-                    " AND kind = 'conversation_day' GROUP BY status"
+                    "SELECT id, matter_id, connection_id, workspace_id, status, requested_by,"
+                    " rerun_of, created_at, finished_at, sealed_at, status_detail"
+                    " FROM collection_jobs WHERE id = ANY(:ids)"
                 ),
-                {"j": job_id},
+                {"ids": ids},
             )
         ).all()
     }
-    scopes = (
+    units: dict[uuid.UUID, dict[str, int]] = {i: {} for i in ids}
+    for r in (
         await s.execute(
             text(
-                "SELECT scope_type, external_id, date_from, date_to, thread_parent_policy"
-                " FROM collection_scopes WHERE job_id = :j ORDER BY date_from, external_id, id"
+                "SELECT job_id, status AS k, count(*) AS n FROM work_units WHERE job_id = ANY(:ids)"
+                " AND kind = 'conversation_day' GROUP BY job_id, status"
             ),
-            {"j": job_id},
+            {"ids": ids},
         )
-    ).all()
-    detail: dict[str, Any] = job.status_detail or {}
-    return JobOut(
-        id=job.id,
-        matter_id=job.matter_id,
-        connection_id=job.connection_id,
-        workspace_id=job.workspace_id,
-        status=job.status,
-        clean=job.status in CLEAN,
-        clean_basis=clean_basis(job.status),
-        caveat=caveat(job.status),
-        requested_by=job.requested_by,
-        rerun_of=job.rerun_of,
-        created_at=job.created_at,
-        finished_at=job.finished_at,
-        sealed=job.sealed_at is not None,
-        paused_ms=detail.get("paused_ms"),
-        units=units,
-        scopes=[
+    ).all():
+        units[r.job_id][r.k] = r.n
+    scopes: dict[uuid.UUID, list[ScopeOut]] = {i: [] for i in ids}
+    for r in (
+        await s.execute(
+            text(
+                "SELECT job_id, scope_type, external_id, date_from, date_to, thread_parent_policy"
+                " FROM collection_scopes WHERE job_id = ANY(:ids)"
+                " ORDER BY date_from, external_id, id"
+            ),
+            {"ids": ids},
+        )
+    ).all():
+        scopes[r.job_id].append(
             ScopeOut(
                 type=r.scope_type,
                 external_id=r.external_id,
@@ -237,9 +252,32 @@ async def _job_out(s: AsyncSession, job_id: uuid.UUID) -> JobOut:
                 date_to=r.date_to,
                 thread_parent_policy=r.thread_parent_policy,
             )
-            for r in scopes
-        ],
-    )
+        )
+    out = []
+    for i in ids:
+        job = jobs[i]
+        detail: dict[str, Any] = job.status_detail or {}
+        out.append(
+            JobOut(
+                id=job.id,
+                matter_id=job.matter_id,
+                connection_id=job.connection_id,
+                workspace_id=job.workspace_id,
+                status=job.status,
+                clean=job.status in CLEAN,
+                clean_basis=clean_basis(job.status),
+                caveat=caveat(job.status),
+                requested_by=job.requested_by,
+                rerun_of=job.rerun_of,
+                created_at=job.created_at,
+                finished_at=job.finished_at,
+                sealed=job.sealed_at is not None,
+                paused_ms=detail.get("paused_ms"),
+                units=units[i],
+                scopes=scopes[i],
+            )
+        )
+    return out
 
 
 def _request_hash(matter_id: uuid.UUID, body: BaseModel | None, action: str) -> str:
@@ -448,8 +486,92 @@ async def list_jobs(
             .scalars()
             .all()
         )
-        jobs = [await _job_out(s, j) for j in ids]
+        jobs = await _jobs_out(s, ids)
     return page_of(jobs, limit, lambda j: j.id)
+
+
+def _job_readers() -> list[str]:
+    """Roles whose holders may read a job, at its matter, the matter's client or the tenant: what
+    `authorize(job.read, matter)` accepts, so the list never shows a job its GET would refuse."""
+    return sorted(r for r, ps in ROLE_PERMISSIONS.items() if P.JOB_READ in ps)
+
+
+BASIS_STATUS = {
+    "source": JobStatus.COMPLETED.value,
+    "archive": JobStatus.COMPLETED_AGAINST_ARCHIVE.value,
+}
+LIST_JOBS = (
+    "SELECT j.id, j.created_at FROM collection_jobs j"
+    " JOIN matters m ON m.id = j.matter_id JOIN connections c ON c.id = j.connection_id"
+    " WHERE (CAST(:everything AS boolean) OR EXISTS ("
+    "SELECT 1 FROM role_assignments ra WHERE ra.revoked_at IS NULL"
+    " AND (ra.principal_id = :p OR ra.group_id = ANY(:g)) AND ra.role = ANY(:roles)"
+    " AND ((ra.scope_type = 'matter' AND ra.scope_id = m.id)"
+    " OR (ra.scope_type = 'client' AND ra.scope_id = m.client_id))))"
+    " AND (CAST(:status AS text) IS NULL OR j.status = :status)"
+    " AND (CAST(:client AS uuid) IS NULL OR m.client_id = :client)"
+    " AND (CAST(:matter AS uuid) IS NULL OR j.matter_id = :matter)"
+    " AND (CAST(:conn AS uuid) IS NULL OR j.connection_id = :conn)"
+    " AND (CAST(:source AS text) IS NULL OR c.source = :source)"
+    " AND (CAST(:cf AS timestamptz) IS NULL OR j.created_at >= :cf)"
+    " AND (CAST(:ct AS timestamptz) IS NULL OR j.created_at < :ct)"
+    " AND (CAST(:ff AS timestamptz) IS NULL OR j.finished_at >= :ff)"
+    " AND (CAST(:ft AS timestamptz) IS NULL OR j.finished_at < :ft)"
+    " AND (CAST(:at AS timestamptz) IS NULL OR (j.created_at, j.id) < (:at, CAST(:ai AS uuid)))"
+    " ORDER BY j.created_at DESC, j.id DESC LIMIT :n"
+)
+
+
+@router.get("/jobs", response_model=Page[JobOut], openapi_extra=perm(P.JOB_READ))
+async def list_all_jobs(
+    caller: CallerDep,
+    res: ResourcesDep,
+    status: JobStatus | None = None,
+    clean_basis: Literal["source", "archive"] | None = None,
+    client_id: uuid.UUID | None = None,
+    matter_id: uuid.UUID | None = None,
+    connection_id: uuid.UUID | None = None,
+    source: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+    created_from: UtcDatetime | None = None,
+    created_to: UtcDatetime | None = None,
+    finished_from: UtcDatetime | None = None,
+    finished_to: UtcDatetime | None = None,
+    cursor: CursorQ = None,
+    limit: LimitQ = 50,
+) -> Page[JobOut]:
+    """Every job the caller may read across the tenant, newest first (M17 plan §3.2). Filters
+    narrow (AND); ranges are [from, to). Visibility is a join on the caller's live role
+    assignments, never a list of ids; a filter naming a client or matter the caller cannot see
+    gives an empty page, like one without jobs (no existence leak)."""
+    at = decode_keys(cursor, 2)
+    wanted = status.value if status else None
+    if clean_basis is not None:
+        if wanted is not None and wanted != BASIS_STATUS[clean_basis]:
+            return Page[JobOut](items=[], next_cursor=None)
+        wanted = BASIS_STATUS[clean_basis]
+    try:
+        position = (datetime.fromisoformat(at[0]), uuid.UUID(at[1])) if at else None
+    except ValueError as exc:
+        raise unprocessable("invalid cursor") from exc
+    async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        everything = P.JOB_READ in permissions(await roles_at(s, caller, [TENANT]))
+        rows = (
+            await s.execute(
+                text(LIST_JOBS),
+                {"everything": everything, "p": caller.principal_id, "g": list(caller.group_ids),
+                 "roles": _job_readers(), "status": wanted, "client": client_id,
+                 "matter": matter_id, "conn": connection_id, "source": source,
+                 "cf": created_from, "ct": created_to, "ff": finished_from, "ft": finished_to,
+                 "at": position[0] if position else None, "ai": position[1] if position else None,
+                 "n": limit + 1},
+            )
+        ).all()  # fmt: skip
+        items = await _jobs_out(s, [r.id for r in rows[:limit]])
+    next_cursor = None
+    if len(rows) > limit:
+        last = rows[limit - 1]
+        next_cursor = encode_keys(last.created_at.isoformat(), str(last.id))
+    return Page[JobOut](items=items, next_cursor=next_cursor)
 
 
 @router.get("/jobs/{job_id}", response_model=JobOut, openapi_extra=perm(P.JOB_READ))
@@ -705,4 +827,71 @@ async def evidence_content(
         if row.kind in ("page", "archive_entry")
         else "application/octet-stream",
         headers={"x-evidence-sha256": row.sha256, "cache-control": "no-store"},
+    )
+
+
+# ------------------------------------------------------------------ custody events (M17 plan §3.2)
+class CustodyEventOut(Strict):
+    seq: int
+    event_type: str
+    actor: str
+    created_at: datetime
+    item_id: uuid.UUID | None
+    payload: dict[str, Any]
+    prev_hash: str
+    event_hash: str
+
+
+EVENTS_MAX = 500
+EVENTS_PAGE_BYTES = 1 << 20  # a page ends early rather than carry more payload than this
+
+
+@router.get(
+    "/jobs/{job_id}/custody/events",
+    response_model=Page[CustodyEventOut],
+    openapi_extra=perm(P.CUSTODY_READ),
+)
+async def custody_events(
+    job_id: uuid.UUID,
+    caller: CallerDep,
+    res: ResourcesDep,
+    cursor: CursorQ = None,
+    limit: Annotated[int, Query(ge=1, le=EVENTS_MAX)] = 100,
+) -> Page[CustodyEventOut]:
+    """The job's custody stream in ``seq`` order. A job of a million units has millions of events:
+    keyset pages, no total count, and at most 1 MiB of payload per page, measured in the database
+    before any payload is read (a page always holds at least one event)."""
+    after = decode_text(cursor)
+    if after is not None and not after.isdigit():
+        raise unprocessable("invalid cursor")
+    async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        await _authorize_job(s, caller, P.CUSTODY_READ, job_id)
+        window = (
+            await s.execute(
+                text(
+                    "SELECT seq, sum(octet_length(payload::text)) OVER (ORDER BY seq) AS running"
+                    " FROM (SELECT seq, payload FROM custody_events WHERE stream_id = :j"
+                    " AND (CAST(:after AS bigint) IS NULL OR seq > :after)"
+                    " ORDER BY seq LIMIT :n) w ORDER BY seq"
+                ),
+                {"j": job_id, "after": int(after) if after else None, "n": limit + 1},
+            )
+        ).all()
+        # the running total only grows: the page is the prefix within the budget, at least one
+        fits = sum(1 for r in window[:limit] if r.running <= EVENTS_PAGE_BYTES)
+        take = [r.seq for r in window[: max(fits, 1)]]
+        rows = (
+            await s.execute(
+                text(
+                    "SELECT seq, event_type, actor, created_at, item_id, payload, prev_hash,"
+                    " event_hash FROM custody_events WHERE stream_id = :j AND seq = ANY(:seqs)"
+                    " ORDER BY seq"
+                ),
+                {"j": job_id, "seqs": take},
+            )
+        ).all()
+    items = [CustodyEventOut(**r._mapping) for r in rows]
+    more = len(window) > len(items)
+    return Page[CustodyEventOut](
+        items=items, next_cursor=encode_text(str(items[-1].seq)) if more else None
     )

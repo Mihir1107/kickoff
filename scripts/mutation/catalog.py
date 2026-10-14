@@ -59,6 +59,9 @@ Rounds (ADR 0015):
   request, CSRF token and Origin, fetch metadata, single-use state, the login cookie handle, the
   nonce, every ``return_to`` rule, the re-authentication checks, the bounce page (in real browsers),
   deactivation revoking sessions, recent sign-in, the start throttle, the guard triggers.
+- ``m17-reads``: the UI's reads (M17 step 3): the tenant-wide jobs list's visibility (same rule as
+  ``authorize``), filters and keyset, cursors bound to route, path and filters, the custody events'
+  byte budget and permission, group listings, ``/me/permissions`` and ``/roles``.
 - ``s24-pool``: fixed, warmed database pools and the churn report (ADR 0015 §24.13); the timing
   guard counting an idle sample when the loop's thread was measured busy, through the blocking-I/O
   guard's wrapper.
@@ -79,6 +82,12 @@ W = "workers/collection/src/edisc_worker/"
 EV = "packages/evidence/src/edisc_evidence/writer.py"
 API = "apps/api/src/edisc_api/routes/renders.py"
 JOBS = "apps/api/src/edisc_api/routes/jobs.py"
+UIR = "tests/integration/api/test_ui_reads.py"
+AUZ = "tests/integration/api/test_authz.py"
+PAG = "apps/api/src/edisc_api/pagination.py"
+ME = "apps/api/src/edisc_api/routes/me.py"
+MODELS = "packages/db/src/edisc_db/models.py"
+MIG = "tests/integration/db/test_migrations.py"
 DUMMY = "packages/connectors/dummy/src/edisc_connector_dummy/spec.py"
 
 UX = "tests/unit/renderers/test_externals.py"
@@ -1280,4 +1289,63 @@ CATALOG: list[Mutation] = [
       'if site is not None and site not in ("same-origin", "none"):',
       'if site is not None and site not in ("same-origin", "none", "same-site"):', SESB,
       "another_subdomain and webkit"),
+    # ------------------------------------------------------------------ the UI's reads (M17 step 3)
+    m("jobs_list_ignores_client_roles", "m17-reads", JOBS,
+      "\" OR (ra.scope_type = 'client' AND ra.scope_id = m.client_id))))\"",
+      "\"))\"", UIR, "may_read"),
+    m("jobs_list_counts_workspace_roles", "m17-reads", JOBS,
+      "\" AND ((ra.scope_type = 'matter' AND ra.scope_id = m.id)\"",
+      "\" AND ((ra.scope_type IN ('matter', 'workspace') AND ra.scope_id IS NOT NULL)\"", UIR,
+      "workspace_reviewer"),
+    m("jobs_list_counts_revoked_roles", "m17-reads", JOBS,
+      '"SELECT 1 FROM role_assignments ra WHERE ra.revoked_at IS NULL"',
+      '"SELECT 1 FROM role_assignments ra WHERE true"', UIR, "revoked_client_admin"),
+    m("jobs_list_tenant_roles_ignored", "m17-reads", JOBS,
+      '" WHERE (CAST(:everything AS boolean) OR EXISTS ("', '" WHERE (false OR EXISTS ("', UIR,
+      "may_read and tenant_admin"),
+    m("jobs_list_keyset_without_id", "m17-reads", JOBS,
+      '" AND (CAST(:at AS timestamptz) IS NULL OR (j.created_at, j.id) < (:at, CAST(:ai AS uuid)))"',
+      '" AND (CAST(:at AS timestamptz) IS NULL OR (j.created_at < :at AND :ai IS NOT NULL))"', UIR,
+      "filters_orders"),
+    m("jobs_list_filter_dropped", "m17-reads", JOBS,
+      '" AND (CAST(:source AS text) IS NULL OR c.source = :source)"', '" AND true"', UIR,
+      "filters_orders"),
+    m("cursor_filters_unchecked", "m17-reads", PAG, "    if bound != _BINDING.get():\n",
+      "    if False:\n", UIR, "bound_to"),
+    m("cursor_path_params_unbound", "m17-reads", PAG,
+      '"path": sorted((k, str(v)) for k, v in request.path_params.items()),',
+      '"path": [],', UIR, "bound_to"),
+    m("cursor_route_unbound", "m17-reads", PAG, '"route": str(getattr(route, "path", "")),',
+      '"route": "",', UIR, "bound_to"),
+    m("events_budget_ignored", "m17-reads", JOBS,
+      "        fits = sum(1 for r in window[:limit] if r.running <= EVENTS_PAGE_BYTES)\n",
+      "        fits = len(window[:limit])\n", UIR, "byte_budget"),
+    m("events_need_job_read_only", "m17-reads", JOBS,
+      "        await _authorize_job(s, caller, P.CUSTODY_READ, job_id)\n        window = (",
+      "        await _authorize_job(s, caller, P.JOB_READ, job_id)\n        window = (", AUZ,
+      "access_matrix"),
+    m("groups_list_unauthorized", "m17-reads", ADM,
+      "        await authorize(s, caller, P.TENANT_ADMIN, TENANT)\n        rows = (\n            await s.execute(\n                text(\n                    \"SELECT id, name, external_id, created_at FROM groups\"",
+      "        rows = (\n            await s.execute(\n                text(\n                    \"SELECT id, name, external_id, created_at FROM groups\"", AUZ,
+      "access_matrix"),
+    m("members_include_removed_by_default", "m17-reads", ADM,
+      '" WHERE gm.group_id = :g AND (CAST(:all AS boolean) OR gm.removed_at IS NULL)"',
+      '" WHERE gm.group_id = :g"', UIR, "groups_and_members"),
+    m("permissions_ignore_groups", "m17-reads", ME,
+      '" AND (principal_id = :p OR group_id = ANY(:g))"\n                    " GROUP BY scope_type, scope_id"',
+      '" AND principal_id = :p"\n                    " GROUP BY scope_type, scope_id"', UIR,
+      "my_permissions"),
+    m("permissions_count_revoked", "m17-reads", ME,
+      '" FROM role_assignments WHERE revoked_at IS NULL"\n                    " AND (principal_id = :p',
+      '" FROM role_assignments WHERE true"\n                    " AND (principal_id = :p', UIR,
+      "my_permissions"),
+    m("roles_static", "m17-reads", ME,
+      "    names = sorted(r for r in ROLE_PERMISSIONS if after is None or r > after)\n",
+      "    names = sorted(r for r in ('auditor', 'client_admin', 'collector', 'matter_manager',"
+      " 'reviewer', 'tenant_admin') if after is None or r > after)\n", UIR,
+      "roles_are_generated"),
+    m("jobs_index_not_in_models", "m17-reads", MODELS,
+      '            "ix_collection_jobs_tenant_created",\n            "tenant_id",\n            text("created_at DESC"),\n            text("id DESC"),\n',
+      '            "ix_collection_jobs_tenant_created",\n            "tenant_id",\n            text("created_at DESC"),\n', MIG,
+      "drift"),
 ]  # fmt: skip

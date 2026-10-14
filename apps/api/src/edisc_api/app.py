@@ -23,6 +23,7 @@ from edisc_api.auth import Authenticator, AuthError, Caller, JwksCache
 from edisc_api.client_ip import client_ip
 from edisc_api.errors import ApiError
 from edisc_api.oidc import OidcClient
+from edisc_api.pagination import bind_cursors
 from edisc_api.safe_errors import install as install_safe_errors
 from edisc_api.safe_errors import request_path
 from edisc_api.sessions import SESSION_COOKIE, Keyring
@@ -172,7 +173,11 @@ def create_app(settings: Settings, resources: Resources | None = None) -> FastAP
             app.state.resources = built
             yield
 
-    app = FastAPI(title="eDiscovery collection API", version="1", lifespan=lifespan)
+    # every list route's cursor is bound to its route, path and filters (pagination.bind_cursors)
+    app = FastAPI(
+        title="eDiscovery collection API", version="1", lifespan=lifespan,
+        dependencies=[Depends(bind_cursors)],
+    )  # fmt: skip
     if resources is not None:
         app.state.resources = resources
 

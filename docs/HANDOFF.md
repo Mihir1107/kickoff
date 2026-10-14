@@ -1,4 +1,4 @@
-# Handoff (2026-10-14: every M17 decision taken (ADR 0016 Amendment 2), log-assertion sweep, M17 step 2 built (browser sessions); next: M17 step 3 (permissions, roles, jobs list, custody events, groups, cursor digests))
+# Handoff (2026-10-14: the anchor-claims stall diagnosed and fixed (pool churn), the host-only cookie proven in browsers, private_key_jwt made M17 step 3b, M17 step 3 built (the UI's reads); next: M17 step 3b (private_key_jwt))
 
 This file alone is enough to continue. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisions §1-§18, notes
@@ -6,14 +6,32 @@ design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisi
 `docs/adr/`, `docs/plans/phase-2.md` and `docs/BACKLOG.md`. M16 summary:
 `docs/runs/2026-10-12-m16-complete.md`. Expert guide: `docs/VERIFYING.md`. Demo: `docs/DEMO.md`.
 **M17 plan: `docs/plans/m17.md`** (every decision taken: its §12; design changes in ADR 0016
-Amendments 1 and 2; step 2's build notes at the end of ADR 0016). Steps 0 and 2 are built; step 7 is
-on hold (legal review). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
+Amendments 1 and 2; build notes for steps 2 and 3 at the end of ADR 0016). Steps 0, 2 and 3 are
+built; step 3b (`private_key_jwt`, plan §1.6) is next; step 7 is on hold (legal review). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
 
 ## Current state
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`.
-Migrations at head: **0036** (sessions). Renderer **1.3.2**, dummy connector **0.5.0**, normalizer
-**0.3.0**, report renderer **1.5.0**, preview renderer **1.0.0**. CI: run 38544926700 green on `4724354` (step 2; every job, report-pdf and
-production-install included); run 38536427956 on `4a8c05f` failed one test (open, below).
+Migrations at head: **0037** (jobs list index). Renderer **1.3.2**, dummy connector **0.5.0**, normalizer
+**0.3.0**, report renderer **1.5.0**, preview renderer **1.0.0**. CI: run 38571230066 green on `33da278` (every job); run 38536427956's failure
+on `4a8c05f` is diagnosed and fixed (below).
+
+## Done: the CI stall, the cookie proof, M17 step 3 (2026-10-14, second session)
+**CI:** run 38571230066 on `33da278` (the pool fix, the cookie test, step 3b in the plan): every
+job green (integration shards 0-3, report-pdf, production-install). Local: full integration suite
+1,251 passed before that commit.
+
+**M17 step 3, the UI's reads (round `m17-reads`, 17/17; ADR 0016 "Implementation notes: M17 step
+3"):** migration 0037 (`ix_collection_jobs_tenant_created`), `GET /v1/me/permissions` (scopes held
+directly or through groups, with roles and permissions; keyset on scope), `GET /v1/roles` (from
+`ROLE_PERMISSIONS`), `GET /v1/jobs` (tenant-wide, newest first; visibility = `authorize`'s rule as a
+join, workspace roles do not see jobs, exactly like the GET; filters status, clean_basis, client,
+matter, connection, source, created/finished ranges), `GET /v1/jobs/{id}/custody/events`
+(`custody.read`, keyset on seq, <= 500, 1 MiB payload budget measured in SQL), `GET /v1/groups`,
+`GET /v1/groups/{id}/members` (`include_removed`), and every list cursor bound to its route, path and
+filters (`pagination.bind_cursors`, app-wide; 422 `cursor_mismatch`; old cursors are refused). Lists
+build rows in three statements per page (`_jobs_out`). Tests: `test_ui_reads.py` (17), the access
+matrix extended (custody events, jobs, groups), the no-echo fuzzer covers the new routes. The plan's
+later migrations are renumbered (step 3b 0038, installs 0039, directory 0040).
 
 ## Done: M17 decisions, the log sweep, M17 step 2 (2026-10-14)
 **Decisions (user, 2026-10-14; ADR 0016 Amendment 2; m17.md §12):** signed state, alert timing and
@@ -77,6 +95,12 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
   sign-in: the token is bound to the session) and is same-origin. Logout: `POST /v1/auth/logout`.
   Sessions: `GET /v1/me/sessions` (`current`, `live`), `POST /v1/me/sessions/{id}/revoke`.
 - `pending.ts`'s `CsrfOut` matches what shipped.
+- **Step 3 reads:** `GET /v1/me/permissions` (a hint for showing controls; the API still decides),
+  `GET /v1/roles`, `GET /v1/jobs` (filters `status`, `clean_basis`, `client_id`, `matter_id`,
+  `connection_id`, `source`, `created_from/to`, `finished_from/to` with an explicit offset),
+  `GET /v1/jobs/{id}/custody/events` (pages may hold fewer than `limit` events: a 1 MiB budget),
+  `GET /v1/groups`, `GET /v1/groups/{id}/members`. Cursors: send back `next_cursor` with the SAME
+  filters (other filters or another route: 422 `cursor_mismatch`; start the listing again).
 
 ## Done: before M17 (2026-10-12; ADR 0018 §32; mutation round `m16-export`, 8/8)
 1. **The export in the report.** `job_started.export` (new jobs) records the export's size, entry
@@ -140,9 +164,13 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
   callback's `tenant` parameter** (otherwise one customer can bind another customer's consented Entra
   tenant); revocation cuts in-flight downloads; revoked tokens end as `access_lost` units.
 
-## Next: M17 step 3 (`/me/permissions`, `/roles`, `GET /v1/jobs`, custody events, groups, cursor filter digests)
-Then step 4 (OpenAPI + oasdiff), step 5 (SSE + `SessionWatch` + the download cut-off + the
-500-stream measurement), step 6 (install flows, migration 0037, the relay, the operator-only move
+## Next: M17 step 3b (`private_key_jwt` client authentication, plan §1.6)
+One platform RSA key per environment in KMS, client assertions at the IdP's token endpoint (PKCE
+kept), `tenant_idps.login_client_auth` (migration 0038; installs move to 0039, the directory to 0040),
+`none` refused outside local/test/ci, the JWKS and certificate published, the test IdP checking
+assertions like Entra/Okta; then confirm against real Entra and Okta developer tenants when
+available. Then step 4 (OpenAPI + oasdiff), step 5 (SSE + `SessionWatch` + the download cut-off + the
+500-stream measurement), step 6 (install flows, migration 0039, the relay, the operator-only move
 CLI with its no-route test), step 8 (directory snapshots, `check-connections`, the pause deadline
 24 h..90 d). Step 7 waits for legal review.
 

@@ -171,6 +171,13 @@ class CollectionJob(Base):
         ForeignKeyConstraint(
             ["tenant_id", "workspace_id"], ["workspaces.tenant_id", "workspaces.id"]
         ),
+        # the tenant-wide jobs list, newest first (M17 step 3; migration 0037)
+        Index(
+            "ix_collection_jobs_tenant_created",
+            "tenant_id",
+            text("created_at DESC"),
+            text("id DESC"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)

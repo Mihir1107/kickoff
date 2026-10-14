@@ -66,6 +66,10 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   only), never the query; `ApiError` details are fixed texts or server state, never a value the
   request sent; our validators raise `PydanticCustomError("edisc_...", "<static>")`; worker texts in
   answers are `RecordedText`. `test_no_echo.py` fuzzes every route from the OpenAPI document.
+- Lists (M17 step 3): a cursor is bound to its route, path and filters (`pagination.bind_cursors`,
+  app-wide; mismatch 422 `cursor_mismatch`). A list shows exactly what the matching GET would
+  authorize (`GET /v1/jobs`: a `job.read` role at the job's matter, client or tenant, as a join on
+  role assignments, never a list of ids); a test compares the two per role.
 
 ## Browser sessions (M17 step 2, ADR 0016 + Amendments 1-2 + step-2 notes)
 - A request carries the session cookie (`__Host-edisc_session`) OR a bearer token; both: 400
