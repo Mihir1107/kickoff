@@ -12,7 +12,8 @@ built; step 3b (`private_key_jwt`, plan §1.6) is next; step 7 is on hold (legal
 ## Current state
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`.
 Migrations at head: **0037** (jobs list index). Renderer **1.3.2**, dummy connector **0.5.0**, normalizer
-**0.3.0**, report renderer **1.5.0**, preview renderer **1.0.0**. CI: run 38571230066 green on `33da278` (every job); run 38536427956's failure
+**0.3.0**, report renderer **1.5.0**, preview renderer **1.0.0**. CI: run 38577569420 green on `43f41b4` (step 3, every job); run 38571230066 green on
+`33da278` (the pool fix); run 38536427956's failure
 on `4a8c05f` is diagnosed and fixed (below).
 
 ## Done: the CI stall, the cookie proof, M17 step 3 (2026-10-14, second session)
