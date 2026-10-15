@@ -93,6 +93,13 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   goes in that action's audit payload. A new sensitive route does the same and joins the table in
   `test_sessions.py::_sensitive_requests`.
 - Deactivation and admin revocation end every session in their own transaction. Nothing is deleted.
+- Client authentication at the IdP (M17 step 3b): `private_key_jwt` only, through
+  `edisc_api.client_auth.ClientSigner` (ONE place builds client assertions; the Teams
+  client-credentials leg reuses it). The platform key lives in KMS (`KmsSigner`), never in a setting,
+  the database or a log; `EDISC_API_CLIENT_KEYS` names it (current first) with the certificate's fixed
+  validity. `tenant_idps.login_client_auth = 'none'` only in local/test/ci. Published keys:
+  `/.well-known/edisc-client-jwks.json` and `-cert.pem` on the base host. Real-tenant checks:
+  `make test-real-idp` (skips visibly without `EDISC_REAL_IDP_*`, fails when half-configured).
 - Test IdP: `tests/integration/api/oidc.py` (mounted on the API fixture's HTTP client) and
   `sessions_flow.py` (sign-in helpers, a cookie jar that withholds Strict cookies cross-site).
 

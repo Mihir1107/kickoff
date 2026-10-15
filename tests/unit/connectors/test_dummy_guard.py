@@ -54,7 +54,10 @@ def test_allowed_where_data_is_disposable(env: Environment) -> None:
     assert source_permitted(env, "dummy")
     ensure_dummy_permitted(env, ["dummy"])
     Activities(NONE, NONE, settings(env), {"dummy": dummy()})
-    Resources(settings(env), NONE, NONE, NONE, NONE, NONE, NONE, {"dummy": dummy()})
+    Resources(
+        settings(env), NONE, NONE, NONE, NONE, NONE, NONE, {"dummy": dummy()},
+        client_signer=cast(Any, object()),  # no KMS here: the guard is what is tested
+    )  # fmt: skip
     wired = build_connectors(
         NONE, ["dummy"], sessions=NONE, s3=NONE, settings=settings(env), http=NONE
     )

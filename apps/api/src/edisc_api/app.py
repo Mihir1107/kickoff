@@ -21,6 +21,7 @@ from temporalio.client import Client
 from types_aiobotocore_s3 import S3Client
 
 from edisc_api.auth import Authenticator, AuthError, Caller, JwksCache
+from edisc_api.client_auth import ClientSigner
 from edisc_api.client_ip import client_ip
 from edisc_api.errors import ApiError
 from edisc_api.oidc import OidcClient
@@ -58,11 +59,15 @@ class Resources:
         None  # browser sign-in (default: over the authenticator's HTTP client)
     )
     keyring: Keyring | None = None  # CSRF and PKCE keys (default: from settings)
+    # private_key_jwt at the IdPs' token endpoints (default: the platform keys of the settings)
+    client_signer: ClientSigner | None = None
 
     def __post_init__(self) -> None:
         ensure_dummy_permitted(self.settings.env, self.connectors)
         if self.keyring is None:  # eager: the API refuses to start without keys (fail closed)
             self.keyring = Keyring.from_settings(self.settings)
+        if self.client_signer is None:  # eager too: no client keys outside local/test/ci, no start
+            self.client_signer = ClientSigner.from_settings(self.settings, self.box.kms)
 
     @property
     def sign_in(self) -> OidcClient:
@@ -77,6 +82,12 @@ class Resources:
         if self.keyring is None:
             raise RuntimeError("Resources.keyring is set in __post_init__")
         return self.keyring
+
+    @property
+    def signer(self) -> ClientSigner:
+        if self.client_signer is None:
+            raise RuntimeError("Resources.client_signer is set in __post_init__")
+        return self.client_signer
 
 
 @contextlib.asynccontextmanager
@@ -93,7 +104,7 @@ async def build_resources(settings: Settings) -> AsyncIterator[Resources]:
         )
         limiter = RateLimiter(redis, settings.rate_limits)
         async with s3_client(settings) as s3:
-            yield Resources(
+            built = Resources(
                 settings,
                 sessions,
                 s3,
@@ -107,6 +118,8 @@ async def build_resources(settings: Settings) -> AsyncIterator[Resources]:
                 },
                 redis,
             )
+            await built.signer.keys()  # the KMS key and its certificate, before any sign-in
+            yield built
     finally:
         await http.aclose()
         await redis.aclose()

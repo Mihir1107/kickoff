@@ -68,6 +68,11 @@ Rounds (ADR 0015):
 - ``s24-pool-exhaustion``: a checkout beyond a fixed pool's capacity waits ``pg_pool_timeout_ms``,
   then fails loudly: 503 ``db_pool_exhausted`` with ``Retry-After`` and an error line in the API, a
   transient (retryable) activity error in workers; never a hang.
+- ``m17-client-auth``: ``private_key_jwt`` at the sign-in IdP's token endpoint (M17 step 3b): the
+  assertion's claims, its fresh ``jti`` and lifetime, sending it, the public client refused outside
+  local/test/ci (start and callback), the discovery check, the published keys (base host only,
+  thumbprint kid, deterministic certificate), key work off the loop, and each check of the test IdP
+  (so the refused-variant tests are live).
 - ``m17-host-cookie``: the session cookie is host-only (``__Host-``, no ``Domain``) and a same-site
   request from a neighbouring subdomain is refused, both in real browsers (ADR 0016 §2).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
@@ -109,6 +114,11 @@ CP = "tests/integration/custody/test_render_package.py"
 LG = "packages/core/src/edisc_core/loopguard.py"
 IPOOL = "tests/integration/db/test_pool.py"
 APX = "tests/integration/api/test_pool_exhaustion.py"
+CLA = "apps/api/src/edisc_api/client_auth.py"
+WK = "apps/api/src/edisc_api/routes/wellknown.py"
+TIDP = "tests/integration/api/oidc.py"
+ICA = "tests/integration/api/test_client_auth.py"
+UCA = "tests/unit/api/test_client_auth.py"
 DC = "packages/connectors/dummy/src/edisc_connector_dummy/connector.py"
 ULG = "tests/unit/core/test_loopguard.py"
 LB = "packages/core/src/edisc_core/loopblock.py"
@@ -1296,6 +1306,76 @@ CATALOG: list[Mutation] = [
     m("pool_exhaustion_silent", "s24-pool-exhaustion", APPM,
       '            "db pool exhausted", path=request_path(request),',
       '            "request", path=request_path(request),', APX),
+    # ------------------------------------------------------------------ private_key_jwt (M17 3b)
+    m("assertion_wrong_audience", "m17-client-auth", CLA, '"iss": client_id, "sub": client_id, "aud": audience,',
+      '"iss": client_id, "sub": client_id, "aud": client_id,', ICA, "authenticates_with"),
+    m("assertion_wrong_issuer", "m17-client-auth", CLA, '"iss": client_id, "sub": client_id, "aud": audience,',
+      '"iss": "edisc", "sub": client_id, "aud": audience,', ICA, "authenticates_with"),
+    m("assertion_fixed_jti", "m17-client-auth", CLA, '"jti": jti or secrets.token_urlsafe(32),',
+      '"jti": jti or "edisc-constant",', ICA, "authenticates_with"),
+    m("assertion_long_lived", "m17-client-auth", CLA, "ASSERTION_SECONDS = 300\n",
+      "ASSERTION_SECONDS = 3600\n", ICA, "authenticates_with"),
+    m("assertion_not_sent", "m17-client-auth", OIDC, "                    **client_auth,\n", "", ICA,
+      "authenticates_with"),
+    m("callback_never_signs", "m17-client-auth", AUR, "            if idp.login_client_auth == METHOD\n",
+      "            if False\n", ICA, "authenticates_with"),
+    m("public_client_permitted", "m17-client-auth", AUR,
+      "    return method == METHOD or settings.env.is_disposable\n", "    return True\n", ICA,
+      "public_client_is_refused"),
+    m("public_client_not_alerted", "m17-client-auth", AUR, '{"i": new_id(), "t": tenant_id, "k": "client_auth_not_permitted",',
+      '{"i": new_id(), "t": tenant_id, "k": "other",', ICA, "public_client_is_refused"),
+    m("callback_recheck_removed", "m17-client-auth", AUR,
+      "    if not client_auth_permitted(res.settings, idp.login_client_auth):  # changed since the start\n",
+      "    if False:  # changed since the start\n", ICA, "switch_to_a_public_client"),
+    m("start_discovery_check_removed", "m17-client-auth", AUR,
+      "        check_client_auth(provider, idp.login_client_auth)\n    except OidcError as exc:  # fail closed",
+      "        pass\n    except OidcError as exc:  # fail closed", ICA, "fails_closed_at_the_start"),
+    m("discovery_methods_unchecked", "m17-client-auth", OIDC,
+      "    if provider.auth_methods is not None and method not in provider.auth_methods:",
+      "    if False:", ICA, "fails_closed_at_the_start"),
+    m("discovery_algs_unchecked", "m17-client-auth", OIDC,
+      '    if provider.auth_signing_algs is not None and "RS256" not in provider.auth_signing_algs:',
+      "    if False:", ICA, "fails_closed_at_the_start"),
+    m("invalid_client_not_recorded", "m17-client-auth", OIDC,
+      '"exchange_invalid_client" if refused else "exchange_refused",',
+      '"exchange_refused",', ICA, "refused"),
+    m("wellknown_any_host", "m17-client-auth", WK,
+      "    if host != res.settings.api_base_domain.lower():\n", "    if False:\n", ICA, "base_host_only"),
+    m("kid_is_the_key_handle", "m17-client-auth", CLA,
+      "PublishedKey(spec.kms_key_id, jwk_thumbprint(n, e), n, e, cert)",
+      "PublishedKey(spec.kms_key_id, spec.kms_key_id, n, e, cert)", ICA, "published or key_handle"),
+    m("certificate_random_serial", "m17-client-auth", CLA,
+      'serial = int.from_bytes(hashlib.sha256(public_der).digest()[:16], "big") >> 1 or 1',
+      "serial = x509.random_serial_number()", UCA, "certificate"),
+    m("client_keys_optional_in_production", "m17-client-auth", CLA,
+      "        if not settings.env.is_disposable:  # fail closed", "        if False:  # fail closed",
+      UCA, "refuses_to_start"),
+    m("small_client_key_accepted", "m17-client-auth", CLA,
+      "public.key_size < MIN_KEY_BITS", "public.key_size < 1024", UCA, "smaller_than"),
+    m("kms_signs_any_algorithm", "m17-client-auth", "packages/core/src/edisc_core/kms.py",
+      "        if signing_algorithm != SIGNING_ALGORITHM:\n", "        if False:\n", UCA, "only_rs256"),
+    m("certificate_tbs_on_loop", "m17-client-auth", CLA,
+      "tbs = await asyncio.to_thread(tbs_certificate, public_der, spec)",
+      "tbs = tbs_certificate(public_der, spec)", ICA, "published"),
+    m("signing_key_created_on_loop", "m17-client-auth", CLA,
+      "            await asyncio.to_thread(self.create, spec.kms_key_id)",
+      "            self.create(spec.kms_key_id)", ICA, "published"),
+    # the test IdP's checks: each refused variant must exercise one
+    m("idp_signature_unchecked", "m17-client-auth", TIDP,
+      'options={"require": ["exp", "iss", "sub", "aud", "jti"]},',
+      'options={"require": ["exp", "iss", "sub", "aud", "jti"], "verify_signature": False},', ICA,
+      "another_key"),
+    m("idp_audience_unchecked", "m17-client-auth", TIDP, "audience=TOKEN_ENDPOINT,",
+      'audience=[TOKEN_ENDPOINT, "https://dev-idp.edisc.localhost/other"],', ICA, "wrong_audience"),
+    m("idp_expiry_unchecked", "m17-client-auth", TIDP,
+      '        except jwt.ExpiredSignatureError:\n            return "expired"',
+      "        except jwt.ExpiredSignatureError:\n            return None", ICA, "expired"),
+    m("idp_jti_unchecked", "m17-client-auth", TIDP, '        if claims["jti"] in self.used_jti:',
+      "        if False:", ICA, "replayed_jti"),
+    m("idp_missing_assertion_ok", "m17-client-auth", TIDP,
+      '            return "no_assertion"', "            return None", ICA, "missing_assertion"),
+    m("idp_client_secret_ok", "m17-client-auth", TIDP,
+      '            return "client_secret"', "            return None", ICA, "client_secret_instead"),
     # ------------------------------------------------------------------ host-only session cookie
     Mutation("session_cookie_domain_wide", "m17-host-cookie", SESP, (
         ('SESSION_COOKIE = "__Host-edisc_session"', 'SESSION_COOKIE = "edisc_session"'),

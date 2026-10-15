@@ -87,6 +87,10 @@ class SecretBox:
     def __init__(self, kms: KmsClient) -> None:
         self._kms = kms
 
+    @property
+    def kms(self) -> KmsClient:
+        return self._kms
+
     async def seal(
         self, plaintext: SecretStr, *, key_id: str, context: SecretContext
     ) -> SealedSecret:

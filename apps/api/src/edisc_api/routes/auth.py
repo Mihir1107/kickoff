@@ -4,6 +4,12 @@
   never rewritten) and stored with the attempt; a login cookie (Lax) carries only a random handle;
   303 to the tenant's sign-in IdP (code + PKCE S256, state, nonce; ``prompt=login&max_age=0`` for a
   re-authentication). Starts are capped per client address and host (429).
+- Client authentication at the token endpoint (M17 step 3b): the tenant IdP's
+  ``login_client_auth``; ``private_key_jwt`` signs a client assertion with the platform key
+  (``edisc_api.client_auth``); ``none`` (a public client) is refused outside local/test/ci at the
+  start (the generic 401, an operations alert, ``login_failed`` ``client_auth_not_permitted``) and
+  again at the callback. An IdP whose discovery document says it cannot take our assertion fails
+  the start closed (``invalid``).
 - ``GET /v1/auth/callback``: the attempt is CONSUMED in the statement that finds it (single use),
   then handle, expiry and the IdP's answer are checked; the code is exchanged server-side and the ID
   token verified; the principal resolved by the ADR 0013 rules. Success: a NEW session (the session
@@ -39,9 +45,10 @@ from edisc_api.app import (
     count_auth_failure,
 )
 from edisc_api.auth import AuthError
+from edisc_api.client_auth import METHOD, ClientAuthError
 from edisc_api.client_ip import client_ip
 from edisc_api.errors import ApiError
-from edisc_api.oidc import IdToken, OidcError
+from edisc_api.oidc import IdToken, OidcError, check_client_auth
 from edisc_api.sessions import (
     BOUNCE_HEADERS,
     LOGIN_COOKIE,
@@ -58,8 +65,12 @@ from edisc_api.sessions import (
     well_formed,
 )
 from edisc_core.ids import new_id
+from edisc_core.kms import KmsError
+from edisc_core.logs import get_logger
+from edisc_core.settings import Settings
 from edisc_db.session import tenant_tx
 
+log = get_logger(__name__)
 router = APIRouter(prefix="/v1")
 PUBLIC = {"x-permission": "public"}
 AUTHENTICATED = {"x-permission": "authenticated"}
@@ -104,6 +115,32 @@ class CsrfOut(BaseModel):
 
 def _host(request: Request) -> str | None:
     return request.headers.get("host")
+
+
+def client_auth_permitted(settings: Settings, method: str) -> bool:
+    """A public client (``none``) only where the dummy and the dev IdP may exist."""
+    return method == METHOD or settings.env.is_disposable
+
+
+async def _refuse_public_client(
+    res: Resources, tenant_id: uuid.UUID, idp_id: uuid.UUID, rid: str
+) -> None:
+    """A tenant IdP configured as a public client outside local/test/ci: an operator's mistake.
+    Audited, alerted once per attempt, and answered with the generic 401 by the caller."""
+    async with tenant_tx(res.sessions, tenant_id) as s:
+        await audit.record(
+            s, tenant_id=tenant_id, actor=ANONYMOUS, event_type="login_failed",
+            payload={"reason": "client_auth_not_permitted", "attempt_id": None,
+                     "idp_id": str(idp_id)},
+            request_id=rid,
+        )  # fmt: skip
+        await s.execute(
+            text("INSERT INTO alerts (id, tenant_id, kind, message) VALUES (:i, :t, :k, :m)"),
+            {"i": new_id(), "t": tenant_id, "k": "client_auth_not_permitted",
+             "m": "the tenant's sign-in IdP is configured as a public client (login_client_auth"
+                  " 'none'), which is refused outside local/test/ci: set private_key_jwt"},
+        )  # fmt: skip
+    await audit.anchor(res.sessions, res.s3, res.settings, tenant_id)
 
 
 def redirect_uri(res: Resources, host: str | None) -> str:
@@ -151,6 +188,7 @@ async def _live_session(
 async def login(
     request: Request,
     res: ResourcesDep,
+    rid: RequestIdDep,
     return_to: Annotated[str | None, Query()] = None,
     reauth: Annotated[bool, Query()] = False,
 ) -> Response:
@@ -166,7 +204,7 @@ async def login(
         idp = (
             await s.execute(
                 text(
-                    "SELECT id, issuer, login_client_id FROM tenant_idps"
+                    "SELECT id, issuer, login_client_id, login_client_auth FROM tenant_idps"
                     " WHERE login_client_id IS NOT NULL"
                 )
             )
@@ -174,10 +212,17 @@ async def login(
         prior = await _live_session(s, request.cookies.get(SESSION_COOKIE))
     if idp is None:
         raise AuthError("no sign-in IdP for this tenant")  # the same 401 as an unknown host
+    if not client_auth_permitted(res.settings, idp.login_client_auth):
+        await _refuse_public_client(res, tenant_id, idp.id, rid)
+        raise AuthError("public sign-in client outside local/test/ci")  # the generic 401
     try:
         provider = await res.sign_in.provider(idp.issuer)
     except OidcError as exc:
         raise ApiError(502, "idp_unavailable", "the identity provider could not be used") from exc
+    try:
+        check_client_auth(provider, idp.login_client_auth)
+    except OidcError as exc:  # fail closed BEFORE the user signs in at the IdP
+        return await _fail(request, res, tenant_id, None, "invalid", rid, detail=exc.detail)
     state, handle, nonce = new_token(), new_token(), new_token()
     kid = res.keys.current
     is_reauth = reauth and prior is not None  # without a live session it is a plain sign-in
@@ -291,8 +336,8 @@ async def callback(
         idp = (
             await s.execute(
                 text(
-                    "SELECT issuer, jwks_url, login_client_id, groups_claim FROM tenant_idps"
-                    " WHERE id = :i AND login_client_id IS NOT NULL"
+                    "SELECT issuer, jwks_url, login_client_id, groups_claim, login_client_auth"
+                    " FROM tenant_idps WHERE id = :i AND login_client_id IS NOT NULL"
                 ),
                 {"i": attempt.idp_id},
             )
@@ -301,20 +346,39 @@ async def callback(
         return await _fail(
             request, res, tenant_id, attempt.id, "invalid", rid, detail="idp_removed"
         )
+    if not client_auth_permitted(res.settings, idp.login_client_auth):  # changed since the start
+        return await _fail(
+            request, res, tenant_id, attempt.id, "invalid", rid, detail="client_auth_not_permitted"
+        )
     try:
         provider = await res.sign_in.provider(idp.issuer)
+        check_client_auth(provider, idp.login_client_auth)
+        client_auth = (
+            await res.signer.form(client_id=idp.login_client_id, audience=provider.token_endpoint)
+            if idp.login_client_auth == METHOD
+            else {}
+        )
         id_token = await res.sign_in.exchange(
             provider, client_id=idp.login_client_id, redirect_uri=redirect_uri(res, host),
             code=code, verifier=res.keys.pkce_verifier(attempt.key_id, handle),
+            client_auth=client_auth,
         )  # fmt: skip
         claims = await res.sign_in.verify(
             id_token, issuer=idp.issuer, jwks_url=idp.jwks_url, client_id=idp.login_client_id,
             nonce=attempt.nonce, groups_claim=idp.groups_claim,
         )  # fmt: skip
     except (OidcError, AuthError, KeyError) as exc:
-        detail = exc.code if isinstance(exc, OidcError) else type(exc).__name__
+        detail = (
+            exc.detail or f"token_{exc.code}"
+            if isinstance(exc, OidcError)
+            else f"token_{type(exc).__name__}"
+        )
+        return await _fail(request, res, tenant_id, attempt.id, "invalid", rid, detail=detail)
+    except (KmsError, ClientAuthError) as exc:  # our key could not sign: an operations problem
+        # the type only: an exception text never reaches a log line (ADR 0016 A8)
+        log.error("client assertion unavailable", error=type(exc).__name__)  # noqa: TRY400
         return await _fail(
-            request, res, tenant_id, attempt.id, "invalid", rid, detail=f"token_{detail}"
+            request, res, tenant_id, attempt.id, "invalid", rid, detail="client_auth_unavailable"
         )
     consumed = Attempt(
         attempt.id, attempt.idp_id, attempt.return_to, attempt.reauth, attempt.prior_session_id,

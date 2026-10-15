@@ -9,6 +9,11 @@ Authorization code + PKCE (S256) with the tenant's ONE sign-in IdP (``tenant_idp
   allow-list, ``iss``, ``aud`` (our client id; ``azp`` when several audiences), ``exp``, ``iat``,
   ``nonce``. ``auth_time`` is read when present (re-authentication requires it).
 - The IdP's tokens are used once, inside the callback request, and never stored or returned.
+- Client authentication at the token endpoint (M17 step 3b): ``private_key_jwt`` (a client
+  assertion from ``edisc_api.client_auth``, PKCE kept) or, in local/test/ci only, ``none`` (a public
+  client). When the discovery document publishes ``token_endpoint_auth_methods_supported`` /
+  ``token_endpoint_auth_signing_alg_values_supported`` they must list ``private_key_jwt`` / ``RS256``
+  (:func:`check_client_auth`), else the sign-in fails closed.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import time
 import urllib.parse
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -30,11 +36,13 @@ DISCOVERY_SECONDS = 3600
 
 
 class OidcError(Exception):
-    """The IdP answered something we do not accept. ``code`` is from the fixed list of ADR 0016 §1."""
+    """The IdP answered something we do not accept. ``code`` is from the fixed list of ADR 0016 §1;
+    ``detail`` a fixed detail code for the audit event (never provider text)."""
 
-    def __init__(self, code: str, why: str) -> None:
+    def __init__(self, code: str, why: str, detail: str | None = None) -> None:
         super().__init__(why)
         self.code = code
+        self.detail = detail
 
 
 @dataclass(frozen=True)
@@ -42,6 +50,27 @@ class Provider:
     issuer: str
     authorization_endpoint: str
     token_endpoint: str
+    # None when the discovery document does not publish the list (then not checked)
+    auth_methods: tuple[str, ...] | None = None
+    auth_signing_algs: tuple[str, ...] | None = None
+
+
+def _listed(value: object) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise OidcError("invalid", "discovery lists must be lists of strings")
+    return tuple(value)
+
+
+def check_client_auth(provider: Provider, method: str) -> None:
+    """The IdP must support how we authenticate, when it says what it supports (fail closed)."""
+    if method != "private_key_jwt":
+        return
+    if provider.auth_methods is not None and method not in provider.auth_methods:
+        raise OidcError("invalid", "IdP lacks private_key_jwt", "idp_no_private_key_jwt")
+    if provider.auth_signing_algs is not None and "RS256" not in provider.auth_signing_algs:
+        raise OidcError("invalid", "IdP lacks RS256 client assertions", "idp_no_rs256")
 
 
 @dataclass(frozen=True)
@@ -81,7 +110,11 @@ class OidcClient:
             if not isinstance(doc, dict) or doc.get("issuer") != issuer:
                 raise OidcError("invalid", "discovery issuer differs from the registered one")
             provider = Provider(
-                issuer, _https(doc.get("authorization_endpoint")), _https(doc.get("token_endpoint"))
+                issuer,
+                _https(doc.get("authorization_endpoint")),
+                _https(doc.get("token_endpoint")),
+                _listed(doc.get("token_endpoint_auth_methods_supported")),
+                _listed(doc.get("token_endpoint_auth_signing_alg_values_supported")),
             )
             self._cache[issuer] = (provider, time.monotonic())
             return provider
@@ -107,9 +140,12 @@ class OidcClient:
         return provider.authorization_endpoint + sep + urllib.parse.urlencode(query)
 
     async def exchange(
-        self, provider: Provider, *, client_id: str, redirect_uri: str, code: str, verifier: str
-    ) -> str:
-        """The ID token of the code exchange (a public client: PKCE binds the code to us)."""
+        self, provider: Provider, *, client_id: str, redirect_uri: str, code: str, verifier: str,
+        client_auth: Mapping[str, str],
+    ) -> str:  # fmt: skip
+        """The ID token of the code exchange. PKCE binds the code to this browser's attempt;
+        ``client_auth`` authenticates US (the assertion of ``ClientSigner.form``; empty only for a
+        public client, local/test/ci)."""
         try:
             response = await self.http.post(
                 provider.token_endpoint,
@@ -119,6 +155,7 @@ class OidcClient:
                     "redirect_uri": redirect_uri,
                     "client_id": client_id,
                     "code_verifier": verifier,
+                    **client_auth,
                 },
                 headers={"Accept": "application/json"},
                 timeout=10,
@@ -128,7 +165,12 @@ class OidcClient:
         except (httpx.HTTPError, ValueError) as exc:
             raise OidcError("invalid", f"code exchange failed: {type(exc).__name__}") from exc
         if response.status_code != 200 or not isinstance(body, dict):
-            raise OidcError("invalid", f"code exchange answered {response.status_code}")
+            # the IdP refusing OUR authentication is recorded as such (a fixed code, never its text)
+            refused = isinstance(body, dict) and body.get("error") == "invalid_client"
+            raise OidcError(
+                "invalid", f"code exchange answered {response.status_code}",
+                "exchange_invalid_client" if refused else "exchange_refused",
+            )  # fmt: skip
         token = body.get("id_token")
         if not isinstance(token, str):
             raise OidcError("invalid", "no id_token in the exchange answer")

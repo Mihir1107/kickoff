@@ -524,6 +524,7 @@ class TenantIdp(Base):
     groups_claim: Mapped[str] = mapped_column(Text, server_default=text("'groups'"))
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     login_client_id: Mapped[str | None] = mapped_column(Text)
+    login_client_auth: Mapped[str] = mapped_column(Text, server_default=text("'private_key_jwt'"))
 
 
 class BrowserSession(Base):

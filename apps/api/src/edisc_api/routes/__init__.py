@@ -22,11 +22,12 @@ def register(app: FastAPI) -> list[Any]:
         preview,
         renders,
         reports,
+        wellknown,
     )
 
     routers = [
         me.router, auth.router, hierarchy.router, admin.router, connections.router, jobs.router, exports.router,
-        renders.router, reports.router, job_package.router, preview.router,
+        renders.router, reports.router, job_package.router, preview.router, wellknown.router,
     ]  # fmt: skip
     for router in routers:
         app.include_router(router)

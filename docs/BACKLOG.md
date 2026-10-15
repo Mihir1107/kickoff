@@ -56,7 +56,7 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - AWS optimization for files > 5 GB: verify UploadPartCopy destinations by comparing the SHA-256 composite against our own per-range composite instead of a full re-read (ADR 0002).
 - **[required before production]** Staging bucket: encrypted at rest (SSE-KMS), least-privilege access (the app may write/read/delete only its own staging prefix; nothing else may read it), alerting on objects older than the 1-day expiry.
 - **[required before production]** On AWS, verify whether CopyObject honours `If-None-Match`; either use it for WORM promotion or confirm it stays covered by the advisory lock + registry + HEAD guard (it is not honoured by MinIO; ADR 0002).
-- **[required before production]** `AwsKmsClient` implementing `edisc_core.kms.KmsClient` (GenerateDataKey/Decrypt/ReEncrypt with EncryptionContext), per-tenant CMKs with rotation enabled, key policies restricting use to the worker/API roles.
+- **[required before production]** `AwsKmsClient` implementing `edisc_core.kms.KmsClient` (GenerateDataKey/Decrypt/ReEncrypt with EncryptionContext), per-tenant CMKs with rotation enabled, key policies restricting use to the worker/API roles; and `KmsSigner` (GetPublicKey, Sign with MessageType=DIGEST, `RSASSA_PKCS1_V1_5_SHA_256`) for the platform client-authentication key (an `RSA_3072` `SIGN_VERIFY` key per environment, only the API role may Sign; M17 step 3b).
 - **[hardening, required before production]** Database connection budget and pooling (pools are fixed
   since ADR 0015 §24.13; a request beyond capacity waits `EDISC_PG_POOL_TIMEOUT_MS`, then 503
   `db_pool_exhausted` / a transient activity error).

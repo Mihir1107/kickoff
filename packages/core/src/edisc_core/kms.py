@@ -12,6 +12,14 @@ The interface mirrors the three AWS KMS calls envelope encryption needs, with th
   key entirely inside KMS. The plaintext DEK never enters our process; this is how rotation works.
 
 Encryption context values are strings (AWS requirement). Context is authenticated, not secret.
+
+Asymmetric signing (``KmsSigner``, ADR 0016 step-3b notes) mirrors two more calls, for the platform's
+client-authentication key (``private_key_jwt``): the private part never leaves KMS.
+
+- ``get_public_key(key_id)`` -> AWS ``GetPublicKey``: the DER SubjectPublicKeyInfo.
+- ``sign(key_id, digest, signing_algorithm)`` -> AWS ``Sign(MessageType=DIGEST)``: only
+  ``RSASSA_PKCS1_V1_5_SHA_256`` (RS256) over a SHA-256 digest; a key of spec ``RSA_3072`` with key
+  usage ``SIGN_VERIFY``.
 """
 
 from __future__ import annotations
@@ -27,6 +35,8 @@ from pathlib import Path
 from typing import Protocol
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa, utils
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from edisc_core.canonical import canonical_json
@@ -82,6 +92,16 @@ class KmsClient(Protocol):
     ) -> WrappedKey: ...
 
 
+SIGNING_ALGORITHM = "RSASSA_PKCS1_V1_5_SHA_256"  # RS256
+SIGNING_KEY_BITS = 3072  # AWS key spec RSA_3072
+
+
+class KmsSigner(Protocol):
+    async def get_public_key(self, *, key_id: str) -> bytes: ...
+
+    async def sign(self, *, key_id: str, digest: bytes, signing_algorithm: str) -> bytes: ...
+
+
 def _check_context(ctx: Mapping[str, str]) -> dict[str, str]:
     if not ctx:
         raise KmsError("an encryption context is required")
@@ -99,6 +119,7 @@ class LocalKmsClient:
     """
 
     FORMAT = "edisc-local-kms/1"
+    SIGNING_FORMAT = "edisc-local-kms-sign/1"
 
     def __init__(self, settings: Settings, directory: Path | None = None) -> None:
         if not settings.env.is_disposable:
@@ -106,6 +127,7 @@ class LocalKmsClient:
         self._dir = directory or settings.local_kms_dir
         self._dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._lock = threading.Lock()
+        self._signing: dict[str, rsa.RSAPrivateKey] = {}
 
     # -- key management (what an operator/Terraform does in AWS)
     def _path(self, key_id: str) -> Path:
@@ -204,6 +226,59 @@ class LocalKmsClient:
                 "ciphertext cannot be decrypted with this encryption context"
             ) from exc
         return dek, key_id
+
+    # -- asymmetric signing keys (an operator creates them; AWS: CreateKey KeySpec=RSA_3072)
+    def create_signing_key(self, key_id: str) -> None:
+        """Generate an RSA 3072 key under ``key_id`` unless it exists. CPU-bound (hundreds of ms):
+        never on an event loop (``asyncio.to_thread``)."""
+        if self._path(key_id).exists():
+            return
+        self.import_signing_key(key_id, rsa.generate_private_key(65537, SIGNING_KEY_BITS))
+
+    def import_signing_key(self, key_id: str, key: rsa.RSAPrivateKey) -> None:
+        """Store a given key (tests pin one; AWS: an imported key). Refuses to replace a key."""
+        with self._lock:
+            if self._path(key_id).exists():
+                return
+            pem = key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+            self._save(key_id, {"format": self.SIGNING_FORMAT, "key_id": key_id,
+                                "key_spec": f"RSA_{key.key_size}", "private_pkcs8": pem.decode()})  # fmt: skip
+
+    def _signing_key(self, key_id: str) -> rsa.RSAPrivateKey:
+        with self._lock:
+            cached = self._signing.get(key_id)
+            if cached is not None:
+                return cached
+            data = self._load(key_id)
+            if data.get("format") != self.SIGNING_FORMAT:
+                raise KmsError("not a signing key")
+            key = serialization.load_pem_private_key(str(data["private_pkcs8"]).encode(), None)
+            if not isinstance(key, rsa.RSAPrivateKey):
+                raise KmsError("not an RSA signing key")
+            self._signing[key_id] = key
+            return key
+
+    async def get_public_key(self, *, key_id: str) -> bytes:
+        return (
+            self._signing_key(key_id)
+            .public_key()
+            .public_bytes(
+                serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+        )
+
+    async def sign(self, *, key_id: str, digest: bytes, signing_algorithm: str) -> bytes:
+        if signing_algorithm != SIGNING_ALGORITHM:
+            raise KmsError("unsupported signing algorithm")
+        if len(digest) != 32:
+            raise KmsError("a SHA-256 digest is 32 bytes")
+        return self._signing_key(key_id).sign(
+            digest, padding.PKCS1v15(), utils.Prehashed(hashes.SHA256())
+        )
 
     # -- AWS-shaped API
     async def generate_data_key(

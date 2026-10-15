@@ -4,7 +4,8 @@ Status: **Accepted** (2026-10-03), **amended 2026-10-12** (Amendment 1 below: th
 decisions D1, D2, D3, D5, D10, D11) and **2026-10-14** (Amendment 2: D4, D6-D9, D12-D14, the
 access-lost bounds, operator-only moves, Slack's terms). Implemented so far: A8 (no error path
 echoes a request value: M17 step 0) and §1-§4 with A1 (browser sessions: M17 step 2, notes at the
-end); the rest is M17 steps 5-8. Builds on ADR 0013 (tenant from the
+end), the UI's reads (step 3) and `private_key_jwt` client authentication (step 3b, notes at the end;
+real-tenant confirmation pending); the rest is M17 steps 5-8. Builds on ADR 0013 (tenant from the
 host, OIDC, scoped roles) and decision 7 of `docs/plans/phase-2.md` (server-side sessions, httpOnly
 cookies, CSRF, revocation, no tokens in the browser). It fixes the details the frontend
 (`feat/web-ui`, `apps/web/src/api/pending.ts`) had to assume, adopting its assumptions.
@@ -436,7 +437,8 @@ Choices made while building (each one a deviation from, or a detail the plan lef
 1. **The PKCE verifier is not stored.** It is `HMAC(server key, login cookie handle)`; the attempt
    row records the key id. The plan proposed an encrypted column; this way the row holds no secret
    at all and only the browser's handle plus our key rebuild the verifier.
-2. **Sign-in is a public OIDC client** (authorization code + PKCE S256, no client secret). Many IdPs
+2. **Sign-in is a public OIDC client** (authorization code + PKCE S256, no client secret). *(Built
+   in step 3b: `private_key_jwt`, the default; `none` only in local/test/ci.)* Many IdPs
    require client authentication for a web application. Production needs `private_key_jwt` with a
    platform key (no per-tenant secret to store). *(2026-10-14: moved from the BACKLOG into M17 as
    step 3b, before frontend wiring: `docs/plans/m17.md` §1.6.)*
@@ -530,3 +532,108 @@ the custody events, job and group routes (the world now has connections, jobs an
 no-echo fuzzer covers the new routes and filters from the OpenAPI document. Mutation round
 `m17-reads`: 17 breaks, all caught (the first run left `cursor_route_unbound` uncaught: every
 route case also changed a parameter; a case where only the route differs was added).
+
+## Implementation notes: M17 step 3b, `private_key_jwt` (2026-10-15)
+
+Built (`docs/plans/m17.md` §1.6; migration 0038): `edisc_api.client_auth` (`ClientSigner`), the
+`KmsSigner` calls on the KMS (`get_public_key`, `sign` over a SHA-256 digest; the local KMS holds RSA
+keys, AWS semantics), `tenant_idps.login_client_auth`, the assertion in the code exchange, the
+published keys (`edisc_api.routes.wellknown`), the test IdP checking assertions, and a test path for
+real tenants. Choices made while building:
+1. **`kid` is the RFC 7638 thumbprint** of the public key (never the KMS key handle, which is
+   configuration and stays out of every document, response and log). The header also carries
+   `x5t` (SHA-1) and `x5t#S256` of our certificate: Entra matches the uploaded certificate by
+   thumbprint; RFC 7515 lets an IdP ignore the members it does not use.
+2. **The certificate is deterministic** per key and configured validity
+   (`EDISC_API_CLIENT_KEYS`: `kms_key_id`, `not_before`, `not_after`, current first): serial from
+   SHA-256 of the key, fixed name `CN=edisc client authentication`, fixed extensions
+   (BasicConstraints CA false, KeyUsage digitalSignature, both critical; SubjectKeyIdentifier), and a
+   PKCS#1 v1.5 signature (deterministic) made by KMS over the TBSCertificate. Every replica and
+   restart publishes the same bytes, so the thumbprints in the headers never drift between replicas.
+   `cryptography` has no external-signer certificate builder: the TBS is taken from a builder run
+   with a throwaway key (same algorithm identifier) and re-signed by KMS; the result is parsed and
+   verified as self-signed before use.
+3. **Only the first key signs**; the others are published (JWKS, PEM) for a rollover. The runbook:
+   add the new key second, wait until every tenant IdP has it (Entra: uploaded certificate; Okta: the
+   JWKS URL's cache or an upload), move it first, later remove the old one.
+4. **Fail closed in four places:** no client key outside local/test/ci = the API does not start
+   (`ClientSigner.from_settings`, eager like the session keys); a key under RSA 3072 is refused;
+   `login_client_auth = 'none'` outside local/test/ci = the generic 401 at the start, `login_failed`
+   `client_auth_not_permitted`, an alert (and refused again at the callback if it changed during the
+   sign-in); a discovery document whose published lists lack `private_key_jwt` / `RS256` = the start
+   bounces to `auth_error=invalid` (details `idp_no_private_key_jwt`, `idp_no_rs256`) before the user
+   reaches the IdP. A document that publishes no list is used (Entra does not publish the algorithm
+   list as far as we know: to confirm).
+5. **`invalid_client` is recorded as such:** the callback's `login_failed` detail is
+   `exchange_invalid_client` when the IdP refuses our authentication, `exchange_refused` for any
+   other token-endpoint refusal; a KMS failure is `client_auth_unavailable` (an error line with the
+   exception type only).
+6. **`client_id` stays in the token request** with the assertion (RFC 7523 §3.1 allows it; to
+   confirm that both IdPs accept it).
+7. **Published on the base host only** (`GET /.well-known/edisc-client-jwks.json`, `GET
+   /.well-known/edisc-client-cert.pem`, `Cache-Control: public, max-age=300`; a tenant host answers
+   404): nothing there varies by tenant.
+8. **Key work off the loop:** creating the local dev key (RSA 3072 generation) and building the TBS
+   run in threads (`OFF_LOOP`); the API loads its keys at startup (`build_resources`), tests on the
+   first sign-in.
+
+Tests: `tests/unit/api/test_client_auth.py` (a key derived from a seed, so no private key is
+committed: exact claims and header, deterministic assertion and certificate, the RFC 7638 vector,
+rollover order, key size, the start refusal, the KMS's algorithm), `tests/integration/api/
+test_client_auth.py` (16: sign-in with assertions checked against the PUBLISHED JWKS, two sign-ins
+with fresh `jti`s, PKCE kept, the public client in test, each refused variant (another key, wrong
+`aud`, expired, replayed `jti`, no assertion, a client secret) failing the sign-in with no session,
+the public client refused in staging with its audit and alert, the callback re-check, the discovery
+check, the published documents (public parts only, match the signer, identical from a fresh signer,
+base host only), no assertion / key handle / private key material in any response, log line or
+audit payload). The browser test of A1 now signs in with `private_key_jwt`. Mutation round
+`m17-client-auth`: 27 breaks, all caught (21 of the product, 6 of the test IdP's checks, so the
+refused variants are known to be live).
+
+### To confirm on real tenants (Entra ID and Okta developer tenants; not done yet)
+Run `make test-real-idp` (`tests/real_idp/test_real_idp.py`: skipped with its reason when
+`EDISC_REAL_IDP_ISSUER` is unset; FAILS when it is half-configured; setup in its docstring and
+`scripts/real_idp.py`). Record each answer here.
+
+**Entra ID** (app registration: Web platform, redirect URI, certificate uploaded, no secret):
+1. A confidential Web app refuses a PKCE-only exchange (expected AADSTS7000218) and accepts ours.
+2. Header: RS256 accepted with our `x5t#S256`; is `x5t` (SHA-1) still required or ignored when
+   both are sent; is `kid` ignored. (Microsoft documents `x5t#S256` for newer flows and `x5t`
+   historically: the reason we send both.)
+3. `aud` = the discovery document's `token_endpoint` (`https://login.microsoftonline.com/<tid>/
+   oauth2/v2.0/token`) accepted byte for byte.
+4. Lifetime: our 5 minutes accepted; is `nbf` required; does Entra refuse a replayed `jti`
+   (`test_a_replayed_assertion_is_refused` answers it).
+5. Is client authentication checked before the code (the probe test depends on it; otherwise the
+   client-credentials leg with `EDISC_REAL_IDP_SCOPE=<client id>/.default` is the proof).
+6. Discovery: `token_endpoint_auth_methods_supported` lists `private_key_jwt`; whether
+   `token_endpoint_auth_signing_alg_values_supported` is published at all.
+7. ID token: `iss` = `https://login.microsoftonline.com/<tid>/v2.0` (equal to the registered
+   issuer), `aud` = client id, `nonce` echoed; **`auth_time` is an OPTIONAL claim in v2.0 tokens**
+   (re-authentication requires it: confirm it must be added under Token configuration);
+   `prompt=login` and `max_age=0` honoured.
+8. Groups: the `groups` claim needs configuration; over 200 groups Entra sends an overage
+   (`_claim_names`) instead (our sign-in would then see no groups: decide before production).
+9. `sub` is pairwise per application (stable for us; `oid` is the directory id): principals are
+   keyed by `(issuer, sub)`.
+10. The self-signed certificate is accepted at upload (validity window limits, PEM/CER form).
+
+**Okta** (Web app (OIDC), client authentication "Public key / Private key", Require PKCE):
+1. A web app with public-key authentication refuses an exchange without an assertion and accepts
+   ours; `client_id` alongside the assertion accepted.
+2. `aud` = the token endpoint of the authorization server in use (org `https://<org>/oauth2/v1/token`
+   vs custom `https://<org>/oauth2/default/v1/token`), byte for byte as discovery gives it.
+3. `kid` must match a registered key (ours: the thumbprint); RS256 with a 3072-bit key accepted;
+   the `x5t` members ignored.
+4. `jti` replay refused (documented); `exp` at most 1 hour (ours 5 minutes).
+5. Discovery lists `private_key_jwt` and `RS256` in both lists.
+6. ID token: `iss` form for the org vs a custom authorization server (must equal the registered
+   issuer); `auth_time` present; `nonce`; `prompt=login` / `max_age=0` honoured.
+7. Groups claim: configured per authorization server (filter), name `groups`.
+8. The JWKS URL option: how long Okta caches our `/.well-known/edisc-client-jwks.json` (it sets the
+   rollover overlap in note 3).
+
+**Settings and inputs per tenant** (onboarding): the issuer exactly as discovery states it, the
+client id, `jwks_url` (registered, never discovered at sign-in), `groups_claim`,
+`login_client_auth = private_key_jwt`; on the platform side `EDISC_API_CLIENT_KEYS` (the KMS key
+and the certificate validity) and, for Okta's URL option, the base host public over https.

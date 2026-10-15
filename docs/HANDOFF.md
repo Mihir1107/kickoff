@@ -1,4 +1,4 @@
-# Handoff (2026-10-14: the anchor-claims stall diagnosed and fixed (pool churn), the host-only cookie proven in browsers, private_key_jwt made M17 step 3b, M17 step 3 built (the UI's reads); next: M17 step 3b (private_key_jwt))
+# Handoff (2026-10-15: pool exhaustion fails loudly, the never-loosen-a-guard rule, connection budget + PgBouncer in the BACKLOG; M17 step 3b (`private_key_jwt`) built; next: confirm 3b on real Entra/Okta tenants, then M17 step 4)
 
 This file alone is enough to continue. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisions §1-§18, notes
@@ -6,15 +6,54 @@ design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisi
 `docs/adr/`, `docs/plans/phase-2.md` and `docs/BACKLOG.md`. M16 summary:
 `docs/runs/2026-10-12-m16-complete.md`. Expert guide: `docs/VERIFYING.md`. Demo: `docs/DEMO.md`.
 **M17 plan: `docs/plans/m17.md`** (every decision taken: its §12; design changes in ADR 0016
-Amendments 1 and 2; build notes for steps 2 and 3 at the end of ADR 0016). Steps 0, 2 and 3 are
-built; step 3b (`private_key_jwt`, plan §1.6) is next; step 7 is on hold (legal review). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
+Amendments 1 and 2; build notes for steps 2, 3 and 3b at the end of ADR 0016). Steps 0, 2, 3 and 3b
+are built (3b awaits confirmation on real Entra and Okta tenants); step 4 is next; step 7 is on hold
+(legal review). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
 
 ## Current state
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`.
-Migrations at head: **0037** (jobs list index). Renderer **1.3.2**, dummy connector **0.5.0**, normalizer
-**0.3.0**, report renderer **1.5.0**, preview renderer **1.0.0**. CI: run 38577569420 green on `43f41b4` (step 3, every job); run 38571230066 green on
-`33da278` (the pool fix); run 38536427956's failure
-on `4a8c05f` is diagnosed and fixed (below).
+Migrations at head: **0038** (`tenant_idps.login_client_auth`). Renderer **1.3.2**, dummy connector **0.5.0**, normalizer
+**0.3.0**, report renderer **1.5.0**, preview renderer **1.0.0**. CI: run 38716016425 green on
+`5f0774e` (pool exhaustion, every job); step 3b: see "Done: M17 step 3b" below for its run.
+Run 38577569420 green on `43f41b4` (step 3); run 38536427956's failure on `4a8c05f` is diagnosed
+and fixed (below).
+
+## Done: before step 3b, then M17 step 3b (2026-10-15)
+**Before 3b (commit `5f0774e`, CI run 38716016425 green on every job):**
+1. CLAUDE.md rule: never loosen a guard, threshold or exemption to make a test pass; a guard firing
+   is a bug until diagnosed (the anchor-claims test failed twice on connection churn while the loop
+   guard was given an exemption instead).
+2. **Pool exhaustion fails loudly** (ADR 0015 §24.14): a checkout beyond a fixed pool waits
+   `EDISC_PG_POOL_TIMEOUT_MS` (default 10 s, 1 ms..120 s), then raises (`is_pool_exhausted`). API: 503
+   `db_pool_exhausted` + `Retry-After: 1` + an error line `db pool exhausted` (never a 500 or a hang);
+   workers: `Transient` (retried with backoff). Tests: `tests/integration/db/test_pool.py` (a checkout
+   and a real activity on a held one-connection pool, bounded, retryable, recovers),
+   `tests/integration/api/test_pool_exhaustion.py`. Round `s24-pool-exhaustion` 5/5.
+3. **BACKLOG hardening (required before production):** the connection budget (API replicas x 20 +
+   worker processes x 22 + one direct connection per concurrent evidence content lock, vs
+   `max_connections`), and PgBouncer in transaction mode: asyncpg / SQLAlchemy prepared statements,
+   the tenant setting, the start-up `server_settings` (not forwarded by PgBouncer: move to `ALTER ROLE
+   ... SET`), the content lock's SESSION-level advisory lock (cannot go through a transaction pooler).
+   **Verified: every write of `app.tenant_id` is transaction-local** (`tenant_tx`'s
+   `set_config(..., true)`, the `create_tenant` definer function's `set_config(..., true)` + restore,
+   the db test helper's `true`); no session-level `SET` exists in application code.
+
+**M17 step 3b, `private_key_jwt`** (ADR 0016 "Implementation notes: M17 step 3b"; round
+`m17-client-auth` 27/27): migration 0038 (`tenant_idps.login_client_auth`, default
+`private_key_jwt`), `edisc_api.client_auth.ClientSigner` (RS256 assertions signed by a KMS RSA 3072
+key: `kid` = RFC 7638 thumbprint, `x5t` + `x5t#S256`, `aud` = discovered token endpoint, 5-minute
+`exp`, random `jti`; PKCE kept), `KmsSigner` on the local KMS (`get_public_key`, `sign` over a
+digest), `EDISC_API_CLIENT_KEYS` (current first; the API refuses to start without one outside
+local/test/ci; a dev key in the local KMS otherwise), a deterministic self-signed certificate
+(identical bytes on every replica), `GET /.well-known/edisc-client-jwks.json` and `-cert.pem` (base
+host only), `none` refused outside local/test/ci (generic 401, audit, alert; re-checked at the
+callback), the discovery check (fail closed at the start), `exchange_invalid_client` recorded. The
+test IdP now treats the sign-in client as confidential and checks assertions like Entra/Okta; every
+sign-in test (the three-browser A1 test included) runs with `private_key_jwt`.
+**Real tenants: NOT confirmed yet.** The list of claims and settings to confirm is in ADR 0016 ("To
+confirm on real tenants"); `make test-real-idp` runs `tests/real_idp` against a tenant
+(`scripts/real_idp.py prepare` makes the key, certificate and JWKS to register; the tests skip
+visibly without `EDISC_REAL_IDP_*` and fail when half-configured; CI's unit job shows the skip).
 
 ## Done: the CI stall, the cookie proof, M17 step 3 (2026-10-14, second session)
 **CI:** run 38571230066 on `33da278` (the pool fix, the cookie test, step 3b in the plan): every
@@ -165,12 +204,12 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
   callback's `tenant` parameter** (otherwise one customer can bind another customer's consented Entra
   tenant); revocation cuts in-flight downloads; revoked tokens end as `access_lost` units.
 
-## Next: M17 step 3b (`private_key_jwt` client authentication, plan §1.6)
-One platform RSA key per environment in KMS, client assertions at the IdP's token endpoint (PKCE
-kept), `tenant_idps.login_client_auth` (migration 0038; installs move to 0039, the directory to 0040),
-`none` refused outside local/test/ci, the JWKS and certificate published, the test IdP checking
-assertions like Entra/Okta; then confirm against real Entra and Okta developer tenants when
-available. Then step 4 (OpenAPI + oasdiff), step 5 (SSE + `SessionWatch` + the download cut-off + the
+## Next
+1. **Confirm step 3b on real tenants** when an Entra ID and an Okta developer tenant are available
+   (needs you: the tenants, an app registration each, `make test-real-idp`; record every answer in
+   ADR 0016 "To confirm on real tenants"; Entra's `auth_time` optional claim and groups overage are
+   the likeliest findings).
+2. Step 4 (OpenAPI + oasdiff), step 5 (SSE + `SessionWatch` + the download cut-off + the
 500-stream measurement), step 6 (install flows, migration 0039, the relay, the operator-only move
 CLI with its no-route test), step 8 (directory snapshots, `check-connections`, the pause deadline
 24 h..90 d). Step 7 waits for legal review.
@@ -745,5 +784,9 @@ Where the data is (verified 2026-10-05/06):
   CLAUDE.md, "Measurements").
 - **API tests:** they scan every response for every credential they sent. Use `secret()` from
   `tests/integration/api/conftest.py` for any credential you pass.
+- **Client authentication (step 3b):** `Resources` builds its `ClientSigner` eagerly from the
+  settings and `box.kms`; a test that builds `Resources` without a KMS passes `client_signer`. The
+  test IdP refuses exchanges without an assertion once `enable_login` registered our published JWKS
+  (`TEST_IDP.refusals` says why); `enable_login(..., client_auth="none")` for a public client.
 - **Dev IdP:** `EDISC_API_DEV_IDP` exists only for local/test/ci. Its key is cached; re-parsing it per request
   cost about 75 ms and once masked a measurement.

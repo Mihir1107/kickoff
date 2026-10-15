@@ -23,7 +23,7 @@ TEST_LOCK := $(or $(EDISC_TEST_STACK_LOCK),$(or $(TMPDIR),/tmp)/edisc-test-stack
 STACK_LOCK := uv run python scripts/stack_lock.py
 
 .DEFAULT_GOAL := help
-.PHONY: help hooks sync disk-guard test-env-up test-env-down up up-search up-ci down nuke ps logs migrate lint fmt typecheck test test-integration test-all worker api check test-report-pdf test-production-install
+.PHONY: help hooks sync disk-guard test-env-up test-env-down up up-search up-ci down nuke ps logs migrate lint fmt typecheck test test-integration test-all worker api check test-report-pdf test-production-install test-real-idp
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -101,8 +101,11 @@ fmt: ## Auto-format and fix lint
 typecheck: ## mypy --strict
 	uv run mypy $(TYPED_SRC)
 
-test: ## Unit tests (no services required)
-	uv run pytest tests/unit
+test: ## Unit tests (no services required); the real-IdP tests skip visibly without credentials
+	uv run pytest tests/unit tests/real_idp
+
+test-real-idp: ## private_key_jwt against a real Entra/Okta developer tenant (EDISC_REAL_IDP_*: tests/real_idp)
+	uv run pytest tests/real_idp -rs -s -p no:randomly
 
 test-integration: disk-guard ## Integration tests on a FRESH ephemeral stack, destroyed afterwards (never the dev stack)
 	@rm -rf $(TEST_TMP) && mkdir -p $(TEST_TMP)

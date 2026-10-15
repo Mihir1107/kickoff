@@ -23,9 +23,25 @@ def origin_of(api: Api, t: TenantCtx) -> str:
     return f"{api.settings.api_public_scheme}://{host_of(api, t)}"
 
 
-async def enable_login(api: Api, t: TenantCtx) -> None:
+async def published_jwks(api: Api, t: TenantCtx) -> dict[str, Any]:
+    """Our client-authentication JWKS as the base host publishes it (what an IdP admin uploads)."""
+    async with api.client(t.subdomain) as c:
+        r = await c.get(f"http://{api.settings.api_base_domain}/.well-known/edisc-client-jwks.json")
+    assert r.status_code == 200, r.text
+    jwks: dict[str, Any] = r.json()
+    return jwks
+
+
+async def enable_login(api: Api, t: TenantCtx, *, client_auth: str = "private_key_jwt") -> None:
+    """Sign-in for the tenant with the test IdP. ``private_key_jwt`` (the default, as in
+    production): the IdP is given our PUBLISHED JWKS and refuses exchanges without an assertion."""
     async with tenant_tx(api.sessions, t.tenant_id) as s:
-        await s.execute(text("UPDATE tenant_idps SET login_client_id = :c"), {"c": LOGIN_CLIENT})
+        await s.execute(
+            text("UPDATE tenant_idps SET login_client_id = :c, login_client_auth = :a"),
+            {"c": LOGIN_CLIENT, "a": client_auth},
+        )
+    if client_auth == "private_key_jwt":
+        TEST_IDP.register_client(LOGIN_CLIENT, await published_jwks(api, t))
 
 
 async def call(

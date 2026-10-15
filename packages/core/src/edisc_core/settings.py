@@ -9,8 +9,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from edisc_core.time import UtcDatetime
 
 
 class Environment(StrEnum):
@@ -36,6 +38,24 @@ class RateLimitConfig(BaseModel):
 
     rate_per_second: float = Field(gt=0)
     burst: int = Field(ge=1)
+
+
+class ClientKeySpec(BaseModel):
+    """One platform client-authentication key (``EDISC_API_CLIENT_KEYS``, a JSON list)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kms_key_id: str = Field(min_length=1)
+    not_before: (
+        UtcDatetime  # the published certificate's validity (fixed: identical bytes everywhere)
+    )
+    not_after: UtcDatetime
+
+    @model_validator(mode="after")
+    def _ordered(self) -> ClientKeySpec:
+        if self.not_after <= self.not_before:
+            raise ValueError("a client key's not_after must follow its not_before")
+        return self
 
 
 class Settings(BaseSettings):
@@ -366,6 +386,14 @@ class Settings(BaseSettings):
     )
     api_session_key_id: str | None = Field(
         default=None, description="the kid of api_session_keys used for new tokens"
+    )
+    api_client_keys: list[ClientKeySpec] = Field(
+        default_factory=list,
+        description="the platform's client-authentication keys (private_key_jwt at the IdPs' token"
+        " endpoints, ADR 0016 step-3b notes): KMS asymmetric keys (RSA 3072), CURRENT FIRST: only the"
+        " first signs, the others are published (JWKS, certificate) for a rollover. Each entry fixes"
+        " its certificate's validity, so every replica publishes the same certificate bytes. Empty:"
+        " the API refuses to start outside local/test/ci; there a dev key is created in the local KMS",
     )
     api_public_scheme: Literal["https", "http"] = Field(
         default="https",

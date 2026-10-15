@@ -78,6 +78,8 @@ OFF_LOOP = (
     "edisc_connector_dummy.dialects.slack:replies_page",
     "edisc_connector_dummy.dialects.slack:users_page",
     "edisc_connector_dummy.dialects.slack:conversations_page",
+    "edisc_api.client_auth:tbs_certificate",
+    "edisc_core.kms:LocalKmsClient.create_signing_key",
 )
 
 
