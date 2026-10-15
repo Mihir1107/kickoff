@@ -57,8 +57,9 @@ broken next to a `<name>.mutation-backup` copy: the runner refuses to start unti
 | `m17-d11` | no error path echoes a request value: sanitised 422s, fixed 500s, value-free log lines, uvicorn's access log off, hidden statement parameters, redacted worker texts, route refusals (ADR 0016 A8, M17 step 0) | 17 |
 | `m17-sessions` | browser sessions: fixation, expiries, revocation, cookie flags, one credential, CSRF, fetch metadata, single-use state, nonce, `return_to`, re-authentication, the bounce page in real browsers, recent sign-in, guard triggers (ADR 0016; M17 step 2) | 35 |
 | `m17-logs` | every test asserting on log output reads the production pipeline and proves its lines arrived (the sweep before M17 step 2) | 7 |
+| `s24-pool-exhaustion` | a checkout beyond a fixed pool waits a bounded time, then 503 `db_pool_exhausted` (API) or a transient activity error (workers), never a hang | 5 |
 
-359 entries: 153 unit, 202 integration, 4 image.
+390 entries: 156 unit, 230 integration, 4 image.
 
 The `s19-*` rounds were run by hand when they were built and only their categories were written
 down; the entries here re-create them against the current code.

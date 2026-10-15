@@ -65,6 +65,9 @@ Rounds (ADR 0015):
 - ``s24-pool``: fixed, warmed database pools and the churn report (ADR 0015 §24.13); the timing
   guard counting an idle sample when the loop's thread was measured busy, through the blocking-I/O
   guard's wrapper.
+- ``s24-pool-exhaustion``: a checkout beyond a fixed pool's capacity waits ``pg_pool_timeout_ms``,
+  then fails loudly: 503 ``db_pool_exhausted`` with ``Retry-After`` and an error line in the API, a
+  transient (retryable) activity error in workers; never a hang.
 - ``m17-host-cookie``: the session cookie is host-only (``__Host-``, no ``Domain``) and a same-site
   request from a neighbouring subdomain is refused, both in real browsers (ADR 0016 §2).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
@@ -105,6 +108,7 @@ CN = "tests/integration/custody/test_render_package_natives.py"
 CP = "tests/integration/custody/test_render_package.py"
 LG = "packages/core/src/edisc_core/loopguard.py"
 IPOOL = "tests/integration/db/test_pool.py"
+APX = "tests/integration/api/test_pool_exhaustion.py"
 DC = "packages/connectors/dummy/src/edisc_connector_dummy/connector.py"
 ULG = "tests/unit/core/test_loopguard.py"
 LB = "packages/core/src/edisc_core/loopblock.py"
@@ -1278,6 +1282,20 @@ CATALOG: list[Mutation] = [
     m("guard_wrapper_hides_send", "s24-pool", LG,
       "        return frame.f_back  # the blocking-I/O guard's wrapper around the transport's call\n",
       "        return frame\n", ULG, "wrapped_by_the_blocking"),
+    # ------------------------------------------------------------------ pool exhaustion fails loudly
+    m("pool_wait_unbounded", "s24-pool-exhaustion", SESS,
+      "        pool_timeout=settings.pg_pool_timeout_ms / 1000,\n", "", IPOOL,
+      "production_pool or within_the_bound"),
+    m("pool_exhaustion_not_retryable", "s24-pool-exhaustion", SESS,
+      "    return isinstance(exc, PoolTimeoutError)\n", "    return False\n", IPOOL,
+      "within_the_bound or activity_retryably"),
+    m("pool_exhaustion_500", "s24-pool-exhaustion", APPM,
+      "    @app.exception_handler(PoolTimeoutError)\n", "", APX),
+    m("pool_exhaustion_no_retry_after", "s24-pool-exhaustion", APPM,
+      'status_code=503, headers={"Retry-After": "1"},', "status_code=503,", APX),
+    m("pool_exhaustion_silent", "s24-pool-exhaustion", APPM,
+      '            "db pool exhausted", path=request_path(request),',
+      '            "request", path=request_path(request),', APX),
     # ------------------------------------------------------------------ host-only session cookie
     Mutation("session_cookie_domain_wide", "m17-host-cookie", SESP, (
         ('SESSION_COOKIE = "__Host-edisc_session"', 'SESSION_COOKIE = "edisc_session"'),

@@ -73,6 +73,14 @@ class Settings(BaseSettings):
         description="idle_in_transaction_session_timeout for app/worker sessions: a transaction left open "
         "and idle (stuck caller) is terminated, releasing its locks.",
     )
+    pg_pool_timeout_ms: int = Field(
+        default=10_000,
+        ge=1,
+        le=120_000,
+        description="How long a caller waits for a free connection of a FIXED pool before it fails loudly "
+        "(PoolExhaustedError: 503 db_pool_exhausted in the API, a transient retryable error in workers). "
+        "Never unbounded: a saturated pool must not hang requests or activities.",
+    )
 
     redis_url: str = "redis://localhost:6379/0"
 

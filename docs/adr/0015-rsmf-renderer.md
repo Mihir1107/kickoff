@@ -1275,3 +1275,15 @@ what was done and why.
       production pools are fixed; a reconnect is not churn; a new slot is reported), two cases in
       `tests/unit/core/test_loopguard.py`. Mutation round `s24-pool` (7 breaks, all caught). The
       BACKLOG item "Fix the SCRAM connection bursts" is done and removed.
+14. **An exhausted fixed pool fails loudly, never hangs (2026-10-15).** With no overflow, a caller
+    beyond a pool's capacity queues for a connection. The wait is bounded by
+    `EDISC_PG_POOL_TIMEOUT_MS` (default 10 s, 1 ms..120 s; SQLAlchemy's `pool_timeout`, an asyncio
+    wait, never on the loop); then the checkout raises (`edisc_db.session.is_pool_exhausted`;
+    nothing ran on the database). The API answers **503 `db_pool_exhausted`** with `Retry-After: 1`
+    and logs an error line `db pool exhausted` (never a 500, never a hang); activities classify it
+    as `Transient` (`is_retryable_db_error` includes it), so the workflow retries with backoff
+    instead of failing a unit. Tests: `tests/integration/db/test_pool.py` (a checkout and a real
+    activity on a held one-connection pool fail within the bound, retryably; the slot recovers),
+    `tests/integration/api/test_pool_exhaustion.py` (503 + `Retry-After` + the log line, then a
+    200). Mutation round `s24-pool-exhaustion` (5 breaks, all caught). The connection budget across
+    replicas and PgBouncer are a BACKLOG hardening item.

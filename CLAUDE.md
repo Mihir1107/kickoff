@@ -367,6 +367,10 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   histories and custody streams, `tests/integration/artifacts.py`), reproduce it in a loop
   (with CPU contention), classify it (product bug or test bug) and fix the cause. A test bug is fixed
   with barriers or conditions, never with sleeps or loosened timeouts. Record the finding in the ADR.
+- **Never loosen a guard, threshold or exemption to make a test pass.** A guard that fires (the loop
+  guard, the churn report, a timeout, a budget, a verifier check) is a bug until diagnosed: find what
+  it caught and fix that. The anchor-claims test failed twice on database connection churn while the
+  loop guard was given an exemption instead (ADR 0015 §24.13); the exemption hid the real cause.
 - Activities heartbeat from the event loop (`_ticking`): CPU-bound work inside an activity (rendering
   a slice, layout, schema validation of a large document) runs in a worker thread
   (`asyncio.to_thread`), never on the loop. A loop blocked longer than the heartbeat timeout makes

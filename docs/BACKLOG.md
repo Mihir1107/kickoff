@@ -57,6 +57,31 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - **[required before production]** Staging bucket: encrypted at rest (SSE-KMS), least-privilege access (the app may write/read/delete only its own staging prefix; nothing else may read it), alerting on objects older than the 1-day expiry.
 - **[required before production]** On AWS, verify whether CopyObject honours `If-None-Match`; either use it for WORM promotion or confirm it stays covered by the advisory lock + registry + HEAD guard (it is not honoured by MinIO; ADR 0002).
 - **[required before production]** `AwsKmsClient` implementing `edisc_core.kms.KmsClient` (GenerateDataKey/Decrypt/ReEncrypt with EncryptionContext), per-tenant CMKs with rotation enabled, key policies restricting use to the worker/API roles.
+- **[hardening, required before production]** Database connection budget and pooling (pools are fixed
+  since ADR 0015 §24.13; a request beyond capacity waits `EDISC_PG_POOL_TIMEOUT_MS`, then 503
+  `db_pool_exhausted` / a transient activity error).
+  - **Budget:** every process holds its full pool from start-up: API replica 20, worker process 20
+    (+ 2 sweeper), plus one short-lived DIRECT connection per concurrent evidence content lock
+    (`EvidenceWriter._content_lock`, outside the pool; also a SCRAM handshake on the loop each time).
+    Sum over API replicas and worker processes (+ content locks, + migrations and operator tools, +
+    `superuser_reserved_connections`) must stay below Postgres `max_connections` (300 in compose;
+    managed Postgres sizes it by instance class). A deployment check computes it from the replica
+    counts and refuses a plan over budget; pool sizes become settings per process type.
+  - **PgBouncer in transaction mode** in front of Postgres once the budget does not fit. What it
+    needs from us: (1) asyncpg's prepared-statement cache off or made safe (`statement_cache_size=0`
+    or PgBouncer >= 1.21 `max_prepared_statements`; SQLAlchemy's asyncpg dialect also names its
+    prepared statements, `prepared_statement_name_func` with unique names); (2) the RLS tenant
+    setting ONLY ever set with `SET LOCAL` semantics (a session-level `SET` would leak one tenant's
+    context to another client's transaction on the same server connection). Verified 2026-10-15:
+    every write of `app.tenant_id` is transaction-local (`tenant_tx`: `set_config(..., true)`; the
+    `create_tenant` definer function: `set_config(..., true)` and restores it; the test helper in
+    `tests/integration/db/conftest.py`: `true`); no session-level `SET` exists in application code.
+    (3) The connection-level settings we pass at start-up (`search_path`, `lock_timeout`,
+    `idle_in_transaction_session_timeout` as asyncpg `server_settings`) are not forwarded by
+    PgBouncer in transaction mode: move them to `ALTER ROLE edisc_app SET ...` (or SET LOCAL per
+    transaction). (4) The content lock's SESSION-level advisory lock cannot go through a transaction
+    pooler: it keeps its direct connection to Postgres (or becomes a lease row). (5) A test that runs
+    the suite's tenant-isolation and RLS tests through PgBouncer.
 - Connection re-authorization flow: on `invalid_grant` or `DecryptionError`, mark the connection `error`, emit a custody event, notify the tenant (M13+).
 - Scheduled KEK rotation job calling `rewrap_tenant_tokens` per tenant, with custody events.
 - **[required before production]** Microsoft Graph app authentication with a certificate (not a client secret), stored in the secret manager, with a rotation runbook (ADR 0009).

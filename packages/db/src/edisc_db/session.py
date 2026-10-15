@@ -16,6 +16,7 @@ from typing import Literal
 
 from sqlalchemy import Engine, event, text
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -74,7 +75,8 @@ def create_engine(
     SCRAM handshake (4,096 PBKDF2 iterations in Python, ~4 ms of CPU here, more on CI runners) ON
     THE EVENT LOOP, so overflow connections opened and closed per burst stalled the loop by
     hundreds of milliseconds (ADR 0015 §24.13). Call :func:`warm_pool` at startup. Waiters queue
-    for a free connection instead."""
+    for a free connection instead, for at most ``pg_pool_timeout_ms``: then the checkout raises
+    (:func:`is_pool_exhausted`), never waits for ever."""
     url = settings.pg_dsn(role, db=db).replace("postgresql://", "postgresql+asyncpg://", 1)
     server_settings = {"search_path": f"{settings.pg_schema},pg_temp"}
     if role in ("app", "sweeper"):
@@ -88,6 +90,7 @@ def create_engine(
         url,
         pool_size=pool_size,
         max_overflow=0,
+        pool_timeout=settings.pg_pool_timeout_ms / 1000,
         pool_pre_ping=True,
         # a statement error's text never carries its parameters: it reaches logs, unit errors in the
         # chain and API answers (ADR 0016 amendment, D11); the SQLSTATE stays on the error
@@ -139,10 +142,18 @@ def sqlstate_of(exc: BaseException) -> str | None:
     return None
 
 
+def is_pool_exhausted(exc: BaseException) -> bool:
+    """True when no connection of the fixed pool became free within ``pg_pool_timeout_ms``. Nothing
+    ran on the database: the whole unit of work may be retried. The API answers 503
+    ``db_pool_exhausted``; activities classify it as transient."""
+    return isinstance(exc, PoolTimeoutError)
+
+
 def is_retryable_db_error(exc: BaseException) -> bool:
-    """True for lock timeouts, deadlocks, serialization failures and terminated idle transactions.
-    Callers (Temporal activities) retry the whole unit of work; nothing partial was committed."""
-    if sqlstate_of(exc) in RETRYABLE_SQLSTATES:
+    """True for lock timeouts, deadlocks, serialization failures, terminated idle transactions and
+    an exhausted pool. Callers (Temporal activities) retry the whole unit of work; nothing partial
+    was committed."""
+    if sqlstate_of(exc) in RETRYABLE_SQLSTATES or is_pool_exhausted(exc):
         return True
     # a session killed while idle in transaction surfaces as a dropped connection on next use
     return isinstance(exc, DBAPIError) and exc.connection_invalidated

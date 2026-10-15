@@ -15,6 +15,7 @@ import httpx
 import redis.asyncio as aioredis
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
 from types_aiobotocore_s3 import S3Client
@@ -197,6 +198,20 @@ def create_app(settings: Settings, resources: Resources | None = None) -> FastAP
         return JSONResponse(
             {"error": exc.code, "detail": exc.detail, **exc.extra}, status_code=exc.status
         )
+
+    @app.exception_handler(PoolTimeoutError)
+    async def _pool_exhausted(request: Request, _: PoolTimeoutError) -> JSONResponse:
+        # every connection of the fixed pool stayed busy for pg_pool_timeout_ms: fail loudly and
+        # retryably, never hang (nothing ran on the database for this request)
+        res: Resources | None = getattr(request.app.state, "resources", None)
+        log.error(
+            "db pool exhausted", path=request_path(request),
+            timeout_ms=res.settings.pg_pool_timeout_ms if res is not None else None,
+        )  # fmt: skip
+        return JSONResponse(
+            {"error": "db_pool_exhausted", "detail": "the service is busy; retry shortly"},
+            status_code=503, headers={"Retry-After": "1"},
+        )  # fmt: skip
 
     from edisc_api.routes import register
 

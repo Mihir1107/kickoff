@@ -64,7 +64,7 @@ def classify(exc: BaseException) -> ErrorClass:
         return ErrorClass.UNIT_INTEGRITY
     if isinstance(exc, ContentLockTimeoutError | EvidenceCopyTimeoutError):
         return ErrorClass.TRANSIENT  # TimeoutError subclasses, named for clarity
-    if is_retryable_db_error(exc):
+    if is_retryable_db_error(exc):  # an exhausted pool too (is_pool_exhausted): nothing ran
         return ErrorClass.TRANSIENT
     if isinstance(
         exc,
