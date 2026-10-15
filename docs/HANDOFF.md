@@ -21,6 +21,9 @@ Run 38577569420 green on `43f41b4` (step 3); run 38536427956's failure on `4a8c0
 and fixed (below).
 
 ## Done: error codes, then M17 step 5 (2026-10-15, third session)
+**CI:** run 38745179430 green on `98044d1` (error codes); run 38766458358 green on `4af4912` (step 5,
+every job including `api-compat`).
+
 **Error codes (commit `98044d1`, CI run 38745179430 green; ADR 0016 note "every route declares its
 error codes"; round `m17-error-codes` 8/8):** one registry (`edisc_api.error_codes.E`, one status
 per code); each route declares its handler's codes in `perm(...)` / `public(...)` /
