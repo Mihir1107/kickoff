@@ -13,11 +13,13 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from edisc_api.auth import Caller
+from edisc_api.error_codes import Code, declare
 from edisc_api.errors import forbidden, not_found
 
 
@@ -231,6 +233,18 @@ async def _client_of(
     return next((s.id for s in chain if s.type == "client"), None)
 
 
-def perm(permission: Permission | str) -> dict[str, str]:
-    """``openapi_extra`` marker: the permission a route enforces (checked by the route-table test)."""
-    return {"x-permission": str(permission)}
+def perm(permission: Permission | str, *errors: Code) -> dict[str, Any]:
+    """``openapi_extra`` marker: the permission a route enforces (checked by the route-table test)
+    and the error codes its own handler can answer (``edisc_api.error_codes``; the codes implied
+    by the operation's shape are added when the document is built)."""
+    return {"x-permission": str(permission), **declare(*errors)}
+
+
+def public(*errors: Code) -> dict[str, Any]:
+    """A route anyone may call (sign-in, published keys)."""
+    return perm("public", *errors)
+
+
+def authenticated(*errors: Code) -> dict[str, Any]:
+    """A route any authenticated caller may call (it concerns the caller only)."""
+    return perm("authenticated", *errors)

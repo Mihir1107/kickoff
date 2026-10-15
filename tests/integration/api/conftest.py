@@ -41,6 +41,7 @@ from edisc_worker.contracts import EXPORTS_QUEUE, task_queue
 from edisc_worker.exports import ExportActivities
 from edisc_worker.workflows import CollectionJobWorkflow, CollectUnitWorkflow, ExportIngestWorkflow
 
+from .error_check import ErrorCodeCheck
 from .oidc import IDP_HOST, TEST_IDP
 
 Sessions = async_sessionmaker[AsyncSession]
@@ -102,17 +103,22 @@ class Api:
     # lifespan, and FastAPI would otherwise build them on the loop at the first requests
     app: FastAPI | None = None
     app_settings: Settings | None = None
+    errors: ErrorCodeCheck | None = None
+    errors_app: FastAPI | None = None
 
     def client(self, subdomain: str, token: str | None = None) -> httpx.AsyncClient:
         headers = {"authorization": f"Bearer {token}"} if token else {}
         if self.app is None or self.app_settings is not self.settings:
             self.app, self.app_settings = create_app(self.settings, self.resources), self.settings
             warm_routes(self.app)  # test setup, outside any request
+        if self.errors is None or self.errors_app is not self.app:
+            self.errors, self.errors_app = ErrorCodeCheck.for_app(self.app), self.app
         return httpx.AsyncClient(
             transport=httpx.ASGITransport(app=self.app),
             base_url=f"http://{subdomain}.{self.settings.api_base_domain}",
             headers=headers,
-            event_hooks={"response": [_scan_response]},
+            # every response: no credential leaked; every error code declared for its operation
+            event_hooks={"response": [_scan_response, self.errors]},
         )
 
 

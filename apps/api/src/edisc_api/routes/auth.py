@@ -45,8 +45,10 @@ from edisc_api.app import (
     count_auth_failure,
 )
 from edisc_api.auth import AuthError
+from edisc_api.authz import authenticated, public
 from edisc_api.client_auth import METHOD, ClientAuthError
 from edisc_api.client_ip import client_ip
+from edisc_api.error_codes import E
 from edisc_api.errors import ApiError
 from edisc_api.oidc import IdToken, OidcError, check_client_auth
 from edisc_api.sessions import (
@@ -72,8 +74,6 @@ from edisc_db.session import tenant_tx
 
 log = get_logger(__name__)
 router = APIRouter(prefix="/v1")
-PUBLIC = {"x-permission": "public"}
-AUTHENTICATED = {"x-permission": "authenticated"}
 ANONYMOUS = "anonymous"  # actor of an audit event about a sign-in that resolved no principal
 
 # what an IdP's ``error`` parameter is recorded as (never its text, never ``error_description``)
@@ -184,7 +184,14 @@ async def _live_session(
     return (row.id, row.principal_id) if row is not None else None
 
 
-@router.get("/auth/login", status_code=303, response_class=RedirectResponse, openapi_extra=PUBLIC)
+@router.get(
+    "/auth/login",
+    status_code=303,
+    response_class=RedirectResponse,
+    openapi_extra=public(
+        E.IDP_UNAVAILABLE, E.INVALID_RETURN_TO, E.TOO_MANY_REQUESTS, E.UNAUTHORIZED, E.INVALID
+    ),
+)
 async def login(
     request: Request,
     res: ResourcesDep,
@@ -286,7 +293,22 @@ async def _fail(
     return _bounce(f"/?auth_error={code}", FAILURE_STATUS[code], clear_cookie(LOGIN_COOKIE, "Lax"))
 
 
-@router.get("/auth/callback", response_class=HTMLResponse, openapi_extra=PUBLIC)
+@router.get(
+    "/auth/callback",
+    response_class=HTMLResponse,
+    openapi_extra=public(
+        E.DENIED,
+        E.EXPIRED,
+        E.INVALID,
+        E.UNKNOWN_USER,
+        E.INACTIVE,
+        E.REAUTH_MISMATCH,
+        E.GROUPS_OVERAGE,
+        E.GROUPS_MISSING,
+        E.TOO_MANY_REQUESTS,
+        E.UNAUTHORIZED,
+    ),
+)
 async def callback(
     request: Request,
     res: ResourcesDep,
@@ -498,7 +520,7 @@ def _session_value(request: Request) -> str:
     return value
 
 
-@router.post("/auth/logout", status_code=204, openapi_extra=AUTHENTICATED)
+@router.post("/auth/logout", status_code=204, openapi_extra=authenticated(E.NOT_A_SESSION))
 async def logout(
     request: Request, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
 ) -> Response:
@@ -523,7 +545,7 @@ async def logout(
     return response
 
 
-@router.get("/auth/csrf", response_model=CsrfOut, openapi_extra=AUTHENTICATED)
+@router.get("/auth/csrf", response_model=CsrfOut, openapi_extra=authenticated(E.NOT_A_SESSION))
 async def csrf(
     request: Request, caller: CallerDep, res: ResourcesDep, response: Response
 ) -> CsrfOut:

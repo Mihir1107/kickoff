@@ -50,7 +50,8 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - `apps/api` (`edisc_api`): tenant from the Host subdomain (`tenant_id_for_subdomain`) + the token's IdP
   (`tenant_idps`) + an active principal. NEVER read a tenant id from a body, query or header. Unknown
   tenants and all auth failures get the same 401.
-- Every `/v1` route declares `openapi_extra=perm(...)` and calls `authorize(s, caller, P.X, Scope(...))`
+- Every route declares `openapi_extra=perm(P.X, E.<codes its handler answers>)` (or `public(...)` /
+  `authenticated(...)`; codes only from the registry `edisc_api.error_codes.E`) and every `/v1` route calls `authorize(s, caller, P.X, Scope(...))`
   inside its `tenant_tx` (404 if the caller cannot see the target, 403 if it can but lacks the permission).
   Request models `extra="forbid"`; response models only (no ORM rows or dicts); cursor pagination
   (`edisc_api.pagination`) on every list.

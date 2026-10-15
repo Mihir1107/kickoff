@@ -39,6 +39,7 @@ from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller, require_recent_sign_in
 from edisc_api.authz import P, Permission, Scope, authorize, perm
+from edisc_api.error_codes import E
 from edisc_api.errors import ApiError, RecordedText, conflict, not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, decode_text, encode_text, page_of
 from edisc_api.routes.jobs import IdempotencyKey, _claim_key, _request_hash
@@ -262,7 +263,17 @@ def _out(row: Any, episodes: list[Any]) -> RenderOut:
     "/jobs/{job_id}/renders",
     status_code=201,
     response_model=RenderOut,
-    openapi_extra=perm(P.EXPORT_CREATE),
+    openapi_extra=perm(
+        P.EXPORT_CREATE,
+        E.CLIENT_CLOSED,
+        E.CONFLICT,
+        E.FORBIDDEN,
+        E.JOB_NOT_SEALED,
+        E.MATTER_CLOSED,
+        E.NOT_FOUND,
+        E.REAUTH_REQUIRED,
+        E.UNPROCESSABLE,
+    ),
 )
 async def create_render_route(
     job_id: uuid.UUID,
@@ -337,7 +348,9 @@ async def create_render_route(
 
 # ------------------------------------------------------------------ read
 @router.get(
-    "/jobs/{job_id}/renders", response_model=Page[RenderOut], openapi_extra=perm(P.CUSTODY_READ)
+    "/jobs/{job_id}/renders",
+    response_model=Page[RenderOut],
+    openapi_extra=perm(P.CUSTODY_READ, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
 )
 async def list_renders(
     job_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, cursor: CursorQ = None,
@@ -360,7 +373,11 @@ async def list_renders(
     return page_of([_out(r, episodes[r.id]) for r in rows], limit, lambda r: r.id)
 
 
-@router.get("/renders/{render_id}", response_model=RenderOut, openapi_extra=perm(P.CUSTODY_READ))
+@router.get(
+    "/renders/{render_id}",
+    response_model=RenderOut,
+    openapi_extra=perm(P.CUSTODY_READ, E.FORBIDDEN, E.NOT_FOUND),
+)
 async def get_render(render_id: uuid.UUID, caller: CallerDep, res: ResourcesDep) -> RenderOut:
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         return await render_out(s, await _authorize_render(s, caller, P.CUSTODY_READ, render_id))
@@ -369,7 +386,7 @@ async def get_render(render_id: uuid.UUID, caller: CallerDep, res: ResourcesDep)
 @router.get(
     "/renders/{render_id}/files",
     response_model=Page[RenderFileOut],
-    openapi_extra=perm(P.CUSTODY_READ),
+    openapi_extra=perm(P.CUSTODY_READ, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
 )
 async def list_render_files(
     render_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, cursor: CursorQ = None,
@@ -423,7 +440,7 @@ async def list_render_files(
 @router.get(
     "/renders/{render_id}/custody/verify",
     response_model=RenderVerifyOut,
-    openapi_extra=perm(P.CUSTODY_READ),
+    openapi_extra=perm(P.CUSTODY_READ, E.FORBIDDEN, E.NOT_FOUND),
 )
 async def verify_render(
     render_id: uuid.UUID, caller: CallerDep, res: ResourcesDep
@@ -444,7 +461,10 @@ async def verify_render(
 
 
 # ------------------------------------------------------------------ download (always audited)
-@router.get("/renders/{render_id}/files/{file_ord}/content", openapi_extra=perm(P.EXPORT_READ))
+@router.get(
+    "/renders/{render_id}/files/{file_ord}/content",
+    openapi_extra=perm(P.EXPORT_READ, E.CONFLICT, E.FORBIDDEN, E.INTEGRITY, E.NOT_FOUND),
+)
 async def render_file_content(
     render_id: uuid.UUID,
     file_ord: Annotated[int, Path(ge=0)],
@@ -518,7 +538,7 @@ async def render_file_content(
 @router.get(
     "/renders/{render_id}/natives",
     response_model=Page[RenderNativeOut],
-    openapi_extra=perm(P.CUSTODY_READ),
+    openapi_extra=perm(P.CUSTODY_READ, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
 )
 async def list_render_natives(
     render_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, cursor: CursorQ = None,
@@ -557,7 +577,10 @@ async def list_render_natives(
     )
 
 
-@router.get("/renders/{render_id}/natives/{sha256}/content", openapi_extra=perm(P.EXPORT_READ))
+@router.get(
+    "/renders/{render_id}/natives/{sha256}/content",
+    openapi_extra=perm(P.EXPORT_READ, E.CONFLICT, E.FORBIDDEN, E.INTEGRITY, E.NOT_FOUND),
+)
 async def render_native_content(
     render_id: uuid.UUID,
     sha256: Annotated[str, Path(pattern="^[0-9a-f]{64}$")],
@@ -630,7 +653,10 @@ async def render_native_content(
     )
 
 
-@router.get("/renders/{render_id}/package", openapi_extra=perm(P.EXPORT_READ))
+@router.get(
+    "/renders/{render_id}/package",
+    openapi_extra=perm(P.EXPORT_READ, E.FORBIDDEN, E.NOT_FOUND, E.RENDER_NOT_SEALED),
+)
 async def render_package(
     render_id: uuid.UUID,
     caller: CallerDep,

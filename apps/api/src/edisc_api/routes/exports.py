@@ -37,6 +37,7 @@ from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller, require_recent_sign_in
 from edisc_api.authz import TENANT, P, Permission, Scope, authorize, perm, permissions, roles_at
+from edisc_api.error_codes import E
 from edisc_api.errors import ApiError, RecordedDetail, conflict, forbidden, not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, page_of
 from edisc_api.routes.hierarchy import ensure_client_open
@@ -200,7 +201,7 @@ def _staging_key(tenant_id: uuid.UUID, export_id: uuid.UUID) -> str:
 # ------------------------------------------------------------------ routes
 @router.post(
     "/clients/{client_id}/exports", status_code=201, response_model=ExportOut,
-    openapi_extra=perm(P.CONNECTION_MANAGE),
+    openapi_extra=perm(P.CONNECTION_MANAGE, E.CONFLICT, E.EXPORT_TOO_LARGE, E.FORBIDDEN, E.NOT_FOUND, E.REAUTH_REQUIRED),
 )  # fmt: skip
 async def create_export(
     client_id: uuid.UUID, body: ExportIn, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
@@ -259,7 +260,7 @@ async def create_export(
 
 @router.put(
     "/exports/{export_id}/parts/{part_number}", response_model=PartOut,
-    openapi_extra=perm(P.CONNECTION_MANAGE),
+    openapi_extra=perm(P.CONNECTION_MANAGE, E.CONFLICT, E.DIGEST_MISMATCH, E.FORBIDDEN, E.MISSING_DIGEST, E.NOT_FOUND, E.PART_TOO_LARGE, E.UNPROCESSABLE, E.UPLOAD_EXPIRED),
 )  # fmt: skip
 async def upload_part(
     export_id: uuid.UUID, part_number: int, request: Request, caller: CallerDep, res: ResourcesDep
@@ -336,7 +337,7 @@ async def upload_part(
 
 @router.post(
     "/exports/{export_id}/complete", status_code=202, response_model=ExportOut,
-    openapi_extra=perm(P.CONNECTION_MANAGE),
+    openapi_extra=perm(P.CONNECTION_MANAGE, E.CONFLICT, E.DECLARED_HASH_MISMATCH, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE, E.UPLOAD_EXPIRED),
 )  # fmt: skip
 async def complete_export(
     export_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
@@ -393,7 +394,11 @@ async def complete_export(
     return out
 
 
-@router.get("/exports/{export_id}", response_model=ExportOut, openapi_extra=perm(P.CONNECTION_READ))
+@router.get(
+    "/exports/{export_id}",
+    response_model=ExportOut,
+    openapi_extra=perm(P.CONNECTION_READ, E.FORBIDDEN, E.NOT_FOUND),
+)
 async def get_export(export_id: uuid.UUID, caller: CallerDep, res: ResourcesDep) -> ExportOut:
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await _authorize_export(s, caller, P.CONNECTION_READ, export_id)
@@ -402,7 +407,7 @@ async def get_export(export_id: uuid.UUID, caller: CallerDep, res: ResourcesDep)
 
 @router.get(
     "/clients/{client_id}/exports", response_model=Page[ExportOut],
-    openapi_extra=perm(P.CONNECTION_READ),
+    openapi_extra=perm(P.CONNECTION_READ, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
 )  # fmt: skip
 async def list_exports(
     client_id: uuid.UUID,

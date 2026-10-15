@@ -24,6 +24,7 @@ from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller
 from edisc_api.authz import P, Permission, Scope, authorize, perm
+from edisc_api.error_codes import E
 from edisc_api.errors import not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, page_of
 from edisc_connector_dummy.guard import source_permitted
@@ -115,7 +116,7 @@ async def _out(s: AsyncSession, connection_id: uuid.UUID) -> ConnectionOut:
 
 @router.post(
     "/clients/{client_id}/connections", status_code=201, response_model=ConnectionOut,
-    openapi_extra=perm(P.CONNECTION_MANAGE),
+    openapi_extra=perm(P.CONNECTION_MANAGE, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
 )  # fmt: skip
 async def create_connection(
     client_id: uuid.UUID,
@@ -170,7 +171,7 @@ async def create_connection(
 
 @router.post(
     "/connections/{connection_id}/reauth", response_model=ConnectionOut,
-    openapi_extra=perm(P.CONNECTION_MANAGE),
+    openapi_extra=perm(P.CONNECTION_MANAGE, E.FORBIDDEN, E.NOT_FOUND),
 )  # fmt: skip
 async def reauthorize(
     connection_id: uuid.UUID,
@@ -212,7 +213,7 @@ async def reauthorize(
 
 @router.post(
     "/connections/{connection_id}/disable", response_model=ConnectionOut,
-    openapi_extra=perm(P.CONNECTION_MANAGE),
+    openapi_extra=perm(P.CONNECTION_MANAGE, E.FORBIDDEN, E.NOT_FOUND),
 )  # fmt: skip
 async def disable(
     connection_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
@@ -234,7 +235,7 @@ async def disable(
 
 @router.get(
     "/connections/{connection_id}", response_model=ConnectionOut,
-    openapi_extra=perm(P.CONNECTION_READ),
+    openapi_extra=perm(P.CONNECTION_READ, E.FORBIDDEN, E.NOT_FOUND),
 )  # fmt: skip
 async def get_connection(
     connection_id: uuid.UUID, caller: CallerDep, res: ResourcesDep
@@ -246,7 +247,7 @@ async def get_connection(
 
 @router.get(
     "/clients/{client_id}/connections", response_model=Page[ConnectionOut],
-    openapi_extra=perm(P.CONNECTION_READ),
+    openapi_extra=perm(P.CONNECTION_READ, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
 )  # fmt: skip
 async def list_client_connections(
     client_id: uuid.UUID,
@@ -262,7 +263,7 @@ async def list_client_connections(
 
 @router.get(
     "/matters/{matter_id}/connections", response_model=Page[ConnectionOut],
-    openapi_extra=perm(P.JOB_START),
+    openapi_extra=perm(P.JOB_START, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
 )  # fmt: skip
 async def list_matter_connections(
     matter_id: uuid.UUID,

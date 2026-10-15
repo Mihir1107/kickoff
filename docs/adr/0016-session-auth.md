@@ -703,3 +703,25 @@ while building:
    (`github.event.before`). A base without the document (this commit) passes with a printed note.
 
 Mutation round `m17-openapi`: 20 breaks, all caught.
+
+## Implementation note: every route declares its error codes (2026-10-15, before step 5)
+- **One registry:** `edisc_api.error_codes.E` (44 codes, one status each, a meaning). Each route
+  declares the codes ITS handler can answer in `openapi_extra` (`perm(P.X, E.NOT_FOUND, ...)`,
+  `public(...)`, `authenticated(...)`); `complete()` adds the codes implied by the operation's
+  shape (every operation: `internal_error`, `db_pool_exhausted`; parameters or a body:
+  `validation_error`; a body: `malformed_body`; authenticated: `unauthorized`,
+  `too_many_requests`, `ambiguous_credentials`, `cross_site`, and `csrf` on a state change; a
+  cursor: `cursor_mismatch`, `unprocessable`) and writes the full `x-error-codes` list and one
+  response per error status (`ErrorOut`; 422 keeps FastAPI's validation schema, of which our body
+  is a compatible superset) into the published document. The first declarations came from a
+  call-graph pass over the handlers (direct raises and helpers, transitively), reviewed by hand.
+- **Test-time check** (`tests/integration/api/error_check.py`, on every response of the API test
+  client): an error answer of a documented operation must carry a code (JSON `error`, or the
+  bounce page's `auth_error`), declared for that operation, with the registry's status. With it on,
+  the whole API suite passed after one product fix it found: **FastAPI's own body-parse refusal
+  answered 400 `{"detail": ...}` without a code** (the no-echo fuzzer's form bodies); Starlette's
+  and FastAPI's refusals now answer `malformed_body` (400), `not_found` (404) and
+  `method_not_allowed` (405) through `safe_errors`.
+- The compat rule `edisc-error-code-removed` now has real input; a test removes `not_found` from
+  `get_job` in the published document and the check reports exactly that.
+- Mutation round `m17-error-codes`: 8 breaks, all caught.

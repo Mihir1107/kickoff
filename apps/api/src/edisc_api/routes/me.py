@@ -14,7 +14,8 @@ from sqlalchemy import text
 from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, ResourcesDep
 from edisc_api.auth import Caller, require_recent_sign_in
-from edisc_api.authz import ROLE_PERMISSIONS, permissions
+from edisc_api.authz import ROLE_PERMISSIONS, authenticated, permissions
+from edisc_api.error_codes import E
 from edisc_api.errors import ApiError, not_found
 from edisc_api.pagination import (
     CursorQ,
@@ -30,7 +31,6 @@ from edisc_api.pagination import (
 from edisc_db.session import tenant_tx
 
 router = APIRouter(prefix="/v1")
-AUTHENTICATED = {"x-permission": "authenticated"}
 
 
 class Me(BaseModel):
@@ -42,7 +42,7 @@ class Me(BaseModel):
     issuer: str
 
 
-@router.get("/me", response_model=Me, openapi_extra=AUTHENTICATED)
+@router.get("/me", response_model=Me, openapi_extra=authenticated())
 async def me(caller: CallerDep) -> Me:
     return Me(
         principal_id=caller.principal_id,
@@ -81,7 +81,9 @@ def _session_out(row: Any, caller: Caller) -> SessionOut:
     return SessionOut(**{**row._mapping, "current": row.id == caller.session_id})
 
 
-@router.get("/me/sessions", response_model=Page[SessionOut], openapi_extra=AUTHENTICATED)
+@router.get(
+    "/me/sessions", response_model=Page[SessionOut], openapi_extra=authenticated(E.UNPROCESSABLE)
+)
 async def my_sessions(
     caller: CallerDep, res: ResourcesDep, cursor: CursorQ = None, limit: LimitQ = 50
 ) -> Page[SessionOut]:
@@ -101,7 +103,9 @@ async def my_sessions(
 
 
 @router.post(
-    "/me/sessions/{session_id}/revoke", response_model=SessionOut, openapi_extra=AUTHENTICATED
+    "/me/sessions/{session_id}/revoke",
+    response_model=SessionOut,
+    openapi_extra=authenticated(E.ALREADY_REVOKED, E.NOT_FOUND, E.REAUTH_REQUIRED),
 )
 async def revoke_my_session(
     session_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
@@ -156,7 +160,9 @@ NIL = uuid.UUID(int=0)  # the tenant scope's place in the keyset (it has no id)
 
 
 @router.get(
-    "/me/permissions", response_model=Page[ScopePermissionsOut], openapi_extra=AUTHENTICATED
+    "/me/permissions",
+    response_model=Page[ScopePermissionsOut],
+    openapi_extra=authenticated(E.UNPROCESSABLE),
 )
 async def my_permissions(
     caller: CallerDep, res: ResourcesDep, cursor: CursorQ = None, limit: LimitQ = 50
@@ -207,7 +213,7 @@ class RoleOut(BaseModel):
     permissions: list[str]
 
 
-@router.get("/roles", response_model=Page[RoleOut], openapi_extra=AUTHENTICATED)
+@router.get("/roles", response_model=Page[RoleOut], openapi_extra=authenticated(E.UNPROCESSABLE))
 async def roles(caller: CallerDep, cursor: CursorQ = None, limit: LimitQ = 50) -> Page[RoleOut]:
     """The fixed roles and what each grants, generated from `authz.ROLE_PERMISSIONS` (nothing else
     defines a role)."""

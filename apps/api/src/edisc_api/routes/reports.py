@@ -35,6 +35,7 @@ from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller, require_recent_sign_in
 from edisc_api.authz import P, Permission, Scope, authorize, perm
+from edisc_api.error_codes import E
 from edisc_api.errors import ApiError, RecordedText, conflict, not_found
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, page_of
 from edisc_core.ids import new_id
@@ -153,7 +154,15 @@ async def _report(
     "/jobs/{job_id}/reports",
     status_code=201,
     response_model=ReportOut,
-    openapi_extra=perm(P.REPORT_CREATE),
+    openapi_extra=perm(
+        P.REPORT_CREATE,
+        E.CLIENT_CLOSED,
+        E.FORBIDDEN,
+        E.JOB_NOT_SEALED,
+        E.MATTER_CLOSED,
+        E.NOT_FOUND,
+        E.REAUTH_REQUIRED,
+    ),
 )
 async def request_report(
     job_id: uuid.UUID, body: ReportIn, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
@@ -194,7 +203,9 @@ async def request_report(
 
 # ------------------------------------------------------------------ read
 @router.get(
-    "/jobs/{job_id}/reports", response_model=Page[ReportOut], openapi_extra=perm(P.REPORT_READ)
+    "/jobs/{job_id}/reports",
+    response_model=Page[ReportOut],
+    openapi_extra=perm(P.REPORT_READ, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
 )
 async def list_reports(
     job_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, cursor: CursorQ = None,
@@ -217,7 +228,11 @@ async def list_reports(
     return page_of([_out(r) for r in rows], limit, lambda r: r.id)
 
 
-@router.get("/reports/{report_id}", response_model=ReportOut, openapi_extra=perm(P.REPORT_READ))
+@router.get(
+    "/reports/{report_id}",
+    response_model=ReportOut,
+    openapi_extra=perm(P.REPORT_READ, E.FORBIDDEN, E.NOT_FOUND),
+)
 async def get_report(report_id: uuid.UUID, caller: CallerDep, res: ResourcesDep) -> ReportOut:
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         return _out(await _report(s, caller, P.REPORT_READ, report_id))
@@ -226,7 +241,7 @@ async def get_report(report_id: uuid.UUID, caller: CallerDep, res: ResourcesDep)
 @router.get(
     "/reports/{report_id}/files",
     response_model=list[ReportFileOut],
-    openapi_extra=perm(P.REPORT_READ),
+    openapi_extra=perm(P.REPORT_READ, E.FORBIDDEN, E.NOT_FOUND),
 )
 async def list_report_files(
     report_id: uuid.UUID, caller: CallerDep, res: ResourcesDep
@@ -251,7 +266,10 @@ async def list_report_files(
 
 
 # ------------------------------------------------------------------ download (always audited)
-@router.get("/reports/{report_id}/files/{name}/content", openapi_extra=perm(P.REPORT_READ))
+@router.get(
+    "/reports/{report_id}/files/{name}/content",
+    openapi_extra=perm(P.REPORT_READ, E.CONFLICT, E.FORBIDDEN, E.INTEGRITY, E.NOT_FOUND),
+)
 async def report_file_content(
     report_id: uuid.UUID, name: str, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
 ) -> StreamingResponse:
@@ -323,7 +341,10 @@ async def report_file_content(
     )
 
 
-@router.get("/reports/{report_id}/package", openapi_extra=perm(P.REPORT_READ))
+@router.get(
+    "/reports/{report_id}/package",
+    openapi_extra=perm(P.REPORT_READ, E.FORBIDDEN, E.NOT_FOUND, E.REPORT_NOT_SEALED),
+)
 async def report_package(
     report_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
 ) -> StreamingResponse:

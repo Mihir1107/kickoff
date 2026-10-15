@@ -15,10 +15,11 @@ from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from edisc_api.app import ResourcesDep
+from edisc_api.authz import public
+from edisc_api.error_codes import E
 from edisc_api.errors import ApiError
 
 router = APIRouter()
-PUBLIC = {"x-permission": "public"}
 CACHE = "public, max-age=300"
 
 
@@ -48,7 +49,7 @@ def _base_host_only(request: Request, res: ResourcesDep) -> None:
 
 @router.get(
     "/.well-known/edisc-client-jwks.json", response_model=JwksOut, response_model_by_alias=True,
-    openapi_extra=PUBLIC,
+    openapi_extra=public(E.NOT_FOUND),
 )  # fmt: skip
 async def client_jwks(request: Request, res: ResourcesDep, response: Response) -> JwksOut:
     _base_host_only(request, res)
@@ -57,7 +58,7 @@ async def client_jwks(request: Request, res: ResourcesDep, response: Response) -
 
 
 @router.get(
-    "/.well-known/edisc-client-cert.pem", response_class=Response, openapi_extra=PUBLIC,
+    "/.well-known/edisc-client-cert.pem", response_class=Response, openapi_extra=public(E.NOT_FOUND),
     responses={200: {"content": {"application/x-pem-file": {}}}},
 )  # fmt: skip
 async def client_certificate(request: Request, res: ResourcesDep) -> Response:

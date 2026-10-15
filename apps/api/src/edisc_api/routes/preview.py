@@ -29,6 +29,7 @@ from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller
 from edisc_api.authz import P, Scope, authorize, perm
+from edisc_api.error_codes import E
 from edisc_api.errors import ApiError, not_found
 from edisc_core.ids import new_id
 from edisc_db.session import tenant_tx
@@ -57,7 +58,19 @@ HEADERS = {
 }
 
 
-@router.get("/jobs/{job_id}/preview", openapi_extra=perm(P.EVIDENCE_READ))
+@router.get(
+    "/jobs/{job_id}/preview",
+    openapi_extra=perm(
+        P.EVIDENCE_READ,
+        E.FORBIDDEN,
+        E.JOB_NOT_SEALED,
+        E.NOT_FOUND,
+        E.NOT_IN_SCOPE,
+        E.PAGE_NOT_FOUND,
+        E.PREVIEW_INTEGRITY,
+        E.UNKNOWN_TIME_ZONE,
+    ),
+)
 async def preview(
     job_id: uuid.UUID,
     caller: CallerDep,

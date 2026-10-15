@@ -28,6 +28,7 @@ from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller
 from edisc_api.authz import P, Scope, authorize, perm
+from edisc_api.error_codes import E
 from edisc_api.errors import ApiError, not_found
 from edisc_core.ids import new_id
 from edisc_custody.job_export import (
@@ -43,7 +44,10 @@ from edisc_db.session import tenant_tx
 router = APIRouter(prefix="/v1")
 
 
-@router.get("/jobs/{job_id}/package", openapi_extra=perm(P.EXPORT_READ))
+@router.get(
+    "/jobs/{job_id}/package",
+    openapi_extra=perm(P.EXPORT_READ, E.FORBIDDEN, E.JOB_NOT_SEALED, E.NOT_FOUND),
+)
 async def job_package(
     job_id: uuid.UUID,
     caller: CallerDep,

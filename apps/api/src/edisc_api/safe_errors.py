@@ -38,9 +38,10 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.params import Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from edisc_core.logs import get_logger
@@ -255,6 +256,14 @@ def _request_id(scope: Scope) -> str | None:
     return rid if isinstance(rid, str) and _REQUEST_ID.match(rid) else None
 
 
+# the framework's own refusals, as registered codes (edisc_api.error_codes)
+HTTP_CODES = {
+    400: ("malformed_body", "the request body could not be parsed"),
+    404: ("not_found", "not found"),
+    405: ("method_not_allowed", "method not allowed"),
+}
+
+
 def install(app: FastAPI, routers: Iterable[Any]) -> None:
     """Register the validation handler and the outermost 500 middleware for ``app``. Call after
     every other middleware, so this one wraps them all."""
@@ -267,7 +276,17 @@ def install(app: FastAPI, routers: Iterable[Any]) -> None:
         errors = exc.errors() if isinstance(exc, RequestValidationError) else ()
         return JSONResponse(validation_error_body(errors, names), status_code=422)
 
+    async def _http_error(_: Request, exc: Exception) -> Response:
+        # Starlette's and FastAPI's own refusals (an unparsable body, no route, a method the path
+        # does not have) answer with a registered code and a fixed text, like every other error
+        status = exc.status_code if isinstance(exc, StarletteHTTPException) else 500
+        code, detail = HTTP_CODES.get(status, ("internal_error", "internal error"))
+        headers = getattr(exc, "headers", None)
+        return JSONResponse({"error": code, "detail": detail},
+                            status_code=status if status in HTTP_CODES else 500, headers=headers)  # fmt: skip
+
     app.add_exception_handler(RequestValidationError, _validation_error)
+    app.add_exception_handler(StarletteHTTPException, _http_error)
     app.add_middleware(SafeErrors, segments=lambda: segments)
 
 

@@ -18,6 +18,7 @@ from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, ResourcesDep
 from edisc_api.auth import require_recent_sign_in
 from edisc_api.authz import ROLES, TENANT, P, Scope, ancestors, authorize, perm
+from edisc_api.error_codes import E
 from edisc_api.errors import conflict, not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, page_of
 from edisc_core.ids import new_id
@@ -98,10 +99,12 @@ class AssignmentOut(Strict):
     revoked_by: str | None
 
 
-ADMIN = perm(P.TENANT_ADMIN)
-
-
-@router.post("/principals", status_code=201, response_model=PrincipalOut, openapi_extra=ADMIN)
+@router.post(
+    "/principals",
+    status_code=201,
+    response_model=PrincipalOut,
+    openapi_extra=perm(P.TENANT_ADMIN, E.CONFLICT, E.FORBIDDEN, E.NOT_FOUND),
+)
 async def create_principal(
     body: PrincipalIn, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
 ) -> PrincipalOut:
@@ -133,7 +136,9 @@ async def create_principal(
 
 
 @router.post(
-    "/principals/{principal_id}/deactivate", response_model=PrincipalOut, openapi_extra=ADMIN
+    "/principals/{principal_id}/deactivate",
+    response_model=PrincipalOut,
+    openapi_extra=perm(P.TENANT_ADMIN, E.FORBIDDEN, E.NOT_FOUND, E.REAUTH_REQUIRED),
 )
 async def deactivate_principal(
     principal_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
@@ -188,7 +193,7 @@ class SessionsRevokedOut(Strict):
 
 @router.post(
     "/principals/{principal_id}/sessions/revoke", response_model=SessionsRevokedOut,
-    openapi_extra=ADMIN,
+    openapi_extra=perm(P.TENANT_ADMIN, E.FORBIDDEN, E.NOT_FOUND, E.REAUTH_REQUIRED),
 )  # fmt: skip
 async def revoke_principal_sessions(
     principal_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
@@ -212,7 +217,11 @@ async def revoke_principal_sessions(
     return SessionsRevokedOut(principal_id=principal_id, revoked=ended)
 
 
-@router.get("/principals", response_model=Page[PrincipalOut], openapi_extra=ADMIN)
+@router.get(
+    "/principals",
+    response_model=Page[PrincipalOut],
+    openapi_extra=perm(P.TENANT_ADMIN, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
+)
 async def list_principals(
     caller: CallerDep, res: ResourcesDep, cursor: CursorQ = None, limit: LimitQ = 50
 ) -> Page[PrincipalOut]:
@@ -231,7 +240,12 @@ async def list_principals(
     return page_of([PrincipalOut(**r._mapping) for r in rows], limit, lambda p: p.id)
 
 
-@router.post("/groups", status_code=201, response_model=GroupOut, openapi_extra=ADMIN)
+@router.post(
+    "/groups",
+    status_code=201,
+    response_model=GroupOut,
+    openapi_extra=perm(P.TENANT_ADMIN, E.CONFLICT, E.FORBIDDEN, E.NOT_FOUND),
+)
 async def create_group(
     body: GroupIn, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
 ) -> GroupOut:
@@ -264,7 +278,11 @@ async def create_group(
     return GroupOut(**row._mapping)
 
 
-@router.get("/groups", response_model=Page[GroupOut], openapi_extra=ADMIN)
+@router.get(
+    "/groups",
+    response_model=Page[GroupOut],
+    openapi_extra=perm(P.TENANT_ADMIN, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
+)
 async def list_groups(
     caller: CallerDep, res: ResourcesDep, cursor: CursorQ = None, limit: LimitQ = 50
 ) -> Page[GroupOut]:
@@ -292,7 +310,11 @@ class MemberOut(Strict):
     removed_at: datetime | None
 
 
-@router.get("/groups/{group_id}/members", response_model=Page[MemberOut], openapi_extra=ADMIN)
+@router.get(
+    "/groups/{group_id}/members",
+    response_model=Page[MemberOut],
+    openapi_extra=perm(P.TENANT_ADMIN, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
+)
 async def list_members(
     group_id: uuid.UUID,
     caller: CallerDep,
@@ -324,7 +346,11 @@ async def list_members(
     return page_of([MemberOut(**r._mapping) for r in rows], limit, lambda m: m.id)
 
 
-@router.post("/groups/{group_id}/members", status_code=204, openapi_extra=ADMIN)
+@router.post(
+    "/groups/{group_id}/members",
+    status_code=204,
+    openapi_extra=perm(P.TENANT_ADMIN, E.CONFLICT, E.FORBIDDEN, E.NOT_FOUND, E.REAUTH_REQUIRED),
+)
 async def add_member(
     group_id: uuid.UUID, body: MemberIn, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
 ) -> None:
@@ -350,7 +376,9 @@ async def add_member(
 
 
 @router.post(
-    "/groups/{group_id}/members/{principal_id}/remove", status_code=204, openapi_extra=ADMIN
+    "/groups/{group_id}/members/{principal_id}/remove",
+    status_code=204,
+    openapi_extra=perm(P.TENANT_ADMIN, E.FORBIDDEN, E.NOT_FOUND, E.REAUTH_REQUIRED),
 )
 async def remove_member(
     group_id: uuid.UUID,
@@ -382,7 +410,12 @@ async def remove_member(
 
 
 @router.post(
-    "/role-assignments", status_code=201, response_model=AssignmentOut, openapi_extra=ADMIN
+    "/role-assignments",
+    status_code=201,
+    response_model=AssignmentOut,
+    openapi_extra=perm(
+        P.TENANT_ADMIN, E.FORBIDDEN, E.NOT_FOUND, E.REAUTH_REQUIRED, E.UNPROCESSABLE
+    ),
 )
 async def assign_role(
     body: AssignmentIn, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
@@ -424,7 +457,9 @@ async def assign_role(
 
 
 @router.post(
-    "/role-assignments/{assignment_id}/revoke", response_model=AssignmentOut, openapi_extra=ADMIN
+    "/role-assignments/{assignment_id}/revoke",
+    response_model=AssignmentOut,
+    openapi_extra=perm(P.TENANT_ADMIN, E.FORBIDDEN, E.NOT_FOUND, E.REAUTH_REQUIRED),
 )
 async def revoke_role(
     assignment_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
@@ -453,7 +488,11 @@ async def revoke_role(
     return AssignmentOut(**row._mapping)
 
 
-@router.get("/role-assignments", response_model=Page[AssignmentOut], openapi_extra=ADMIN)
+@router.get(
+    "/role-assignments",
+    response_model=Page[AssignmentOut],
+    openapi_extra=perm(P.TENANT_ADMIN, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
+)
 async def list_assignments(
     caller: CallerDep, res: ResourcesDep, cursor: CursorQ = None, limit: LimitQ = 50
 ) -> Page[AssignmentOut]:

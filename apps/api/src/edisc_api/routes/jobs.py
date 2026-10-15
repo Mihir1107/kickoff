@@ -37,6 +37,7 @@ from edisc_api.authz import (
     permissions,
     roles_at,
 )
+from edisc_api.error_codes import E
 from edisc_api.errors import RecordedText, conflict, not_found, unprocessable
 from edisc_api.pagination import (
     CursorQ,
@@ -373,7 +374,7 @@ async def _signal(res: Resources, job_id: uuid.UUID, signal: str) -> None:
     "/matters/{matter_id}/jobs",
     status_code=201,
     response_model=JobOut,
-    openapi_extra=perm(P.JOB_START),
+    openapi_extra=perm(P.JOB_START, E.CONFLICT, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
 )
 async def create_job(
     matter_id: uuid.UUID,
@@ -461,7 +462,9 @@ async def create_job(
 
 
 @router.get(
-    "/matters/{matter_id}/jobs", response_model=Page[JobOut], openapi_extra=perm(P.JOB_READ)
+    "/matters/{matter_id}/jobs",
+    response_model=Page[JobOut],
+    openapi_extra=perm(P.JOB_READ, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
 )
 async def list_jobs(
     matter_id: uuid.UUID,
@@ -522,7 +525,7 @@ LIST_JOBS = (
 )
 
 
-@router.get("/jobs", response_model=Page[JobOut], openapi_extra=perm(P.JOB_READ))
+@router.get("/jobs", response_model=Page[JobOut], openapi_extra=perm(P.JOB_READ, E.UNPROCESSABLE))
 async def list_all_jobs(
     caller: CallerDep,
     res: ResourcesDep,
@@ -574,7 +577,11 @@ async def list_all_jobs(
     return Page[JobOut](items=items, next_cursor=next_cursor)
 
 
-@router.get("/jobs/{job_id}", response_model=JobOut, openapi_extra=perm(P.JOB_READ))
+@router.get(
+    "/jobs/{job_id}",
+    response_model=JobOut,
+    openapi_extra=perm(P.JOB_READ, E.FORBIDDEN, E.NOT_FOUND),
+)
 async def get_job(job_id: uuid.UUID, caller: CallerDep, res: ResourcesDep) -> JobOut:
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await _authorize_job(s, caller, P.JOB_READ, job_id)
@@ -582,7 +589,11 @@ async def get_job(job_id: uuid.UUID, caller: CallerDep, res: ResourcesDep) -> Jo
 
 
 # ------------------------------------------------------------------ actions
-@router.post("/jobs/{job_id}/cancel", response_model=JobOut, openapi_extra=perm(P.JOB_CANCEL))
+@router.post(
+    "/jobs/{job_id}/cancel",
+    response_model=JobOut,
+    openapi_extra=perm(P.JOB_CANCEL, E.CONFLICT, E.FORBIDDEN, E.NOT_FOUND),
+)
 async def cancel_job(
     job_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
 ) -> JobOut:
@@ -603,7 +614,11 @@ async def cancel_job(
         return await _job_out(s, job_id)
 
 
-@router.post("/jobs/{job_id}/resume", response_model=JobOut, openapi_extra=perm(P.JOB_RESUME))
+@router.post(
+    "/jobs/{job_id}/resume",
+    response_model=JobOut,
+    openapi_extra=perm(P.JOB_RESUME, E.CONFLICT, E.FORBIDDEN, E.NOT_FOUND),
+)
 async def resume_job(
     job_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
 ) -> JobOut:
@@ -631,7 +646,10 @@ async def resume_job(
 
 
 @router.post(
-    "/jobs/{job_id}/rerun", status_code=201, response_model=JobOut, openapi_extra=perm(P.JOB_RERUN)
+    "/jobs/{job_id}/rerun",
+    status_code=201,
+    response_model=JobOut,
+    openapi_extra=perm(P.JOB_RERUN, E.CONFLICT, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
 )
 async def rerun_job(
     job_id: uuid.UUID,
@@ -691,7 +709,11 @@ UNIT_COLUMNS = (
 )
 
 
-@router.get("/jobs/{job_id}/units", response_model=Page[UnitOut], openapi_extra=perm(P.JOB_READ))
+@router.get(
+    "/jobs/{job_id}/units",
+    response_model=Page[UnitOut],
+    openapi_extra=perm(P.JOB_READ, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
+)
 async def list_units(
     job_id: uuid.UUID,
     caller: CallerDep,
@@ -722,7 +744,7 @@ async def list_units(
 @router.get(
     "/jobs/{job_id}/reconciliation",
     response_model=ReconciliationOut,
-    openapi_extra=perm(P.JOB_READ),
+    openapi_extra=perm(P.JOB_READ, E.FORBIDDEN, E.NOT_FOUND),
 )
 async def reconciliation(
     job_id: uuid.UUID, caller: CallerDep, res: ResourcesDep
@@ -753,7 +775,9 @@ async def reconciliation(
 
 
 @router.get(
-    "/jobs/{job_id}/custody/verify", response_model=VerifyOut, openapi_extra=perm(P.CUSTODY_READ)
+    "/jobs/{job_id}/custody/verify",
+    response_model=VerifyOut,
+    openapi_extra=perm(P.CUSTODY_READ, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
 )
 async def verify(job_id: uuid.UUID, caller: CallerDep, res: ResourcesDep) -> VerifyOut:
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
@@ -772,7 +796,9 @@ async def verify(job_id: uuid.UUID, caller: CallerDep, res: ResourcesDep) -> Ver
 
 
 # ------------------------------------------------------------------ evidence content (always audited)
-@router.get("/evidence/{evidence_id}/content", openapi_extra=perm(P.EVIDENCE_READ))
+@router.get(
+    "/evidence/{evidence_id}/content", openapi_extra=perm(P.EVIDENCE_READ, E.FORBIDDEN, E.NOT_FOUND)
+)
 async def evidence_content(
     evidence_id: uuid.UUID,
     caller: CallerDep,
@@ -849,7 +875,7 @@ EVENTS_PAGE_BYTES = 1 << 20  # a page ends early rather than carry more payload 
 @router.get(
     "/jobs/{job_id}/custody/events",
     response_model=Page[CustodyEventOut],
-    openapi_extra=perm(P.CUSTODY_READ),
+    openapi_extra=perm(P.CUSTODY_READ, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
 )
 async def custody_events(
     job_id: uuid.UUID,

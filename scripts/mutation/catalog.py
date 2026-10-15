@@ -79,6 +79,9 @@ Rounds (ADR 0015):
 - ``m17-openapi``: the published contract (M17 step 4): the drift check, unique operationIds named
   by function, every rule of the compatibility check (oasdiff's ERR findings, D9's downgrade, our
   own rules), the allow-list's four fields and no stale entry, the pinned oasdiff checksum.
+- ``m17-error-codes``: every route declares its error codes from one registry; the test-time
+  check fails an undeclared code, a wrong status or a code-less error; the framework's own refusals
+  carry codes; the compat rule ``edisc-error-code-removed`` on the published document.
 - ``m17-host-cookie``: the session cookie is host-only (``__Host-``, no ``Domain``) and a same-site
   request from a neighbouring subdomain is refused, both in real browsers (ADR 0016 §2).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
@@ -129,6 +132,9 @@ IDG = "apps/api/src/edisc_api/idp_groups.py"
 OAD = "apps/api/src/edisc_api/openapi_doc.py"
 ACS = "scripts/api_compat.py"
 UAC = "tests/unit/api/test_api_compat.py"
+ECK = "tests/integration/api/error_check.py"
+ECD = "apps/api/src/edisc_api/error_codes.py"
+UEC = "tests/unit/api/test_error_codes.py"
 TIG = "tests/integration/api/test_idp_groups.py"
 DC = "packages/connectors/dummy/src/edisc_connector_dummy/connector.py"
 ULG = "tests/unit/core/test_loopguard.py"
@@ -1457,6 +1463,27 @@ CATALOG: list[Mutation] = [
       "another_operation"),
     m("oasdiff_checksum_unchecked", "m17-openapi", ACS,
       "    if digest != OASDIFF_SHA256[plat]:\n", "    if False:\n", UAC, "another_checksum"),
+    # ------------------------------------------------------------------ error codes (before step 5)
+    m("error_check_skips_errors", "m17-error-codes", ECK, "        if response.status_code < 400:\n",
+      "        if response.status_code < 600:\n", UEC, "undeclared or another_status or without"),
+    m("error_check_any_code", "m17-error-codes", ECK, "        assert code in declared, (\n",
+      "        assert True, (\n", UEC, "undeclared"),
+    m("error_check_any_status", "m17-error-codes", ECK,
+      "        assert known.status == response.status_code, (\n", "        assert True, (\n", UEC,
+      "another_status"),
+    m("error_check_codeless_ok", "m17-error-codes", ECK,
+      "        assert code is not None, (\n", "        assert True, (\n", UEC, "without"),
+    m("implied_auth_codes_dropped", "m17-error-codes", ECD, "        codes.update(AUTHENTICATED)\n",
+      "        pass\n", UEC, "declared_code_with"),
+    m("unknown_code_accepted", "m17-error-codes", ECD, "            if unknown:\n",
+      "            if False:\n", UEC, "unknown_code"),
+    m("route_declaration_dropped", "m17-error-codes", JOBS,
+      "    openapi_extra=perm(P.JOB_READ, E.FORBIDDEN, E.NOT_FOUND),\n)\nasync def get_job",
+      "    openapi_extra=perm(P.JOB_READ, E.FORBIDDEN),\n)\nasync def get_job", UEC,
+      "removing_a_declared"),
+    m("framework_errors_uncoded", "m17-error-codes", "apps/api/src/edisc_api/safe_errors.py",
+      "    app.add_exception_handler(StarletteHTTPException, _http_error)\n", "", NOE,
+      "canary_in_any_route"),
     # ------------------------------------------------------------------ host-only session cookie
     Mutation("session_cookie_domain_wide", "m17-host-cookie", SESP, (
         ('SESSION_COOKIE = "__Host-edisc_session"', 'SESSION_COOKIE = "edisc_session"'),

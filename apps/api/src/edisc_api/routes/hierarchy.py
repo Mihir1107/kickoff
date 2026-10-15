@@ -15,6 +15,7 @@ from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller, require_recent_sign_in
 from edisc_api.authz import TENANT, P, Scope, authorize, perm, permissions, roles_at, visible_ids
+from edisc_api.error_codes import E
 from edisc_api.errors import conflict, forbidden, not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, page_of
 from edisc_core.ids import new_id
@@ -90,7 +91,10 @@ async def ensure_matter_open(s: AsyncSession, matter_id: uuid.UUID) -> None:
 
 # ------------------------------------------------------------------ clients
 @router.post(
-    "/clients", status_code=201, response_model=ClientOut, openapi_extra=perm(P.CLIENT_CREATE)
+    "/clients",
+    status_code=201,
+    response_model=ClientOut,
+    openapi_extra=perm(P.CLIENT_CREATE, E.FORBIDDEN, E.NOT_FOUND),
 )
 async def create_client(
     body: ClientIn, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
@@ -114,7 +118,9 @@ async def create_client(
     return ClientOut(**row._mapping)
 
 
-@router.get("/clients", response_model=Page[ClientOut], openapi_extra=perm("visible"))
+@router.get(
+    "/clients", response_model=Page[ClientOut], openapi_extra=perm("visible", E.UNPROCESSABLE)
+)
 async def list_clients(
     caller: CallerDep, res: ResourcesDep, cursor: CursorQ = None, limit: LimitQ = 50
 ) -> Page[ClientOut]:
@@ -139,7 +145,11 @@ async def list_clients(
     return page_of([ClientOut(**r._mapping) for r in rows], limit, lambda c: c.id)
 
 
-@router.get("/clients/{client_id}", response_model=ClientOut, openapi_extra=perm(P.CLIENT_READ))
+@router.get(
+    "/clients/{client_id}",
+    response_model=ClientOut,
+    openapi_extra=perm(P.CLIENT_READ, E.FORBIDDEN, E.NOT_FOUND),
+)
 async def get_client(client_id: uuid.UUID, caller: CallerDep, res: ResourcesDep) -> ClientOut:
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await authorize(s, caller, P.CLIENT_READ, Scope("client", client_id))
@@ -155,7 +165,7 @@ async def get_client(client_id: uuid.UUID, caller: CallerDep, res: ResourcesDep)
 # ------------------------------------------------------------------ matters
 @router.post(
     "/clients/{client_id}/matters", status_code=201, response_model=MatterOut,
-    openapi_extra=perm(P.MATTER_CREATE),
+    openapi_extra=perm(P.MATTER_CREATE, E.CONFLICT, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
 )  # fmt: skip
 async def create_matter(
     client_id: uuid.UUID, body: MatterIn, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
@@ -191,7 +201,9 @@ async def create_matter(
 
 
 @router.get(
-    "/clients/{client_id}/matters", response_model=Page[MatterOut], openapi_extra=perm("visible")
+    "/clients/{client_id}/matters",
+    response_model=Page[MatterOut],
+    openapi_extra=perm("visible", E.NOT_FOUND, E.UNPROCESSABLE),
 )
 async def list_matters(
     client_id: uuid.UUID,
@@ -236,7 +248,11 @@ async def list_matters(
     return page_of([MatterOut(**r._mapping) for r in rows], limit, lambda m: m.id)
 
 
-@router.get("/matters/{matter_id}", response_model=MatterOut, openapi_extra=perm(P.MATTER_READ))
+@router.get(
+    "/matters/{matter_id}",
+    response_model=MatterOut,
+    openapi_extra=perm(P.MATTER_READ, E.FORBIDDEN, E.NOT_FOUND),
+)
 async def get_matter(matter_id: uuid.UUID, caller: CallerDep, res: ResourcesDep) -> MatterOut:
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await authorize(s, caller, P.MATTER_READ, Scope("matter", matter_id))
@@ -251,7 +267,9 @@ async def get_matter(matter_id: uuid.UUID, caller: CallerDep, res: ResourcesDep)
 
 # ------------------------------------------------------------------ closing (retention ownership, ADR 0002)
 @router.post(
-    "/matters/{matter_id}/close", response_model=MatterOut, openapi_extra=perm(P.MATTER_CREATE)
+    "/matters/{matter_id}/close",
+    response_model=MatterOut,
+    openapi_extra=perm(P.MATTER_CREATE, E.CONFLICT, E.FORBIDDEN, E.NOT_FOUND, E.REAUTH_REQUIRED),
 )
 async def close_matter(
     matter_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
@@ -288,7 +306,9 @@ async def close_matter(
 
 
 @router.post(
-    "/clients/{client_id}/close", response_model=ClientOut, openapi_extra=perm(P.CLIENT_CREATE)
+    "/clients/{client_id}/close",
+    response_model=ClientOut,
+    openapi_extra=perm(P.CLIENT_CREATE, E.CONFLICT, E.FORBIDDEN, E.NOT_FOUND, E.REAUTH_REQUIRED),
 )
 async def close_client(
     client_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
@@ -358,7 +378,11 @@ async def _start_retention_run(res: Resources, tenant_id: uuid.UUID) -> None:
 
 
 @router.post(
-    "/matters/{matter_id}/reopen", response_model=MatterOut, openapi_extra=perm(P.TENANT_ADMIN)
+    "/matters/{matter_id}/reopen",
+    response_model=MatterOut,
+    openapi_extra=perm(
+        P.TENANT_ADMIN, E.CONFLICT, E.FORBIDDEN, E.NOT_FOUND, E.REAUTH_REQUIRED, E.UNPROCESSABLE
+    ),
 )
 async def reopen_matter(
     matter_id: uuid.UUID,
@@ -412,7 +436,9 @@ async def reopen_matter(
 
 
 @router.post(
-    "/clients/{client_id}/reopen", response_model=ClientOut, openapi_extra=perm(P.TENANT_ADMIN)
+    "/clients/{client_id}/reopen",
+    response_model=ClientOut,
+    openapi_extra=perm(P.TENANT_ADMIN, E.CONFLICT, E.FORBIDDEN, E.NOT_FOUND, E.REAUTH_REQUIRED),
 )
 async def reopen_client(
     client_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
@@ -462,7 +488,7 @@ async def _gaps(
 
 @router.get(
     "/matters/{matter_id}/retention-gaps", response_model=Page[RetentionGapOut],
-    openapi_extra=perm(P.CUSTODY_READ),
+    openapi_extra=perm(P.CUSTODY_READ, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
 )  # fmt: skip
 async def matter_retention_gaps(
     matter_id: uuid.UUID,
@@ -479,7 +505,7 @@ async def matter_retention_gaps(
 
 @router.get(
     "/clients/{client_id}/retention-gaps", response_model=Page[RetentionGapOut],
-    openapi_extra=perm(P.CUSTODY_READ),
+    openapi_extra=perm(P.CUSTODY_READ, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
 )  # fmt: skip
 async def client_retention_gaps(
     client_id: uuid.UUID,
@@ -497,7 +523,7 @@ async def client_retention_gaps(
 # ------------------------------------------------------------------ workspaces (modelled; no features yet)
 @router.post(
     "/matters/{matter_id}/workspaces", status_code=201, response_model=WorkspaceOut,
-    openapi_extra=perm(P.WORKSPACE_CREATE),
+    openapi_extra=perm(P.WORKSPACE_CREATE, E.FORBIDDEN, E.NOT_FOUND),
 )  # fmt: skip
 async def create_workspace(
     matter_id: uuid.UUID, body: WorkspaceIn, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
@@ -524,7 +550,7 @@ async def create_workspace(
 
 @router.get(
     "/matters/{matter_id}/workspaces", response_model=Page[WorkspaceOut],
-    openapi_extra=perm(P.MATTER_READ),
+    openapi_extra=perm(P.MATTER_READ, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
 )  # fmt: skip
 async def list_workspaces(
     matter_id: uuid.UUID,
