@@ -20,6 +20,9 @@ Run 38577569420 green on `43f41b4` (step 3); run 38536427956's failure on `4a8c0
 and fixed (below).
 
 ## Done: the groups claim, then M17 step 4 (2026-10-15, second session)
+**CI:** run 38734057961 green on `a6fa14c` (groups), run 38736314014 green on `9056361` (step 4,
+every job including the new `api-compat`, which printed "nothing to compare" for its first spec).
+
 **Groups claim (commit `a6fa14c`; ADR 0016 note "the groups claim is never read as no groups"; round
 `m17-groups` 6/6):** Entra's overage (`_claim_names`/`_claim_sources`, `hasgroups`) refuses the
 sign-in (`auth_error=groups_overage`, 403) and bearer tokens (generic 401) whatever the mapping; an
