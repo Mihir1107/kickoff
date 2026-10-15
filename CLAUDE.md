@@ -66,6 +66,11 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   only), never the query; `ApiError` details are fixed texts or server state, never a value the
   request sent; our validators raise `PydanticCustomError("edisc_...", "<static>")`; worker texts in
   answers are `RecordedText`. `test_no_echo.py` fuzzes every route from the OpenAPI document.
+- The contract (M17 step 4): `docs/api/openapi.json` is generated (`make openapi`) and committed with
+  every API change (a unit test and CI's `api-compat` job fail on drift); operationId = function name.
+  `scripts/api_compat.py` (pinned oasdiff + our rules) fails CI on a breaking change; an intended one
+  needs `/v2` or a `docs/api/breaking-allowlist.yaml` entry (rule, operation, reason, frontend commit).
+  A new response enum value is not breaking (D9).
 - Lists (M17 step 3): a cursor is bound to its route, path and filters (`pagination.bind_cursors`,
   app-wide; mismatch 422 `cursor_mismatch`). A list shows exactly what the matching GET would
   authorize (`GET /v1/jobs`: a `job.read` role at the job's matter, client or tenant, as a join on

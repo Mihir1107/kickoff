@@ -60,8 +60,9 @@ broken next to a `<name>.mutation-backup` copy: the runner refuses to start unti
 | `s24-pool-exhaustion` | a checkout beyond a fixed pool waits a bounded time, then 503 `db_pool_exhausted` (API) or a transient activity error (workers), never a hang | 5 |
 | `m17-client-auth` | `private_key_jwt` at the sign-in IdP: assertion claims, fresh `jti`, lifetime, sent at all, public client refused outside local/test/ci, discovery check, published keys, key work off the loop, each check of the test IdP (M17 step 3b) | 27 |
 | `m17-groups` | the IdP's groups claim is never "no groups": overage and an absent/malformed claim (roles depending on groups) refuse sign-in and bearer, audited, alerted once | 6 |
+| `m17-openapi` | the published contract: drift check, operationIds, every compatibility rule (oasdiff ERR, D9 downgrade, our rules), the allow-list, the pinned oasdiff checksum (M17 step 4) | 20 |
 
-423 entries: 160 unit, 259 integration, 4 image.
+443 entries: 180 unit, 259 integration, 4 image.
 
 The `s19-*` rounds were run by hand when they were built and only their categories were written
 down; the entries here re-create them against the current code.

@@ -15,6 +15,7 @@ import httpx
 import redis.asyncio as aioredis
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
@@ -191,6 +192,8 @@ def create_app(settings: Settings, resources: Resources | None = None) -> FastAP
     app = FastAPI(
         title="eDiscovery collection API", version="1", lifespan=lifespan,
         dependencies=[Depends(bind_cursors)],
+        # operationId = the route function's name: stable, and what generated clients are named by
+        generate_unique_id_function=operation_id,
     )  # fmt: skip
     if resources is not None:
         app.state.resources = resources
@@ -230,6 +233,10 @@ def create_app(settings: Settings, resources: Resources | None = None) -> FastAP
 
     install_safe_errors(app, register(app))  # last: its middleware wraps every other one
     return app
+
+
+def operation_id(route: APIRoute) -> str:
+    return route.name
 
 
 def resources(request: Request) -> Resources:

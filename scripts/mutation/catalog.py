@@ -76,6 +76,9 @@ Rounds (ADR 0015):
 - ``m17-groups``: the IdP's groups claim is never read as "no groups": Entra's overage and an absent
   or malformed claim (when roles depend on groups) refuse the sign-in and bearer tokens, audited and
   alerted once.
+- ``m17-openapi``: the published contract (M17 step 4): the drift check, unique operationIds named
+  by function, every rule of the compatibility check (oasdiff's ERR findings, D9's downgrade, our
+  own rules), the allow-list's four fields and no stale entry, the pinned oasdiff checksum.
 - ``m17-host-cookie``: the session cookie is host-only (``__Host-``, no ``Domain``) and a same-site
   request from a neighbouring subdomain is refused, both in real browsers (ADR 0016 §2).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
@@ -123,6 +126,9 @@ TIDP = "tests/integration/api/oidc.py"
 ICA = "tests/integration/api/test_client_auth.py"
 UCA = "tests/unit/api/test_client_auth.py"
 IDG = "apps/api/src/edisc_api/idp_groups.py"
+OAD = "apps/api/src/edisc_api/openapi_doc.py"
+ACS = "scripts/api_compat.py"
+UAC = "tests/unit/api/test_api_compat.py"
 TIG = "tests/integration/api/test_idp_groups.py"
 DC = "packages/connectors/dummy/src/edisc_connector_dummy/connector.py"
 ULG = "tests/unit/core/test_loopguard.py"
@@ -1397,6 +1403,60 @@ CATALOG: list[Mutation] = [
       "            refused = None\n", TIG, "bearer"),
     m("groups_alert_repeated", "m17-groups", IDG, '" WHERE NOT EXISTS (SELECT 1 FROM alerts WHERE kind = :k AND message = :m"',
       '" WHERE NOT EXISTS (SELECT 1 FROM alerts WHERE false AND message = :m"', TIG, "bearer_token_with"),
+    # ------------------------------------------------------------------ OpenAPI and compatibility
+    m("openapi_drift_unchecked", "m17-openapi", OAD, "        if current != text:\n",
+      "        if False:\n", UAC, "stale_document"),
+    m("openapi_duplicate_ids_allowed", "m17-openapi", OAD,
+      "    if dupes:\n        raise OpenApiError", "    if False:\n        raise OpenApiError", UAC,
+      "duplicate_operation_ids"),
+    m("openapi_permission_optional", "m17-openapi", OAD, "    if undeclared:\n", "    if False:\n",
+      UAC, "duplicate_operation_ids"),
+    m("operation_id_from_path", "m17-openapi", APPM,
+      "        generate_unique_id_function=operation_id,\n", "", UAC, "unique_function_name or matches_the_code"),
+    m("compat_err_ignored", "m17-openapi", ACS, "    for f in (f for f in findings if f.level >= ERR):",
+      "    for f in (f for f in findings if f.level > ERR):", UAC, "breaking_change_fails"),
+    m("compat_d9_not_applied", "m17-openapi", ACS,
+      'NOT_BREAKING = frozenset({"response-property-enum-value-added"})',
+      "NOT_BREAKING: frozenset[str] = frozenset()", UAC, "new_response_enum_value"),
+    m("compat_permission_rule_removed", "m17-openapi", ACS,
+      '        if old.get("x-permission") != cur.get("x-permission"):',
+      "        if False:", UAC, "x_permission_changed"),
+    m("compat_operation_id_rule_removed", "m17-openapi", ACS,
+      '        if oid != cur.get("operationId"):', "        if False:", UAC, "operation_id_changed"),
+    m("compat_error_code_rule_removed", "m17-openapi", ACS,
+      'for code in sorted(set(old.get("x-error-codes", [])) - set(cur.get("x-error-codes", []))):',
+      "for code in []:", UAC, "error_code_removed"),
+    m("compat_sse_rule_removed", "m17-openapi", ACS,
+      "            elif schemas[0].get(name) != schemas[1].get(name):",
+      "            elif False:", UAC, "sse_event_schema_changed"),
+    m("compat_status_rule_removed", "m17-openapi", ACS,
+      '                add("edisc-response-status-removed", f"response {status} removed")\n',
+      "                pass\n", UAC, "removed_response_status"),
+    m("compat_media_rule_removed", "m17-openapi", ACS,
+      'for media in sorted(set(response.get("content", {})) - set(now.get("content", {}))):',
+      "for media in []:", UAC, "media_type_changed"),
+    m("compat_property_rule_removed", "m17-openapi", ACS,
+      'for name in sorted(set(old.get("properties", {})) - set(cur.get("properties", {}))):',
+      "for name in []:", UAC, "removed_response_field"),
+    m("compat_enum_rule_removed", "m17-openapi", ACS,
+      'for value in [v for v in old.get("enum", []) if v not in cur.get("enum", [])]:',
+      "for value in []:", UAC, "response_enum_value_removed"),
+    m("compat_default_rule_removed", "m17-openapi", ACS,
+      '        if "default" in old and old.get("default") != cur.get("default"):',
+      "        if False:", UAC, "default_changed"),
+    m("allowlist_reason_optional", "m17-openapi", ACS,
+      'for k in ("rule", "operation", "reason", "frontend_commit")',
+      'for k in ("rule", "operation", "frontend_commit")', UAC, "all_four_fields"),
+    m("allowlist_commit_unchecked", "m17-openapi", ACS,
+      '        if not COMMIT.match(e["frontend_commit"]):', "        if False:", UAC, "commit_id"),
+    m("allowlist_stale_entry_ok", "m17-openapi", ACS,
+      "        return not self.breaking and not self.unused", "        return not self.breaking",
+      UAC, "matching_nothing or another_operation"),
+    m("allowlist_any_operation", "m17-openapi", ACS,
+      'if e["rule"] == f.id and f.matches(e["operation"])\n', 'if e["rule"] == f.id\n', UAC,
+      "another_operation"),
+    m("oasdiff_checksum_unchecked", "m17-openapi", ACS,
+      "    if digest != OASDIFF_SHA256[plat]:\n", "    if False:\n", UAC, "another_checksum"),
     # ------------------------------------------------------------------ host-only session cookie
     Mutation("session_cookie_domain_wide", "m17-host-cookie", SESP, (
         ('SESSION_COOKIE = "__Host-edisc_session"', 'SESSION_COOKIE = "edisc_session"'),

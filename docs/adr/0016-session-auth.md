@@ -662,3 +662,44 @@ silently lose every role granted through IdP groups. Decided by the user: refuse
   bearer; present and empty lists accepted; a mapped group without a role does not make groups
   required). The test helper's bearer tokens now carry `groups: []` by default, as a configured
   IdP's would. Mutation round `m17-groups`: 6 breaks, all caught.
+
+## Implementation notes: M17 step 4, the published contract and the compatibility check (2026-10-15)
+
+Built (`docs/plans/m17.md` §5, threat T26): `docs/api/openapi.json` (`make openapi`), the drift
+check (`make openapi-check`, and a unit test comparing byte for byte), `scripts/api_compat.py`
+(`make api-compat`), `docs/api/breaking-allowlist.yaml`, and the CI job `api-compat`. Choices made
+while building:
+1. **The document is the production build's, from fixed settings** (`Settings.model_construct(env=
+   production)`: no `.env`, no `EDISC_*` variable reaches it; a test changes them and gets the same
+   bytes). Sorted keys, two-space indent, final newline, no `servers`. It holds 77 operations today.
+   When step 6 removes the generic credential routes from production builds (A7), they leave this
+   document: that is a break the allow-list must name.
+2. **`operationId` = the route function's name** (`generate_unique_id_function`; FastAPI's default
+   embedded the path and method). Generation fails on a duplicate or on an operation without
+   `x-permission`. This renamed every operationId once, before any client was generated from them.
+3. **oasdiff 1.33.0, pinned by the SHA-256 of each release archive** (darwin, linux amd64),
+   downloaded once into `~/.cache/edisc` (`EDISC_TOOL_CACHE`), never taken from PATH; a download
+   with another checksum is refused before extraction.
+4. **What oasdiff 1.33.0 does not rate ERR, found by one fixture pair per rule of §5**
+   (`tests/unit/api/test_api_compat.py`, base `tests/unit/api/data/compat_base.json`): a removed
+   non-success response status, a removed OPTIONAL response field, a response enum value removed, a
+   changed default (parameter or body), a changed media type, and an operationId change were not
+   reported at all. Each is our rule (`edisc-response-status-removed`, `edisc-property-removed`
+   (any schema: a client sending a removed request field gets a 422, our models forbid extras),
+   `edisc-enum-value-removed`, `edisc-default-changed`, `edisc-media-type-removed`,
+   `edisc-operation-id-changed`). The other classes of §5 are oasdiff's own ERR findings, each
+   proven by its pair. oasdiff rates a NEW response enum value ERR
+   (`response-property-enum-value-added`): D9 makes it a warning (listed in the job summary, not
+   failing).
+5. **Our §5 rules:** `edisc-x-permission-changed`, `edisc-error-code-removed` (an operation's
+   `x-error-codes` list) and `edisc-sse-event-changed` (schemas an operation lists in
+   `x-sse-events`). **No route declares `x-error-codes` yet, and no SSE route exists before step 5:**
+   those two rules are tested on fixtures but inert on the real document until routes declare the
+   lists (step 5 declares its event schemas; documenting each route's error codes is not done).
+6. **The allow-list:** each entry needs `rule`, `operation` (operationId or `METHOD /path`; schema
+   findings use the schema location), `reason` and `frontend_commit` (a commit id). An entry missing
+   any, or matching no finding (stale), fails the check.
+7. **The base in CI:** a pull request compares with its merge base; a push with the previous head
+   (`github.event.before`). A base without the document (this commit) passes with a printed note.
+
+Mutation round `m17-openapi`: 20 breaks, all caught.

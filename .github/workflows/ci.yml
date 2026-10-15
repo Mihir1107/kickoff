@@ -55,6 +55,32 @@ jobs:
       # prove the integration shards (below) are a disjoint cover: every test runs exactly once
       - run: uv run python scripts/ci_shard.py --of 4 --verify
 
+  # the published API contract (M17 step 4, plan §5): docs/api/openapi.json matches the code (the
+  # unit job's drift test too), and nothing breaks against the base: oasdiff (pinned by checksum in
+  # scripts/api_compat.py) + our rules + the reviewed allow-list; the summary lists warnings (D9)
+  api-compat:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # the base commit's spec
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --all-packages --locked
+      - run: make openapi-check
+      - name: Compare with the base
+        env:
+          BEFORE: ${{ github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -n "$PR_BASE" ]; then base=$(git merge-base "$PR_BASE" HEAD)
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then base="$BEFORE"
+          else base=$(git rev-parse HEAD~1); fi
+          echo "base: $base"
+          uv run python scripts/api_compat.py --base-ref "$base"
+
   integration:
     runs-on: ubuntu-24.04
     needs: [lint, typecheck, unit]

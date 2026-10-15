@@ -1,4 +1,4 @@
-# Handoff (2026-10-15: pool exhaustion fails loudly, the never-loosen-a-guard rule, connection budget + PgBouncer in the BACKLOG; M17 step 3b (`private_key_jwt`) built; next: confirm 3b on real Entra/Okta tenants, then M17 step 4)
+# Handoff (2026-10-15: M17 step 3b approved; the groups claim never read as "no groups" (Entra overage); M17 step 4 (OpenAPI contract + compatibility check) built; next: M17 step 5 (SSE), real-tenant confirmation of 3b in parallel)
 
 This file alone is enough to continue. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisions §1-§18, notes
@@ -7,17 +7,42 @@ design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisi
 `docs/runs/2026-10-12-m16-complete.md`. Expert guide: `docs/VERIFYING.md`. Demo: `docs/DEMO.md`.
 **M17 plan: `docs/plans/m17.md`** (every decision taken: its §12; design changes in ADR 0016
 Amendments 1 and 2; build notes for steps 2, 3 and 3b at the end of ADR 0016). Steps 0, 2, 3 and 3b
-are built (3b awaits confirmation on real Entra and Okta tenants); step 4 is next; step 7 is on hold
-(legal review). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
+and 4 are built (3b approved by the user; its confirmation on real Entra and Okta tenants runs in
+parallel, the user is setting the tenants up); step 5 is next; step 7 is on hold (legal review). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
 
 ## Current state
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`.
-Migrations at head: **0038** (`tenant_idps.login_client_auth`). Renderer **1.3.2**, dummy connector **0.5.0**, normalizer
+Migrations at head: **0039** (login outcomes `groups_overage`, `groups_missing`). Renderer **1.3.2**, dummy connector **0.5.0**, normalizer
 **0.3.0**, report renderer **1.5.0**, preview renderer **1.0.0**. CI: run 38716016425 green on
 `5f0774e` (pool exhaustion, every job); run 38722400091 green on `4c0d513` (step 3b, every job;
 the unit job prints the real-IdP skips).
 Run 38577569420 green on `43f41b4` (step 3); run 38536427956's failure on `4a8c05f` is diagnosed
 and fixed (below).
+
+## Done: the groups claim, then M17 step 4 (2026-10-15, second session)
+**Groups claim (commit `a6fa14c`; ADR 0016 note "the groups claim is never read as no groups"; round
+`m17-groups` 6/6):** Entra's overage (`_claim_names`/`_claim_sources`, `hasgroups`) refuses the
+sign-in (`auth_error=groups_overage`, 403) and bearer tokens (generic 401) whatever the mapping; an
+absent or malformed claim refuses them (`groups_missing`) when roles depend on groups (a live role
+held by a group with an `external_id`); a present empty list is accepted. Audited
+(`authentication_refused`; `login_failed` for sign-ins), one alert per principal and reason while
+unacknowledged. Migration 0039. Test tokens (`TenantCtx.token`) now carry `groups: []` by default.
+BACKLOG: Graph group fetch on an overage. **Okta to confirm:** a filtered groups claim is omitted
+when nothing matches, which would refuse such users in a tenant with group-based roles.
+**A loop block diagnosed on the way (ADR 0015 §24.15):** async tests ran `edisc-verify` through a
+synchronous `subprocess.run` on their loop (8 files); the helpers now run in a thread. Test bug.
+
+**M17 step 4 (ADR 0016 "Implementation notes: M17 step 4"; round `m17-openapi` 20/20):**
+`docs/api/openapi.json` (`make openapi`; operationId = function name, generated from production
+settings independent of the environment), the drift check (`make openapi-check`, a unit test, CI job
+`api-compat`), `scripts/api_compat.py` (oasdiff 1.33.0 pinned by archive SHA-256 + our rules +
+`docs/api/breaking-allowlist.yaml`; `make api-compat BASE=<ref>`). Fixture pairs showed oasdiff 1.33
+silent on six §5 classes (non-success status removed, optional response field removed, response enum
+value removed, default changed, media type changed, operationId changed): our rules cover them; it
+rates a new response enum value ERR, downgraded to a warning (D9). **Inert until routes declare
+them:** the `x-error-codes` rule (no route documents its error codes) and the `x-sse-events` rule
+(step 5). Step 6 (A7) will remove the generic credential routes from this production document: an
+allow-list entry then.
 
 ## Done: before step 3b, then M17 step 3b (2026-10-15)
 **Before 3b (commit `5f0774e`, CI run 38716016425 green on every job):**
@@ -138,6 +163,10 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
   sign-in: the token is bound to the session) and is same-origin. Logout: `POST /v1/auth/logout`.
   Sessions: `GET /v1/me/sessions` (`current`, `live`), `POST /v1/me/sessions/{id}/revoke`.
 - `pending.ts`'s `CsrfOut` matches what shipped.
+- **The contract (step 4):** generate types from `docs/api/openapi.json` on `main`; operationIds are
+  the route function names (they changed once, from FastAPI's path-based ids, before any generated
+  client). A breaking change needs `/v2` or an allow-list entry naming the frontend commit that
+  absorbs it; new response enum values may appear at any time (render them as unknown).
 - **Step 3 reads:** `GET /v1/me/permissions` (a hint for showing controls; the API still decides),
   `GET /v1/roles`, `GET /v1/jobs` (filters `status`, `clean_basis`, `client_id`, `matter_id`,
   `connection_id`, `source`, `created_from/to`, `finished_from/to` with an explicit offset),
@@ -208,11 +237,11 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
   tenant); revocation cuts in-flight downloads; revoked tokens end as `access_lost` units.
 
 ## Next
-1. **Confirm step 3b on real tenants** when an Entra ID and an Okta developer tenant are available
-   (needs you: the tenants, an app registration each, `make test-real-idp`; record every answer in
-   ADR 0016 "To confirm on real tenants"; Entra's `auth_time` optional claim and groups overage are
-   the likeliest findings).
-2. Step 4 (OpenAPI + oasdiff), step 5 (SSE + `SessionWatch` + the download cut-off + the
+1. **Confirm step 3b on real tenants** (in parallel: the user is setting up the Entra ID and Okta
+   developer tenants; `make test-real-idp`; record every answer in ADR 0016 "To confirm on real
+   tenants"; Entra's `auth_time` optional claim and Okta's omitted groups claim are the likeliest
+   findings).
+2. Step 5 (SSE + `SessionWatch` + the download cut-off + the
 500-stream measurement), step 6 (install flows, migration 0040, the relay, the operator-only move
 CLI with its no-route test), step 8 (directory snapshots, `check-connections`, the pause deadline
 24 h..90 d). Step 7 waits for legal review.

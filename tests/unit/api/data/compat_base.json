@@ -1,0 +1,71 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "compat fixture", "version": "1"},
+  "paths": {
+    "/v1/things/{thing_id}": {
+      "get": {
+        "operationId": "get_thing",
+        "x-permission": "thing.read",
+        "x-error-codes": ["not_found", "gone"],
+        "parameters": [
+          {"name": "thing_id", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "limit", "in": "query", "required": false,
+           "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50}}
+        ],
+        "responses": {
+          "200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Thing"}}}},
+          "404": {"description": "not found"}
+        }
+      }
+    },
+    "/v1/things": {
+      "post": {
+        "operationId": "create_thing",
+        "x-permission": "thing.create",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ThingIn"}}}},
+        "responses": {
+          "201": {"description": "created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Thing"}}}}
+        }
+      }
+    },
+    "/v1/things/{thing_id}/stream": {
+      "get": {
+        "operationId": "stream_thing",
+        "x-permission": "thing.read",
+        "x-sse-events": ["ThingEvent"],
+        "parameters": [{"name": "thing_id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {"200": {"description": "events", "content": {"text/event-stream": {"schema": {"type": "string"}}}}}
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Thing": {
+        "type": "object",
+        "required": ["id", "status", "count"],
+        "properties": {
+          "id": {"type": "string"},
+          "status": {"type": "string", "enum": ["active", "done"]},
+          "count": {"type": "integer"},
+          "note": {"type": "string"}
+        }
+      },
+      "ThingIn": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": {"type": "string", "maxLength": 100},
+          "kind": {"type": "string", "enum": ["x", "y"]},
+          "size": {"type": ["integer", "null"], "minimum": 0},
+          "mode": {"type": "string", "default": "fast"},
+          "tag": {"type": "string"}
+        }
+      },
+      "ThingEvent": {
+        "type": "object",
+        "required": ["kind"],
+        "properties": {"kind": {"type": "string"}, "unit": {"type": "string"}}
+      }
+    }
+  }
+}

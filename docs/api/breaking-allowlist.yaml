@@ -1,0 +1,7 @@
+# Intended breaking API changes (scripts/api_compat.py, M17 plan §5). Each entry needs all four:
+#   - rule: the finding id (oasdiff's or edisc-...)
+#     operation: the operationId, or "METHOD /path" (schema findings: the schema location)
+#     reason: why the break is accepted
+#     frontend_commit: the feat/web-ui commit that absorbs it
+# An entry that matches no finding fails the check: remove it once its change has merged.
+[]
