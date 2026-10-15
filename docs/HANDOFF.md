@@ -14,7 +14,8 @@ are built (3b awaits confirmation on real Entra and Okta tenants); step 4 is nex
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`.
 Migrations at head: **0038** (`tenant_idps.login_client_auth`). Renderer **1.3.2**, dummy connector **0.5.0**, normalizer
 **0.3.0**, report renderer **1.5.0**, preview renderer **1.0.0**. CI: run 38716016425 green on
-`5f0774e` (pool exhaustion, every job); step 3b: see "Done: M17 step 3b" below for its run.
+`5f0774e` (pool exhaustion, every job); run 38722400091 green on `4c0d513` (step 3b, every job;
+the unit job prints the real-IdP skips).
 Run 38577569420 green on `43f41b4` (step 3); run 38536427956's failure on `4a8c05f` is diagnosed
 and fixed (below).
 
