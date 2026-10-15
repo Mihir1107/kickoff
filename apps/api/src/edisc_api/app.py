@@ -16,6 +16,7 @@ import redis.asyncio as aioredis
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
+from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
@@ -30,6 +31,7 @@ from edisc_api.pagination import bind_cursors
 from edisc_api.safe_errors import install as install_safe_errors
 from edisc_api.safe_errors import request_path
 from edisc_api.sessions import SESSION_COOKIE, Keyring
+from edisc_api.stream import JobFeeds, SessionWatch
 from edisc_connector_dummy.connector import DummyConnector
 from edisc_connector_dummy.guard import dummy_permitted, ensure_dummy_permitted
 from edisc_connector_slack_export.connector import SlackExportConnector
@@ -62,6 +64,8 @@ class Resources:
     keyring: Keyring | None = None  # CSRF and PKCE keys (default: from settings)
     # private_key_jwt at the IdPs' token endpoints (default: the platform keys of the settings)
     client_signer: ClientSigner | None = None
+    stream_feeds: JobFeeds | None = None  # the process's job streams (M17 step 5)
+    session_watch: SessionWatch | None = None
 
     def __post_init__(self) -> None:
         ensure_dummy_permitted(self.settings.env, self.connectors)
@@ -85,17 +89,43 @@ class Resources:
         return self.keyring
 
     @property
+    def streams(self) -> JobFeeds:
+        if self.stream_feeds is None:
+            self.stream_feeds = JobFeeds(self.sessions, self.settings.api_stream_poll_seconds)
+        return self.stream_feeds
+
+    @property
+    def watch(self) -> SessionWatch:
+        if self.session_watch is None:
+            self.session_watch = SessionWatch(
+                self.sessions, self.settings.api_stream_recheck_seconds
+            )
+        return self.session_watch
+
+    @property
     def signer(self) -> ClientSigner:
         if self.client_signer is None:
             raise RuntimeError("Resources.client_signer is set in __post_init__")
         return self.client_signer
 
 
+def redis_client(settings: Settings) -> aioredis.Redis:
+    """A FIXED, blocking pool: a burst of requests waits up to ``redis_pool_timeout_seconds`` for
+    a connection, then fails loudly (503 ``service_busy``). redis-py's default pool raised
+    ``MaxConnectionsError`` past 100 connections: an unhandled 500 for every request of a burst
+    (found by the 500-stream measurement, M17 step 5)."""
+    pool = aioredis.BlockingConnectionPool.from_url(
+        settings.redis_url, max_connections=settings.redis_max_connections,
+        timeout=settings.redis_pool_timeout_seconds, socket_connect_timeout=2, socket_timeout=5,
+    )  # fmt: skip
+    return aioredis.Redis(connection_pool=pool)
+
+
 @contextlib.asynccontextmanager
 async def build_resources(settings: Settings) -> AsyncIterator[Resources]:
     """Production wiring (tests build ``Resources`` from their own fixtures)."""
     engine = create_engine(settings, "app")
-    redis = aioredis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=5)
+    redis = redis_client(settings)
     http = httpx.AsyncClient()
     try:
         await warm_pool(engine)
@@ -170,7 +200,8 @@ def add_request_context(app: FastAPI) -> None:
             clear_context()
         response.headers["x-request-id"] = rid
         if SESSION_COOKIE in request.cookies:  # never cached, never shared (ADR 0016 §2)
-            response.headers["cache-control"] = "no-store"
+            if "no-store" not in response.headers.get("cache-control", ""):
+                response.headers["cache-control"] = "no-store"
             vary = response.headers.get("vary")
             response.headers["vary"] = f"{vary}, Cookie" if vary else "Cookie"
         return response
@@ -214,6 +245,16 @@ def create_app(settings: Settings, resources: Resources | None = None) -> FastAP
         return JSONResponse(
             {"error": exc.code, "detail": exc.detail, **exc.extra}, status_code=exc.status
         )
+
+    @app.exception_handler(RedisConnectionError)
+    async def _redis_unavailable(request: Request, _: RedisConnectionError) -> JSONResponse:
+        # the authentication throttle and the rate limiter: no connection within the bounded wait,
+        # or Redis unreachable. Loud and retryable, never an unhandled 500
+        log.error("redis unavailable", path=request_path(request))
+        return JSONResponse(
+            {"error": "service_busy", "detail": "the service is busy; retry shortly"},
+            status_code=503, headers={"Retry-After": "1"},
+        )  # fmt: skip
 
     @app.exception_handler(PoolTimeoutError)
     async def _pool_exhausted(request: Request, _: PoolTimeoutError) -> JSONResponse:

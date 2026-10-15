@@ -9,6 +9,7 @@ cannot drift from what the routes answer. A path or method no operation document
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass
@@ -21,6 +22,11 @@ from edisc_api.error_codes import REGISTRY, complete
 
 BOUNCE = re.compile(r"auth_error=([a-z_]+)")
 METHODS = ("get", "put", "post", "delete", "patch", "head", "options")
+_SHARED: ErrorCodeCheck | None = None
+
+
+def SHARED() -> ErrorCodeCheck | None:  # noqa: N802 (reads like the constant it returns)
+    return _SHARED
 
 
 @dataclass
@@ -45,6 +51,16 @@ class ErrorCodeCheck:
         # static segments win over templates (a literal path before a parameterised one)
         ops.sort(key=lambda o: o[1].pattern.count("[^/]+"))
         return cls(ops)
+
+    @classmethod
+    async def shared(cls, app: FastAPI) -> ErrorCodeCheck:
+        """One index per test process, built in a THREAD: generating the document is ~400 ms of
+        CPU, and on the loop it made the loop guard fire (ADR 0015 §24.16). Every app the tests
+        build has the same routes, so one index serves them all."""
+        global _SHARED
+        if _SHARED is None:
+            _SHARED = await asyncio.to_thread(cls.for_app, app)
+        return _SHARED
 
     def operation(self, method: str, path: str) -> dict[str, Any] | None:
         return next((op for m, p, op in self.operations if m == method and p.match(path)), None)

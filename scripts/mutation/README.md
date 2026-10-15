@@ -57,13 +57,14 @@ broken next to a `<name>.mutation-backup` copy: the runner refuses to start unti
 | `m17-d11` | no error path echoes a request value: sanitised 422s, fixed 500s, value-free log lines, uvicorn's access log off, hidden statement parameters, redacted worker texts, route refusals (ADR 0016 A8, M17 step 0) | 17 |
 | `m17-sessions` | browser sessions: fixation, expiries, revocation, cookie flags, one credential, CSRF, fetch metadata, single-use state, nonce, `return_to`, re-authentication, the bounce page in real browsers, recent sign-in, guard triggers (ADR 0016; M17 step 2) | 35 |
 | `m17-logs` | every test asserting on log output reads the production pipeline and proves its lines arrived (the sweep before M17 step 2) | 7 |
-| `s24-pool-exhaustion` | a checkout beyond a fixed pool waits a bounded time, then 503 `db_pool_exhausted` (API) or a transient activity error (workers), never a hang | 5 |
+| `s24-pool-exhaustion` | a checkout beyond a fixed pool (database or the API's Redis) waits a bounded time, then 503 `db_pool_exhausted` / `service_busy` (API) or a transient activity error (workers), never a hang | 8 |
 | `m17-client-auth` | `private_key_jwt` at the sign-in IdP: assertion claims, fresh `jti`, lifetime, sent at all, public client refused outside local/test/ci, discovery check, published keys, key work off the loop, each check of the test IdP (M17 step 3b) | 27 |
 | `m17-groups` | the IdP's groups claim is never "no groups": overage and an absent/malformed claim (roles depending on groups) refuse sign-in and bearer, audited, alerted once | 6 |
 | `m17-openapi` | the published contract: drift check, operationIds, every compatibility rule (oasdiff ERR, D9 downgrade, our rules), the allow-list, the pinned oasdiff checksum (M17 step 4) | 20 |
 | `m17-error-codes` | every route declares its codes from one registry; the test-time check (undeclared code, wrong status, no code); framework refusals coded; the compat rule on the real document | 8 |
+| `m17-stream` | the job stream: re-checks (session, principal, permission), passive authentication, Last-Event-ID without misses or repeats, the bounded queue and slow_consumer, sealed and lifetime ends, the per-principal cap, import and SQL boundaries, no evidence content, the SSE compat rule, the signing key loaded off the loop, no subscriber or connection left by a disconnect (M17 step 5) | 16 |
 
-451 entries: 187 unit, 260 integration, 4 image.
+470 entries: 189 unit, 277 integration, 4 image.
 
 The `s19-*` rounds were run by hand when they were built and only their categories were written
 down; the entries here re-create them against the current code.

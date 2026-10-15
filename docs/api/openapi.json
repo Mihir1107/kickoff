@@ -437,6 +437,33 @@
         "title": "CustodyEventOut",
         "type": "object"
       },
+      "EndEvent": {
+        "additionalProperties": false,
+        "description": "``event: end`` -- the last event of a stream, then the server closes it.",
+        "properties": {
+          "reason": {
+            "$ref": "#/components/schemas/EndReason"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "EndEvent",
+        "type": "object"
+      },
+      "EndReason": {
+        "enum": [
+          "sealed",
+          "session_revoked",
+          "session_expired",
+          "principal_deactivated",
+          "permission_lost",
+          "slow_consumer",
+          "lifetime"
+        ],
+        "title": "EndReason",
+        "type": "string"
+      },
       "EpisodeOut": {
         "additionalProperties": false,
         "properties": {
@@ -901,6 +928,64 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "JobEvent": {
+        "additionalProperties": false,
+        "description": "``event: job`` -- the job's state now.",
+        "properties": {
+          "clean": {
+            "title": "Clean",
+            "type": "boolean"
+          },
+          "clean_basis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Clean Basis"
+          },
+          "paused": {
+            "title": "Paused",
+            "type": "boolean"
+          },
+          "sealed": {
+            "title": "Sealed",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "units_by_recon_status": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Units By Recon Status",
+            "type": "object"
+          },
+          "units_by_status": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Units By Status",
+            "type": "object"
+          }
+        },
+        "required": [
+          "status",
+          "clean",
+          "clean_basis",
+          "sealed",
+          "paused",
+          "units_by_status",
+          "units_by_recon_status"
+        ],
+        "title": "JobEvent",
         "type": "object"
       },
       "JobIn": {
@@ -3489,6 +3574,86 @@
         "title": "UnitOut",
         "type": "object"
       },
+      "UnitState": {
+        "additionalProperties": false,
+        "properties": {
+          "collected_count": {
+            "title": "Collected Count",
+            "type": "integer"
+          },
+          "conversation_id": {
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "day": {
+            "format": "date",
+            "title": "Day",
+            "type": "string"
+          },
+          "expected_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Count"
+          },
+          "file_gaps": {
+            "title": "File Gaps",
+            "type": "integer"
+          },
+          "recon_status": {
+            "title": "Recon Status",
+            "type": "string"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "unit_key": {
+            "title": "Unit Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "unit_key",
+          "conversation_id",
+          "day",
+          "status",
+          "recon_status",
+          "expected_count",
+          "collected_count",
+          "file_gaps"
+        ],
+        "title": "UnitState",
+        "type": "object"
+      },
+      "UnitsEvent": {
+        "additionalProperties": false,
+        "description": "``event: units`` -- units the chain recorded as settled (reconciled or failed), in chain\norder, at most ``MAX_UNITS`` per event.",
+        "properties": {
+          "units": {
+            "items": {
+              "$ref": "#/components/schemas/UnitState"
+            },
+            "title": "Units",
+            "type": "array"
+          }
+        },
+        "required": [
+          "units"
+        ],
+        "title": "UnitsEvent",
+        "type": "object"
+      },
       "UploadInfo": {
         "additionalProperties": false,
         "properties": {
@@ -3700,14 +3865,15 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Client Certificate",
         "x-error-codes": [
           "db_pool_exhausted",
           "internal_error",
-          "not_found"
+          "not_found",
+          "service_busy"
         ],
         "x-permission": "public"
       }
@@ -3754,14 +3920,15 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Client Jwks",
         "x-error-codes": [
           "db_pool_exhausted",
           "internal_error",
-          "not_found"
+          "not_found",
+          "service_busy"
         ],
         "x-permission": "public"
       }
@@ -3898,7 +4065,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Callback",
@@ -3912,6 +4079,7 @@
           "internal_error",
           "invalid",
           "reauth_mismatch",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unknown_user",
@@ -3992,7 +4160,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Csrf",
@@ -4002,6 +4170,7 @@
           "db_pool_exhausted",
           "internal_error",
           "not_a_session",
+          "service_busy",
           "too_many_requests",
           "unauthorized"
         ],
@@ -4111,7 +4280,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Login",
@@ -4121,6 +4290,7 @@
           "internal_error",
           "invalid",
           "invalid_return_to",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -4193,7 +4363,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Logout",
@@ -4204,6 +4374,7 @@
           "db_pool_exhausted",
           "internal_error",
           "not_a_session",
+          "service_busy",
           "too_many_requests",
           "unauthorized"
         ],
@@ -4324,7 +4495,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "List Clients",
@@ -4334,6 +4505,7 @@
           "cursor_mismatch",
           "db_pool_exhausted",
           "internal_error",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -4442,7 +4614,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Create Client",
@@ -4455,6 +4627,7 @@
           "internal_error",
           "malformed_body",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -4566,7 +4739,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Get Client",
@@ -4577,6 +4750,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -4699,7 +4873,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Close Client",
@@ -4713,6 +4887,7 @@
           "internal_error",
           "not_found",
           "reauth_required",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -4854,7 +5029,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "List Client Connections",
@@ -4866,6 +5041,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -4986,7 +5162,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Create Connection",
@@ -4999,6 +5175,7 @@
           "internal_error",
           "malformed_body",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -5141,7 +5318,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "List Exports",
@@ -5153,6 +5330,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -5293,7 +5471,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Create Export",
@@ -5309,6 +5487,7 @@
           "malformed_body",
           "not_found",
           "reauth_required",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -5450,7 +5629,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "List Matters",
@@ -5461,6 +5640,7 @@
           "db_pool_exhausted",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -5591,7 +5771,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Create Matter",
@@ -5605,6 +5785,7 @@
           "internal_error",
           "malformed_body",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -5728,7 +5909,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Reopen Client",
@@ -5742,6 +5923,7 @@
           "internal_error",
           "not_found",
           "reauth_required",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -5884,7 +6066,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Client Retention Gaps",
@@ -5896,6 +6078,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -6008,7 +6191,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Get Connection",
@@ -6019,6 +6202,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -6130,7 +6314,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Disable",
@@ -6142,6 +6326,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -6263,7 +6448,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Reauthorize",
@@ -6276,6 +6461,7 @@
           "internal_error",
           "malformed_body",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -6401,7 +6587,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Evidence Content",
@@ -6412,6 +6598,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -6523,7 +6710,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Get Export",
@@ -6534,6 +6721,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -6665,7 +6853,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Complete Export",
@@ -6679,6 +6867,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -6831,7 +7020,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Upload Part",
@@ -6847,6 +7036,7 @@
           "missing_digest",
           "not_found",
           "part_too_large",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -6980,7 +7170,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "List Groups",
@@ -6992,6 +7182,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -7110,7 +7301,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Create Group",
@@ -7124,6 +7315,7 @@
           "internal_error",
           "malformed_body",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -7276,7 +7468,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "List Members",
@@ -7288,6 +7480,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -7411,7 +7604,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Add Member",
@@ -7426,6 +7619,7 @@
           "malformed_body",
           "not_found",
           "reauth_required",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -7540,7 +7734,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Remove Member",
@@ -7553,6 +7747,7 @@
           "internal_error",
           "not_found",
           "reauth_required",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -7848,7 +8043,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "List All Jobs",
@@ -7858,6 +8053,7 @@
           "cursor_mismatch",
           "db_pool_exhausted",
           "internal_error",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -7970,7 +8166,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Get Job",
@@ -7981,6 +8177,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -8102,7 +8299,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Cancel Job",
@@ -8115,6 +8312,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -8257,7 +8455,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Custody Events",
@@ -8269,6 +8467,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -8381,7 +8580,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Verify",
@@ -8392,6 +8591,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -8540,7 +8740,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Job Package",
@@ -8552,6 +8752,7 @@
           "internal_error",
           "job_not_sealed",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -8716,7 +8917,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Preview",
@@ -8731,6 +8932,7 @@
           "not_in_scope",
           "page_not_found",
           "preview_integrity",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unknown_time_zone",
@@ -8843,7 +9045,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Reconciliation",
@@ -8854,6 +9056,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -8995,7 +9198,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "List Renders",
@@ -9007,6 +9210,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -9154,7 +9358,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Create Render Route",
@@ -9172,6 +9376,7 @@
           "matter_closed",
           "not_found",
           "reauth_required",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -9315,7 +9520,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "List Reports",
@@ -9327,6 +9532,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -9457,7 +9663,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Request Report",
@@ -9474,6 +9680,7 @@
           "matter_closed",
           "not_found",
           "reauth_required",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -9613,7 +9820,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Rerun Job",
@@ -9626,6 +9833,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -9749,7 +9957,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Resume Job",
@@ -9762,11 +9970,161 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
         ],
         "x-permission": "job.resume"
+      }
+    },
+    "/v1/jobs/{job_id}/stream": {
+      "get": {
+        "description": "Server-Sent Events of one job: its state, units as the chain settles them, and a final\n``end`` with the reason (edisc_api.stream). ``job.read``; re-checked while open.",
+        "operationId": "stream_job",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Last-Event-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "events: job, units, end (edisc_api.stream_events)"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: ambiguous_credentials"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: cross_site, forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: not_found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "error: validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: too_many_requests, too_many_streams"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: db_pool_exhausted, service_busy"
+          }
+        },
+        "summary": "Stream Job",
+        "x-error-codes": [
+          "ambiguous_credentials",
+          "cross_site",
+          "db_pool_exhausted",
+          "forbidden",
+          "internal_error",
+          "not_found",
+          "service_busy",
+          "too_many_requests",
+          "too_many_streams",
+          "unauthorized",
+          "validation_error"
+        ],
+        "x-permission": "job.read",
+        "x-sse-events": [
+          "EndEvent",
+          "EndReason",
+          "JobEvent",
+          "UnitState",
+          "UnitsEvent"
+        ]
       }
     },
     "/v1/jobs/{job_id}/units": {
@@ -9903,7 +10261,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "List Units",
@@ -9915,6 +10273,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -10027,7 +10386,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Get Matter",
@@ -10038,6 +10397,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -10160,7 +10520,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Close Matter",
@@ -10174,6 +10534,7 @@
           "internal_error",
           "not_found",
           "reauth_required",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -10316,7 +10677,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "List Matter Connections",
@@ -10328,6 +10689,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -10470,7 +10832,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "List Jobs",
@@ -10482,6 +10844,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -10629,7 +10992,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Create Job",
@@ -10643,6 +11006,7 @@
           "internal_error",
           "malformed_body",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -10783,7 +11147,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Reopen Matter",
@@ -10798,6 +11162,7 @@
           "malformed_body",
           "not_found",
           "reauth_required",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -10941,7 +11306,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Matter Retention Gaps",
@@ -10953,6 +11318,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -11095,7 +11461,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "List Workspaces",
@@ -11107,6 +11473,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -11227,7 +11594,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Create Workspace",
@@ -11240,6 +11607,7 @@
           "internal_error",
           "malformed_body",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -11319,7 +11687,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Me",
@@ -11328,6 +11696,7 @@
           "cross_site",
           "db_pool_exhausted",
           "internal_error",
+          "service_busy",
           "too_many_requests",
           "unauthorized"
         ],
@@ -11449,7 +11818,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "My Permissions",
@@ -11459,6 +11828,7 @@
           "cursor_mismatch",
           "db_pool_exhausted",
           "internal_error",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -11582,7 +11952,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "My Sessions",
@@ -11592,6 +11962,7 @@
           "cursor_mismatch",
           "db_pool_exhausted",
           "internal_error",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -11715,7 +12086,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Revoke My Session",
@@ -11728,6 +12099,7 @@
           "internal_error",
           "not_found",
           "reauth_required",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -11859,7 +12231,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "List Principals",
@@ -11871,6 +12243,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -11989,7 +12362,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Create Principal",
@@ -12003,6 +12376,7 @@
           "internal_error",
           "malformed_body",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -12114,7 +12488,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Deactivate Principal",
@@ -12127,6 +12501,7 @@
           "internal_error",
           "not_found",
           "reauth_required",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -12238,7 +12613,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Revoke Principal Sessions",
@@ -12251,6 +12626,7 @@
           "internal_error",
           "not_found",
           "reauth_required",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -12362,7 +12738,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Get Render",
@@ -12373,6 +12749,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -12484,7 +12861,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Verify Render",
@@ -12495,6 +12872,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -12636,7 +13014,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "List Render Files",
@@ -12648,6 +13026,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -12779,7 +13158,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Render File Content",
@@ -12792,6 +13171,7 @@
           "integrity",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -12933,7 +13313,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "List Render Natives",
@@ -12945,6 +13325,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -13076,7 +13457,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Render Native Content",
@@ -13089,6 +13470,7 @@
           "integrity",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -13223,7 +13605,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Render Package",
@@ -13235,6 +13617,7 @@
           "internal_error",
           "not_found",
           "render_not_sealed",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -13346,7 +13729,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Get Report",
@@ -13357,6 +13740,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -13473,7 +13857,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "List Report Files",
@@ -13484,6 +13868,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -13613,7 +13998,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Report File Content",
@@ -13626,6 +14011,7 @@
           "integrity",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -13746,7 +14132,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Report Package",
@@ -13758,6 +14144,7 @@
           "internal_error",
           "not_found",
           "report_not_sealed",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -13889,7 +14276,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "List Assignments",
@@ -13901,6 +14288,7 @@
           "forbidden",
           "internal_error",
           "not_found",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -14009,7 +14397,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Assign Role",
@@ -14023,6 +14411,7 @@
           "malformed_body",
           "not_found",
           "reauth_required",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",
@@ -14135,7 +14524,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Revoke Role",
@@ -14148,6 +14537,7 @@
           "internal_error",
           "not_found",
           "reauth_required",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "validation_error"
@@ -14270,7 +14660,7 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted"
+            "description": "error: db_pool_exhausted, service_busy"
           }
         },
         "summary": "Roles",
@@ -14280,6 +14670,7 @@
           "cursor_mismatch",
           "db_pool_exhausted",
           "internal_error",
+          "service_busy",
           "too_many_requests",
           "unauthorized",
           "unprocessable",

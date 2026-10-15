@@ -72,6 +72,11 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   `scripts/api_compat.py` (pinned oasdiff + our rules) fails CI on a breaking change; an intended one
   needs `/v2` or a `docs/api/breaking-allowlist.yaml` entry (rule, operation, reason, frontend commit).
   A new response enum value is not breaking (D9).
+- Job streams (M17 step 5, `edisc_api.stream`): only the models of `edisc_api.stream_events`, only
+  the statements in `stream.STATEMENTS`, nothing that reads evidence; ids follow the job's chain
+  (no missed or repeated units across `Last-Event-ID`); passive authentication (never extends a
+  session), re-checked <= 15 s; bounded per-subscriber queues (overflow ends with `slow_consumer`).
+  A change to an event schema breaks `api_compat` (`x-sse-events`).
 - Lists (M17 step 3): a cursor is bound to its route, path and filters (`pagination.bind_cursors`,
   app-wide; mismatch 422 `cursor_mismatch`). A list shows exactly what the matching GET would
   authorize (`GET /v1/jobs`: a `job.read` role at the job's matter, client or tenant, as a join on

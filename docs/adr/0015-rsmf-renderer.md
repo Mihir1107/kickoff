@@ -1299,3 +1299,13 @@ what was done and why.
     `<name>_blocking` plus an async `<name>` running it in a thread (`asyncio.to_thread`); async tests
     await it, sync tests call the blocking one. `loopblock` deliberately excuses synchronous tools a
     TEST drives on the loop (origin `test`), so it was not extended. Nothing was loosened.
+16. **The error-code check blocked the test's own loop (2026-10-15, diagnosed, test bug of this
+    session).** The full local suite failed `test_packages_with_natives_verify_as_downloaded` once:
+    a 252 ms block, sampled in a non-blocking Redis send ("idle") while the loop's thread was
+    measured busy (296 ms of CPU). Not reproduced in 11 runs (6 under 4-core contention); report
+    mode at 50 ms over the file showed the CPU: `ErrorCodeCheck.for_app` (the test-time error-code
+    check, new this session) generated the whole OpenAPI document (~400 ms) on the loop the first
+    time each test's API client was built. Fix (tests only): the index is built once per process,
+    in a thread, in `make_api` (`ErrorCodeCheck.shared`); after it, report mode shows no block from
+    it. Nothing was loosened. Seen in the same report (older, test-origin, not counted as failures
+    there): the dev IdP key's first parse and the dummy dataset's file bytes in a test body.

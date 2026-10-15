@@ -1,4 +1,4 @@
-# Handoff (2026-10-15: M17 step 3b approved; the groups claim never read as "no groups" (Entra overage); M17 step 4 (OpenAPI contract + compatibility check) built; next: M17 step 5 (SSE), real-tenant confirmation of 3b in parallel)
+# Handoff (2026-10-15: every route's error codes from one registry, checked at test time; M17 step 5 (job streams, SSE) built; the 500-stream measurement; next: M17 step 5b (download cut-off on revocation), real-tenant confirmation of 3b in parallel)
 
 This file alone is enough to continue. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisions §1-§18, notes
@@ -7,8 +7,9 @@ design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisi
 `docs/runs/2026-10-12-m16-complete.md`. Expert guide: `docs/VERIFYING.md`. Demo: `docs/DEMO.md`.
 **M17 plan: `docs/plans/m17.md`** (every decision taken: its §12; design changes in ADR 0016
 Amendments 1 and 2; build notes for steps 2, 3 and 3b at the end of ADR 0016). Steps 0, 2, 3 and 3b
-and 4 are built (3b approved by the user; its confirmation on real Entra and Okta tenants runs in
-parallel, the user is setting the tenants up); step 5 is next; step 7 is on hold (legal review). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
+4 and 5 (SSE) are built (3b approved; its confirmation on real Entra and Okta tenants runs in
+parallel, the user is setting the tenants up); 5b (the download cut-off, plan §1.5) is next; step 7
+is on hold (legal review). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
 
 ## Current state
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`.
@@ -18,6 +19,38 @@ Migrations at head: **0039** (login outcomes `groups_overage`, `groups_missing`)
 the unit job prints the real-IdP skips).
 Run 38577569420 green on `43f41b4` (step 3); run 38536427956's failure on `4a8c05f` is diagnosed
 and fixed (below).
+
+## Done: error codes, then M17 step 5 (2026-10-15, third session)
+**Error codes (commit `98044d1`, CI run 38745179430 green; ADR 0016 note "every route declares its
+error codes"; round `m17-error-codes` 8/8):** one registry (`edisc_api.error_codes.E`, one status
+per code); each route declares its handler's codes in `perm(...)` / `public(...)` /
+`authenticated(...)`; `complete()` adds the codes implied by the operation's shape and writes
+`x-error-codes` + one response per error status into `docs/api/openapi.json`. The API test client
+checks every error answer (`tests/integration/api/error_check.py`): declared for its operation, the
+registry's status, a code at all. It found FastAPI's body-parse 400 without a code: framework
+refusals now answer `malformed_body` / `not_found` / `method_not_allowed`. The compat rule
+`edisc-error-code-removed` is proven on the published document.
+
+**M17 step 5, job streams (ADR 0016 "Implementation notes: M17 step 5"; round `m17-stream` 15/15):**
+`GET /v1/jobs/{id}/stream` (`edisc_api.stream`, `stream_events`; round now 16/16): events `job` / `units` / `end`
+(reasons `sealed`, `session_revoked`, `session_expired`, `principal_deactivated`,
+`permission_lost`, `slow_consumer`, `lifetime`); ids follow the job's custody chain, so a
+`Last-Event-ID` reconnect misses and repeats nothing (tested, including a feed kept behind on
+purpose); one poll per job per process per second (D4); session/principal and `job.read`
+re-checked <= 15 s (D3, tested at 15 s), passive authentication (D6, tested with the session row);
+a bounded queue per subscriber, overflow ends with `slow_consumer` (tested with a client that stops
+reading); 10 streams per principal; no evidence content (a real collection streamed to its seal,
+none of its item strings or custody payload values in the bytes); `x-sse-events` (the compat rule
+proven on the document). Found while building: a seal that moves neither status nor chain head was
+never seen (intermittent hang; fixed + deterministic test); units sent twice when a feed's event
+overlapped a newer catch-up (per-entry `seq` trim); the local KMS loaded the RSA key on the event
+loop (now a thread); a client gone during its catch-up left a subscriber (a feed polling for ever)
+and could interrupt a transaction (now shielded, tested); the error-code check itself blocked
+tests' loops on first use (built once in a thread now; ADR 0015 §24.16); the API's Redis pool failed bursts with unhandled 500s (now fixed, blocking,
+503 `service_busy`; round `s24-pool-exhaustion` 8/8). **Measurement**
+(docs/runs/2026-10-15-sse-500-streams.md): 500 streams on 50 jobs: 298 statements/s, p99 1.10 s,
+every delivery; on 500 jobs: 1,062 statements/s, p99 1.69 s; about 72-75 KB of Python per open
+stream. **Not built: 5b, cutting off in-flight downloads on revocation (plan §1.5).**
 
 ## Done: the groups claim, then M17 step 4 (2026-10-15, second session)
 **CI:** run 38734057961 green on `a6fa14c` (groups), run 38736314014 green on `9056361` (step 4,
@@ -170,6 +203,14 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
   the route function names (they changed once, from FastAPI's path-based ids, before any generated
   client). A breaking change needs `/v2` or an allow-list entry naming the frontend commit that
   absorbs it; new response enum values may appear at any time (render them as unknown).
+- **Job stream (step 5):** `EventSource('/v1/jobs/<id>/stream')` (same-origin cookie). Events
+  `job` (snapshot), `units` (settled units with their chain `seq`), `end` (`data.reason`; the
+  server closes: reconnect only for `lifetime`, re-authenticate for `session_*`, stop for
+  `sealed` / `permission_lost` / `principal_deactivated`, reconnect for `slow_consumer`). The
+  browser resends `Last-Event-ID` itself; nothing is missed or repeated. 429 `too_many_streams`
+  above 10 open streams per user. Fallback: poll `GET /v1/jobs/{id}` and `/units`.
+- **Error codes:** every operation's `x-error-codes` in the document; `service_busy` (503) and
+  `db_pool_exhausted` (503) mean retry after `Retry-After`.
 - **Step 3 reads:** `GET /v1/me/permissions` (a hint for showing controls; the API still decides),
   `GET /v1/roles`, `GET /v1/jobs` (filters `status`, `clean_basis`, `client_id`, `matter_id`,
   `connection_id`, `source`, `created_from/to`, `finished_from/to` with an explicit offset),
@@ -244,8 +285,7 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
    developer tenants; `make test-real-idp`; record every answer in ADR 0016 "To confirm on real
    tenants"; Entra's `auth_time` optional claim and Okta's omitted groups claim are the likeliest
    findings).
-2. Step 5 (SSE + `SessionWatch` + the download cut-off + the
-500-stream measurement), step 6 (install flows, migration 0040, the relay, the operator-only move
+2. Step 5b (the download cut-off on revocation, plan §1.5, reusing `SessionWatch`), step 6 (install flows, migration 0040, the relay, the operator-only move
 CLI with its no-route test), step 8 (directory snapshots, `check-connections`, the pause deadline
 24 h..90 d). Step 7 waits for legal review.
 

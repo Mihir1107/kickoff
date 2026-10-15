@@ -305,7 +305,7 @@ async def test_the_published_jwks_and_certificate_hold_only_the_signing_public_k
     )
     assert key["kid"] == client_auth.b64url(hashlib.sha256(thumbprint_input.encode()).digest())
     # the private key the local KMS holds appears in neither document
-    private = kms._signing_key(client_auth.DEV_KEY.kms_key_id)
+    private = await asyncio.to_thread(kms._signing_key, client_auth.DEV_KEY.kms_key_id)
     d = client_auth._int_b64url(private.private_numbers().d)
     assert d not in jwks_r.text and d not in pem.decode()
     # the key that signs is the published one
@@ -328,7 +328,7 @@ async def test_no_assertion_or_key_handle_reaches_a_response_a_log_line_or_an_au
 ) -> None:
     handle = client_auth.DEV_KEY.kms_key_id
     SECRETS.add(handle)  # the response scan fails on the KMS key handle too
-    private = kms._signing_key(handle)
+    private = await asyncio.to_thread(kms._signing_key, handle)
     pkcs8 = private.private_bytes(
         serialization.Encoding.DER,
         serialization.PrivateFormat.PKCS8,

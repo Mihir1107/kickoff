@@ -103,6 +103,18 @@ class Settings(BaseSettings):
     )
 
     redis_url: str = "redis://localhost:6379/0"
+    redis_max_connections: int = Field(
+        default=50,
+        ge=1,
+        description="the API's Redis pool is FIXED at this size: a burst waits for a connection",
+    )
+    redis_pool_timeout_seconds: float = Field(
+        default=10,
+        gt=0,
+        le=60,
+        description="how long a request waits for a Redis connection before it fails loudly"
+        " (503 service_busy), never unbounded and never an unhandled error",
+    )
 
     s3_endpoint: str | None = None  # None = AWS default endpoint
     s3_region: str = "us-east-1"
@@ -394,6 +406,33 @@ class Settings(BaseSettings):
         " first signs, the others are published (JWKS, certificate) for a rollover. Each entry fixes"
         " its certificate's validity, so every replica publishes the same certificate bytes. Empty:"
         " the API refuses to start outside local/test/ci; there a dev key is created in the local KMS",
+    )
+    api_stream_poll_seconds: float = Field(
+        default=1.0,
+        gt=0,
+        le=60,
+        description="a job's live stream: one poll per job per API process at this interval while"
+        " it has subscribers (decision D4)",
+    )
+    api_stream_recheck_seconds: float = Field(
+        default=15.0,
+        gt=0,
+        le=15,
+        description="session, principal and job.read re-checked at most this far apart on an open"
+        " stream: a revoked session or a lost permission ends it within this bound (D3)",
+    )
+    api_stream_queue_events: int = Field(
+        default=64,
+        ge=1,
+        le=10_000,
+        description="events buffered per subscriber; a client that does not read past this ends"
+        " with reason slow_consumer (memory per stream is bounded by this, not by the job)",
+    )
+    api_stream_max_seconds: float = Field(
+        default=1800, gt=0, description="maximum lifetime of one stream (then reason lifetime)"
+    )
+    api_stream_per_principal: int = Field(
+        default=10, ge=1, description="concurrent streams per principal per API process (then 429)"
     )
     api_public_scheme: Literal["https", "http"] = Field(
         default="https",

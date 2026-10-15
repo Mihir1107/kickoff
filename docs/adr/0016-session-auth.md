@@ -725,3 +725,70 @@ Mutation round `m17-openapi`: 20 breaks, all caught.
 - The compat rule `edisc-error-code-removed` now has real input; a test removes `not_found` from
   `get_job` in the published document and the check reports exactly that.
 - Mutation round `m17-error-codes`: 8 breaks, all caught.
+
+## Implementation notes: M17 step 5, a job's live stream (2026-10-15)
+
+Built (`docs/plans/m17.md` §4; A2.4, A5 for streams): `GET /v1/jobs/{id}/stream`
+(`edisc_api.stream`, `edisc_api.stream_events`), `SessionWatch`, settings `EDISC_API_STREAM_*`.
+**Not built here: the cut-off of in-flight DOWNLOADS on revocation (§1.5)**, step 5b. Choices:
+1. **Events and ids.** `job` (a snapshot: status, clean, clean basis, sealed, paused, units by
+   status and recon status), `units` (units the chain recorded as settled, `unit_reconciled` /
+   `unit_failed`, each with its chain `seq`, at most 500 per event), `end` (the last event, with a
+   reason: `sealed`, `session_revoked`, `session_expired`, `principal_deactivated`,
+   `permission_lost`, `slow_consumer`, `lifetime`). Ids follow the job's custody chain, which is
+   ordered by commit for one job: a `units` event's id is its last entry's `seq`, a snapshot's is
+   `<head>.<digest>`. The plan's "a fresh snapshot, nothing replayed" could MISS settled units
+   across a reconnect; the user required none missed or repeated, hence chain ids.
+2. **Reconnection:** `Last-Event-ID` = `<seq>` or `<head>.<digest>` (anything else: a fresh start).
+   The server sends the units settled after that `seq` and the snapshot only if it differs from the
+   client's last. Each subscriber subscribes and catches up under its feed's lock (polls hold it
+   too), and trims `units` entries at or below its last `seq`: **found by the reconnect test**, a
+   surviving feed's event covered chain events since the FEED's head and partly overlapped a newer
+   subscriber's catch-up (units were sent twice); per-entry `seq` fixed it; a deterministic test
+   keeps a feed behind on purpose.
+3. **One feed per job per process**, polling one statement (status, sealed flag, chain head) per
+   `api_stream_poll_seconds` (1 s) while it has subscribers; only a change reads the units and
+   counts. **Found by an intermittent hang:** sealing moves neither the status nor the chain head;
+   a poll between `job_finished` and the seal never saw it and the stream never ended. The sealed
+   flag is part of the compared state (deterministic test + mutation). A unit's progress that writes
+   no chain event shows in the next snapshot.
+4. **Continuous authorization (D3):** at most `api_stream_recheck_seconds` (<= 15) apart, the
+   session row by the database clock (revoked, idle or absolute expiry) or, for bearer callers, the
+   principal's active flag (`SessionWatch`, cached per session or principal across its streams),
+   then `job.read` on the job (`authorize`, per stream). The 15 s bound is tested at its production
+   value. **D6:** the stream authenticates passively (`request.state.passive`), so it never moves
+   the session's activity; idle and absolute limits end it (`session_expired`). Maximum lifetime
+   `api_stream_max_seconds` (30 min, `lifetime`); 10 streams per principal per process (429
+   `too_many_streams`).
+5. **Backpressure:** each subscriber's queue holds `api_stream_queue_events` (64); the producer never
+   waits for a client: a full queue marks the subscriber overflowed and drops it from the feed (no
+   more buffering), and its writer ends with `slow_consumer` as soon as it can write.
+6. **No evidence content:** the module runs only the statements in `stream.STATEMENTS` (job status,
+   chain seq/event type/unit key, unit status columns, open pauses, session and principal flags) and
+   imports nothing that reads evidence (unit tests parse both). End to end, a real dummy collection
+   is streamed to its seal and no string of its normalized items (message text, file, conversation
+   and user names) or custody payloads (hashes, roots) appears in the stream's bytes.
+7. **The SSE compat rule has real input:** the operation lists `EndEvent`, `EndReason`, `JobEvent`,
+   `UnitState`, `UnitsEvent` in `x-sse-events`; any change to them fails `api_compat` (stricter than
+   D9 for responses: a client switches on these). A unit test changes each in the published
+   document and gets `edisc-sse-event-changed` for `stream_job`.
+8. **Found while building:** the local KMS loaded the RSA 3072 private key on the event loop at the
+   first sign-in of a process (382 ms under CPU contention; the loop guard failed the revocation
+   test): `LocalKmsClient._signing_key` now runs in a thread (`OFF_LOOP`). The 500-stream
+   measurement found the API's Redis pool unbounded-then-failing (`MaxConnectionsError` as a 500):
+   now a fixed, blocking pool and 503 `service_busy` (docs/runs/2026-10-15-sse-500-streams.md).
+9. **A disconnect never leaks** (found by a statement-counting test elsewhere picking up a feed
+    that polled for ever): a client gone while its catch-up ran left its subscriber registered, and
+    the cancellation could interrupt a transaction (pooled connection unreturned). The stream's
+    database work runs shielded from the disconnect (`stream.shielded`); a join that completes after
+    the client left unsubscribes itself, and a feed that never started is forgotten
+    (`JobFeeds.release`). Tested with the catch-up held inside its transaction while the client
+    disconnects: no feed, no checked-out connection afterwards.
+10. **Proxies:** `Cache-Control: no-store, no-transform` and `X-Accel-Buffering: no` (no-store, not
+   the plan's no-cache: cookie responses are no-store by rule). Not done: the plan's real-uvicorn
+   first-event test (the ASGI test client here streams chunk by chunk).
+
+Tests: `tests/integration/api/test_job_stream.py` (17), `tests/unit/api/test_stream_module.py` (4),
+the Redis pool test. Measurement: docs/runs/2026-10-15-sse-500-streams.md. Mutation round
+`m17-stream`: 16 breaks, all caught (the first run left the per-entry trim uncaught: it depended on
+timing; the deterministic overlap test was added).

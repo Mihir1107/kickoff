@@ -91,6 +91,9 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
   number of groups and on the call's time (a slow Graph must fail the sign-in loudly, never grant
   fewer roles), and the same for bearer tokens (or a cached membership with an expiry). Until then
   the advice is Entra's "Groups assigned to the application" filter.
+- Job streams: batch every feed's `HEAD` poll into ONE statement per tick per process (today one
+  per job per second: about 1,000 statements a second for 500 distinct jobs on one process,
+  docs/runs/2026-10-15-sse-500-streams.md); measure several API processes and over a real network.
 - Connection re-authorization flow: on `invalid_grant` or `DecryptionError`, mark the connection `error`, emit a custody event, notify the tenant (M13+).
 - Scheduled KEK rotation job calling `rewrap_tenant_tokens` per tenant, with custody events.
 - **[required before production]** Microsoft Graph app authentication with a certificate (not a client secret), stored in the secret manager, with a rotation runbook (ADR 0009).

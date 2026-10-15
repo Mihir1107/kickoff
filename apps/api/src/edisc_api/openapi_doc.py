@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from edisc_api.error_codes import complete
+from edisc_api.stream_events import add_schemas
 from edisc_core.settings import Environment, Settings
 
 DOCUMENT = Path("docs/api/openapi.json")
@@ -44,7 +45,7 @@ def document() -> dict[str, Any]:
     from edisc_api.app import create_app  # the app module wires everything: import on use
 
     settings = Settings.model_construct(env=Environment.PRODUCTION)
-    doc: dict[str, Any] = complete(create_app(settings).openapi())
+    doc: dict[str, Any] = add_schemas(complete(create_app(settings).openapi()))
     doc.pop("servers", None)
     check(doc)
     return doc

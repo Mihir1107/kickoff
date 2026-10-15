@@ -82,6 +82,10 @@ Rounds (ADR 0015):
 - ``m17-error-codes``: every route declares its error codes from one registry; the test-time
   check fails an undeclared code, a wrong status or a code-less error; the framework's own refusals
   carry codes; the compat rule ``edisc-error-code-removed`` on the published document.
+- ``m17-stream``: a job's live stream (M17 step 5): continuous re-checks (session, principal,
+  permission), passive authentication, Last-Event-ID without misses or repeats, the bounded buffer
+  and its slow_consumer end, the sealed and lifetime ends, the per-principal cap, the module's
+  import and SQL boundaries, no evidence content, the SSE compat rule on the real document.
 - ``m17-host-cookie``: the session cookie is host-only (``__Host-``, no ``Domain``) and a same-site
   request from a neighbouring subdomain is refused, both in real browsers (ADR 0016 §2).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
@@ -135,6 +139,9 @@ UAC = "tests/unit/api/test_api_compat.py"
 ECK = "tests/integration/api/error_check.py"
 ECD = "apps/api/src/edisc_api/error_codes.py"
 UEC = "tests/unit/api/test_error_codes.py"
+STR = "apps/api/src/edisc_api/stream.py"
+TJS = "tests/integration/api/test_job_stream.py"
+USM = "tests/unit/api/test_stream_module.py"
 TIG = "tests/integration/api/test_idp_groups.py"
 DC = "packages/connectors/dummy/src/edisc_connector_dummy/connector.py"
 ULG = "tests/unit/core/test_loopguard.py"
@@ -1319,7 +1326,18 @@ CATALOG: list[Mutation] = [
     m("pool_exhaustion_500", "s24-pool-exhaustion", APPM,
       "    @app.exception_handler(PoolTimeoutError)\n", "", APX),
     m("pool_exhaustion_no_retry_after", "s24-pool-exhaustion", APPM,
-      'status_code=503, headers={"Retry-After": "1"},', "status_code=503,", APX),
+      '{"error": "db_pool_exhausted", "detail": "the service is busy; retry shortly"},\n            status_code=503, headers={"Retry-After": "1"},',
+      '{"error": "db_pool_exhausted", "detail": "the service is busy; retry shortly"},\n            status_code=503,',
+      APX, "beyond_pool_capacity"),
+    m("redis_busy_no_retry_after", "s24-pool-exhaustion", APPM,
+      '{"error": "service_busy", "detail": "the service is busy; retry shortly"},\n            status_code=503, headers={"Retry-After": "1"},',
+      '{"error": "service_busy", "detail": "the service is busy; retry shortly"},\n            status_code=503,',
+      APX, "redis_pool"),
+    m("redis_pool_not_blocking", "s24-pool-exhaustion", APPM,
+      "    pool = aioredis.BlockingConnectionPool.from_url(", "    pool = aioredis.ConnectionPool.from_url(",
+      APX, "redis_pool"),
+    m("redis_unavailable_500", "s24-pool-exhaustion", APPM,
+      "    @app.exception_handler(RedisConnectionError)\n", "", APX, "redis_pool"),
     m("pool_exhaustion_silent", "s24-pool-exhaustion", APPM,
       '            "db pool exhausted", path=request_path(request),',
       '            "request", path=request_path(request),', APX),
@@ -1484,6 +1502,53 @@ CATALOG: list[Mutation] = [
     m("framework_errors_uncoded", "m17-error-codes", "apps/api/src/edisc_api/safe_errors.py",
       "    app.add_exception_handler(StarletteHTTPException, _http_error)\n", "", NOE,
       "canary_in_any_route"),
+    # ------------------------------------------------------------------ the job stream (M17 step 5)
+    m("stream_touches_the_session", "m17-stream", JOBS, "    request.state.passive = True\n",
+      "    request.state.passive = False\n", TJS, "never_extends"),
+    m("stream_session_unchecked", "m17-stream", STR, "                reason = await shielded(watch.check(caller))\n",
+      "                reason = None\n", TJS, "revoked_session or deactivated or never_extends"),
+    m("stream_permission_unchecked", "m17-stream", STR,
+      "                if reason is None and not await shielded(authorized()):\n",
+      "                if False:\n", TJS, "lost_permission"),
+    m("stream_queue_unbounded", "m17-stream", STR, "        sub = Subscriber(asyncio.Queue(maxsize=size))\n",
+      "        sub = Subscriber(asyncio.Queue())\n", TJS, "slow_client"),
+    m("stream_overflow_not_ended", "m17-stream", STR,
+      "            if joined.overflowed:\n                yield end(EndReason.SLOW_CONSUMER)",
+      "            if False:\n                yield end(EndReason.SLOW_CONSUMER)", TJS, "slow_client"),
+    m("stream_units_not_trimmed", "m17-stream", STR,
+      "            kept = [u for u in event.model.units if u.seq > last_seq]",
+      "            kept = [u for u in event.model.units if True]", TJS, "ahead_of_the_feed"),
+    m("stream_last_event_id_ignored", "m17-stream", STR,
+      "    last_seq, last_snapshot = parse_last_event_id(last_event_id)\n",
+      "    last_seq, last_snapshot = 0, None\n", TJS, "reconnect"),
+    m("stream_never_ends_when_sealed", "m17-stream", STR, "                if live.final:\n",
+      "                if False:\n", TJS, "ends_when_sealed"),
+    m("stream_seal_unseen", "m17-stream", STR,
+      "                state = (row.status, bool(row.sealed), int(row.head or 0))",
+      "                state = (row.status, False, int(row.head or 0))", TJS, "moves_neither"),
+    m("signing_key_loaded_on_loop", "m17-stream", "packages/core/src/edisc_core/kms.py",
+      "        return cached if cached is not None else await asyncio.to_thread(self._signing_key, key_id)",
+      "        return cached if cached is not None else self._signing_key(key_id)", ICA, "published"),
+    m("stream_join_leaks_subscriber", "m17-stream", STR,
+      "            feed.join(queue_size, last_seq), lambda done: _leave(feeds, feed, done[0])\n",
+      "            feed.join(queue_size, last_seq), None\n", TJS, "client_gone"),
+    m("stream_lifetime_unbounded", "m17-stream", STR,
+      "                if reason is None and time.monotonic() - started >= max_seconds:\n",
+      "                if False:\n", TJS, "maximum_lifetime"),
+    m("stream_cap_removed", "m17-stream", JOBS,
+      "    if counts.get(who.principal_id, 0) >= settings.api_stream_per_principal:\n",
+      "    if False:\n", TJS, "capped"),
+    Mutation("stream_leaks_a_custody_payload", "m17-stream", STR, (
+        ("    \"SELECT e.seq, e.payload->>'unit_key' AS unit_key FROM custody_events e\"",
+         "    \"SELECT e.seq, e.payload->>'unit_key' AS unit_key, e.payload::text AS raw FROM custody_events e\""),
+        ("                unit_key=u.unit_key,\n", "                unit_key=u.unit_key + r.raw,\n"),
+    ), TJS, "no_evidence_content"),
+    m("stream_imports_evidence", "m17-stream", STR, "from edisc_api.auth import Caller\n",
+      "from edisc_api.auth import Caller\nfrom edisc_evidence import writer as _writer  # noqa: F401\n",
+      USM, "imports_nothing"),
+    m("compat_sse_rule_on_the_stream", "m17-stream", ACS,
+      "            elif schemas[0].get(name) != schemas[1].get(name):",
+      "            elif False:", USM, "published_event_schema"),
     # ------------------------------------------------------------------ host-only session cookie
     Mutation("session_cookie_domain_wide", "m17-host-cookie", SESP, (
         ('SESSION_COOKIE = "__Host-edisc_session"', 'SESSION_COOKIE = "edisc_session"'),

@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Header, Query
+from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_core import PydanticCustomError
@@ -24,7 +24,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from edisc_api import audit
-from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
+from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep, caller
 from edisc_api.auth import Caller
 from edisc_api.authz import (
     ROLE_PERMISSIONS,
@@ -38,7 +38,7 @@ from edisc_api.authz import (
     roles_at,
 )
 from edisc_api.error_codes import E
-from edisc_api.errors import RecordedText, conflict, not_found, unprocessable
+from edisc_api.errors import ApiError, RecordedText, conflict, not_found, unprocessable
 from edisc_api.pagination import (
     CursorQ,
     LimitQ,
@@ -51,6 +51,8 @@ from edisc_api.pagination import (
     page_of,
 )
 from edisc_api.routes.hierarchy import ensure_matter_open
+from edisc_api.stream import stream_body
+from edisc_api.stream_events import SCHEMAS
 from edisc_connector_dummy.guard import source_permitted
 from edisc_connector_slack_export.archive_access import open_archive_entry
 from edisc_connectors_base.types import CollectionScope, ThreadParentPolicy
@@ -586,6 +588,68 @@ async def get_job(job_id: uuid.UUID, caller: CallerDep, res: ResourcesDep) -> Jo
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await _authorize_job(s, caller, P.JOB_READ, job_id)
         return await _job_out(s, job_id)
+
+
+# ------------------------------------------------------------------ the live stream (M17 step 5)
+async def passive_caller(request: Request) -> Caller:
+    """The caller of a stream: an open stream never extends a session (decision D6)."""
+    request.state.passive = True
+    return await caller(request)
+
+
+SSE_HEADERS = {"cache-control": "no-store, no-transform", "x-accel-buffering": "no"}
+
+
+@router.get(
+    "/jobs/{job_id}/stream",
+    response_class=StreamingResponse,
+    openapi_extra={
+        **perm(P.JOB_READ, E.FORBIDDEN, E.NOT_FOUND, E.TOO_MANY_STREAMS),
+        "x-sse-events": sorted(SCHEMAS),  # every schema an event carries
+    },
+    responses={200: {"description": "events: job, units, end (edisc_api.stream_events)",
+                     "content": {"text/event-stream": {"schema": {"type": "string"}}}}},
+)  # fmt: skip
+async def stream_job(
+    job_id: uuid.UUID,
+    who: Annotated[Caller, Depends(passive_caller)],
+    res: ResourcesDep,
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID", max_length=64)] = None,
+) -> StreamingResponse:
+    """Server-Sent Events of one job: its state, units as the chain settles them, and a final
+    ``end`` with the reason (edisc_api.stream). ``job.read``; re-checked while open."""
+    async with tenant_tx(res.sessions, who.tenant_id) as s:
+        await _authorize_job(s, who, P.JOB_READ, job_id)
+    settings, counts = res.settings, res.streams.per_principal
+    if counts.get(who.principal_id, 0) >= settings.api_stream_per_principal:
+        raise ApiError(429, "too_many_streams", "too many open streams for this caller")
+
+    async def authorized() -> bool:
+        try:
+            async with tenant_tx(res.sessions, who.tenant_id) as s:
+                await _authorize_job(s, who, P.JOB_READ, job_id)
+        except ApiError:
+            return False
+        return True
+
+    async def body() -> AsyncIterator[bytes]:
+        counts[who.principal_id] = counts.get(who.principal_id, 0) + 1
+
+        def closed() -> None:
+            counts[who.principal_id] -= 1
+            if not counts[who.principal_id]:
+                del counts[who.principal_id]
+
+        async for chunk in stream_body(
+            feeds=res.streams, watch=res.watch, caller=who, job_id=job_id,
+            last_event_id=last_event_id, authorized=authorized,
+            queue_size=settings.api_stream_queue_events,
+            recheck_seconds=settings.api_stream_recheck_seconds,
+            max_seconds=settings.api_stream_max_seconds, on_close=closed,
+        ):  # fmt: skip
+            yield chunk
+
+    return StreamingResponse(body(), media_type="text/event-stream", headers=SSE_HEADERS)
 
 
 # ------------------------------------------------------------------ actions

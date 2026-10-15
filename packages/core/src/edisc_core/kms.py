@@ -24,6 +24,7 @@ client-authentication key (``private_key_jwt``): the private part never leaves K
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -262,9 +263,15 @@ class LocalKmsClient:
             self._signing[key_id] = key
             return key
 
+    async def _key(self, key_id: str) -> rsa.RSAPrivateKey:
+        """The cached key; the first load parses and validates an RSA 3072 key (hundreds of ms
+        of CPU): in a thread, never on the event loop (a real KMS call is network I/O)."""
+        cached = self._signing.get(key_id)
+        return cached if cached is not None else await asyncio.to_thread(self._signing_key, key_id)
+
     async def get_public_key(self, *, key_id: str) -> bytes:
         return (
-            self._signing_key(key_id)
+            (await self._key(key_id))
             .public_key()
             .public_bytes(
                 serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
@@ -276,7 +283,7 @@ class LocalKmsClient:
             raise KmsError("unsupported signing algorithm")
         if len(digest) != 32:
             raise KmsError("a SHA-256 digest is 32 bytes")
-        return self._signing_key(key_id).sign(
+        return (await self._key(key_id)).sign(
             digest, padding.PKCS1v15(), utils.Prehashed(hashes.SHA256())
         )
 

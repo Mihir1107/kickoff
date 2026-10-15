@@ -16,7 +16,6 @@ from typing import Any
 
 import httpx
 import pytest
-import redis.asyncio as aioredis
 from fastapi import FastAPI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,7 +24,7 @@ from temporalio.worker import Worker
 from types_aiobotocore_s3 import S3Client
 
 from edisc_api.admin import onboard_tenant
-from edisc_api.app import Resources, create_app, warm_routes
+from edisc_api.app import Resources, create_app, redis_client, warm_routes
 from edisc_api.auth import DEV_ISSUER, DEV_JWKS, Authenticator, JwksCache, dev_token
 from edisc_connector_dummy.connector import DummyConnector
 from edisc_connector_slack_export import file_links
@@ -41,6 +40,7 @@ from edisc_worker.contracts import EXPORTS_QUEUE, task_queue
 from edisc_worker.exports import ExportActivities
 from edisc_worker.workflows import CollectionJobWorkflow, CollectUnitWorkflow, ExportIngestWorkflow
 
+from . import error_check
 from .error_check import ErrorCodeCheck
 from .oidc import IDP_HOST, TEST_IDP
 
@@ -104,15 +104,14 @@ class Api:
     app: FastAPI | None = None
     app_settings: Settings | None = None
     errors: ErrorCodeCheck | None = None
-    errors_app: FastAPI | None = None
 
     def client(self, subdomain: str, token: str | None = None) -> httpx.AsyncClient:
         headers = {"authorization": f"Bearer {token}"} if token else {}
         if self.app is None or self.app_settings is not self.settings:
             self.app, self.app_settings = create_app(self.settings, self.resources), self.settings
             warm_routes(self.app)  # test setup, outside any request
-        if self.errors is None or self.errors_app is not self.app:
-            self.errors, self.errors_app = ErrorCodeCheck.for_app(self.app), self.app
+        if self.errors is None:  # make_api built the shared one off the loop (error_check)
+            self.errors = error_check.SHARED() or ErrorCodeCheck.for_app(self.app)
         return httpx.AsyncClient(
             transport=httpx.ASGITransport(app=self.app),
             base_url=f"http://{subdomain}.{self.settings.api_base_domain}",
@@ -150,7 +149,7 @@ async def make_api(
     TEST_IDP.reset()
     # the IdP's server-side endpoints (discovery, code exchange) answer through the test provider
     http = httpx.AsyncClient(mounts={f"all://{IDP_HOST}": TEST_IDP.transport()})
-    redis = aioredis.from_url(api_settings.redis_url)
+    redis = redis_client(api_settings)  # the production pool (bounded, blocking)
     resources = Resources(
         api_settings,
         app_sessions,
@@ -164,8 +163,11 @@ async def make_api(
     )
     app = create_app(api_settings, resources)
     await asyncio.to_thread(warm_routes, app)
+    errors = await ErrorCodeCheck.shared(app)
     try:
-        yield Api(api_settings, app_sessions, s3, temporal, resources, http, app, api_settings)
+        yield Api(
+            api_settings, app_sessions, s3, temporal, resources, http, app, api_settings, errors
+        )
     finally:
         await http.aclose()
         await redis.aclose()

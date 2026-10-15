@@ -6,7 +6,7 @@ answer (``authz.perm(P.X, E.NOT_FOUND, ...)``, or :func:`declare` for the routes
 permission); :func:`complete` adds the codes that follow from the operation's shape and writes the
 list into the document as ``x-error-codes``, plus one response per status naming its codes:
 
-- every operation: ``internal_error`` (500), ``db_pool_exhausted`` (503);
+- every operation: ``internal_error`` (500), ``db_pool_exhausted`` and ``service_busy`` (503);
 - an operation with parameters or a body: ``validation_error`` (422); with a body also
   ``malformed_body`` (400: the framework could not parse it);
 - an authenticated operation (``x-permission`` other than ``public``): ``unauthorized``,
@@ -39,6 +39,7 @@ class E:
     # authentication and the request itself (mostly added by complete())
     UNAUTHORIZED = Code("unauthorized", 401, "no valid credentials, or an unknown tenant host")
     TOO_MANY_REQUESTS = Code("too_many_requests", 429, "too many failed attempts from this address")
+    TOO_MANY_STREAMS = Code("too_many_streams", 429, "too many open streams for this caller")
     AMBIGUOUS_CREDENTIALS = Code(
         "ambiguous_credentials", 400, "a session cookie AND a bearer token"
     )
@@ -51,6 +52,7 @@ class E:
     UNPROCESSABLE = Code("unprocessable", 422, "a well-formed request the API cannot act on")
     INTERNAL_ERROR = Code("internal_error", 500, "an unexpected server error")
     DB_POOL_EXHAUSTED = Code("db_pool_exhausted", 503, "every database connection is busy; retry")
+    SERVICE_BUSY = Code("service_busy", 503, "Redis (throttle, limits) busy or unreachable; retry")
     # authorization
     NOT_FOUND = Code("not_found", 404, "no such object, or not visible to the caller")
     FORBIDDEN = Code("forbidden", 403, "visible, but the caller lacks the permission")
@@ -94,7 +96,7 @@ class E:
 
 REGISTRY: dict[str, Code] = {c.code: c for c in vars(E).values() if isinstance(c, Code)}
 UNSAFE = frozenset({"post", "put", "patch", "delete"})
-EVERY = (E.INTERNAL_ERROR, E.DB_POOL_EXHAUSTED)
+EVERY = (E.INTERNAL_ERROR, E.DB_POOL_EXHAUSTED, E.SERVICE_BUSY)
 AUTHENTICATED = (E.UNAUTHORIZED, E.TOO_MANY_REQUESTS, E.AMBIGUOUS_CREDENTIALS, E.CROSS_SITE)
 LIST = (E.CURSOR_MISMATCH, E.UNPROCESSABLE)
 ERROR_SCHEMA = "ErrorOut"
