@@ -131,7 +131,9 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
 - **Sign-in (M17 step 2):** go to `/v1/auth/login?return_to=<path>` (a same-origin path; 400
   `invalid_return_to` otherwise), `reauth=1` when an action answered 401 `reauth_required`. The
   callback answers a bounce page that lands on `return_to`; failures land on `/?auth_error=<code>`
-  (`denied`, `expired`, `invalid`, `unknown_user`, `inactive`, `reauth_mismatch`).
+  (`denied`, `expired`, `invalid`, `unknown_user`, `inactive`, `reauth_mismatch`, and since
+  2026-10-15 `groups_overage`, `groups_missing`: the IdP's groups could not be read; show "your
+  organisation's sign-in is misconfigured, contact your administrator", never a retry loop).
 - Every state-changing request sends `X-CSRF-Token` from `GET /v1/auth/csrf` (re-fetch after any
   sign-in: the token is bound to the session) and is same-origin. Logout: `POST /v1/auth/logout`.
   Sessions: `GET /v1/me/sessions` (`current`, `live`), `POST /v1/me/sessions/{id}/revoke`.
@@ -211,7 +213,7 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
    ADR 0016 "To confirm on real tenants"; Entra's `auth_time` optional claim and groups overage are
    the likeliest findings).
 2. Step 4 (OpenAPI + oasdiff), step 5 (SSE + `SessionWatch` + the download cut-off + the
-500-stream measurement), step 6 (install flows, migration 0039, the relay, the operator-only move
+500-stream measurement), step 6 (install flows, migration 0040, the relay, the operator-only move
 CLI with its no-route test), step 8 (directory snapshots, `check-connections`, the pause deadline
 24 h..90 d). Step 7 waits for legal review.
 

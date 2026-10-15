@@ -174,6 +174,9 @@ class TenantCtx:
     default_client_id: uuid.UUID
 
     def token(self, settings: Settings, subject: str | None = None, **claims: Any) -> str:
+        """A token as a configured IdP issues it: the groups claim is always there (an empty list
+        by default); an absent claim is its own case (``edisc_api.idp_groups``)."""
+        claims.setdefault("groups", [])
         return dev_token(
             settings, subject=subject or self.admin_subject, audience=AUDIENCE, **claims
         )

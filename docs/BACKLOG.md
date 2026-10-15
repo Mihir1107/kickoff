@@ -82,6 +82,15 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
     transaction). (4) The content lock's SESSION-level advisory lock cannot go through a transaction
     pooler: it keeps its direct connection to Postgres (or becomes a lease row). (5) A test that runs
     the suite's tenant-isolation and RLS tests through PgBouncer.
+- **[required before production for Entra tenants with many groups]** Fetch a user's groups from
+  Microsoft Graph when the ID token carries the overage marker (`_claim_names` / `_claim_sources`,
+  `hasgroups`) instead of refusing the sign-in (`edisc_api.idp_groups`, today: `groups_overage`).
+  Needs a Graph token for that user's Entra tenant (client credentials with our `private_key_jwt`
+  signer and `GroupMember.Read.All`, or the delegated `getMemberObjects` with the sign-in's access
+  token), transitive membership (`getMemberObjects` with `securityEnabledOnly`), a bound on the
+  number of groups and on the call's time (a slow Graph must fail the sign-in loudly, never grant
+  fewer roles), and the same for bearer tokens (or a cached membership with an expiry). Until then
+  the advice is Entra's "Groups assigned to the application" filter.
 - Connection re-authorization flow: on `invalid_grant` or `DecryptionError`, mark the connection `error`, emit a custody event, notify the tenant (M13+).
 - Scheduled KEK rotation job calling `rewrap_tenant_tokens` per tenant, with custody events.
 - **[required before production]** Microsoft Graph app authentication with a certificate (not a client secret), stored in the secret manager, with a rotation runbook (ADR 0009).

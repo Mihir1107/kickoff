@@ -15,7 +15,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 from types_aiobotocore_s3 import S3Client
@@ -39,7 +39,7 @@ from ..renders.conftest import drive, new_render
 from ..renders.test_render_store import _job
 
 
-def _cli(*args: str | Path) -> tuple[int, str]:
+def _cli_blocking(*args: str | Path) -> tuple[int, str]:
     """The verifier exactly as an expert runs it: a separate process with no DB/S3 settings."""
     proc = subprocess.run(
         [sys.executable, "-m", "edisc_custody.cli", *map(str, args)],
@@ -123,26 +123,26 @@ def pkg(rendered: Rendered, tmp_path: Path) -> Path:
 
 async def test_a_clean_render_package_verifies_offline(rendered: Rendered) -> None:
     files = len(_read(rendered.root / "embedded", "files.jsonl"))
-    code, out = _cli(rendered.root / "embedded")
+    code, out = await _cli(rendered.root / "embedded")
     assert code == 0, out
     assert "VERIFIED  render package" in out
     assert (
         f"{files} files in Merkle roots" in out
         and f"{files} output files and 0 natives re-hashed" in out
     )
-    code, out = _cli(rendered.root / "embedded", "--job-package", rendered.root / "job")
+    code, out = await _cli(rendered.root / "embedded", "--job-package", rendered.root / "job")
     assert code == 0, out
     assert "job package: VERIFIED" in out
 
 
 async def test_outputs_referenced_by_hash_must_be_supplied(rendered: Rendered) -> None:
-    code, out = _cli(rendered.root / "referenced")
+    code, out = await _cli(rendered.root / "referenced")
     assert code == 1 and "not in the package and not supplied" in out
     supplied = sorted((rendered.root / "embedded" / "outputs").iterdir())
     args: list[str | Path] = [rendered.root / "referenced"]
     for p in supplied:
         args += ["--file", p]
-    code, out = _cli(*args)
+    code, out = await _cli(*args)
     assert code == 0, out
 
 
@@ -151,7 +151,7 @@ async def test_an_altered_output_byte_fails(pkg: Path) -> None:
     data = bytearray(out_file.read_bytes())
     data[len(data) // 2] ^= 0x01
     out_file.write_bytes(bytes(data))
-    code, out = _cli(pkg)
+    code, out = await _cli(pkg)
     assert code == 1 and "bytes do not match the recorded sha256/size" in out
 
 
@@ -159,7 +159,7 @@ async def test_a_missing_or_an_extra_output_fails(pkg: Path) -> None:
     victim = sorted((pkg / "outputs").iterdir())[0]
     (pkg / "outputs" / "planted.rsmf").write_bytes(victim.read_bytes())
     victim.unlink()
-    code, out = _cli(pkg)
+    code, out = await _cli(pkg)
     assert code == 1
     assert f"output {victim.name}: not in the package" in out
     assert "outputs/planted.rsmf: not an output file of this render" in out
@@ -169,14 +169,14 @@ async def test_an_altered_file_record_breaks_its_batch_root(pkg: Path) -> None:
     files = _read(pkg, "files.jsonl")
     files[1]["record"]["event_count"] = 1  # type: ignore[index]
     _write(pkg, "files.jsonl", files)
-    code, out = _cli(pkg)
+    code, out = await _cli(pkg)
     assert code == 1 and "render batch Merkle root mismatch" in out
 
 
 async def test_a_dropped_file_record_is_caught(pkg: Path) -> None:
     files = _read(pkg, "files.jsonl")
     _write(pkg, "files.jsonl", files[:-1])
-    code, out = _cli(pkg)
+    code, out = await _cli(pkg)
     assert code == 1 and "file_count" in out
 
 
@@ -191,7 +191,7 @@ async def test_a_swapped_seal_reference_is_caught(pkg: Path, rendered: Rendered)
     (pkg / "objects" / sha).write_bytes(body)
     _write(pkg, "job_seal.json", [{"key": earlier["key"], "version_id": earlier["version_id"],
                                    "sha256": sha, "size": len(body)}])  # fmt: skip
-    code, out = _cli(pkg)
+    code, out = await _cli(pkg)
     assert code == 1 and "is not the seal anchor render_started references" in out
 
 
@@ -205,7 +205,7 @@ async def test_a_forged_seal_body_is_caught(pkg: Path) -> None:
     seal["sha256"], seal["size"] = hashlib.sha256(body).hexdigest(), len(body)
     (pkg / "objects" / seal["sha256"]).write_bytes(body)
     _write(pkg, "job_seal.json", [seal])
-    code, out = _cli(pkg)
+    code, out = await _cli(pkg)
     assert code == 1 and "does not anchor the head render_started references" in out
 
 
@@ -222,27 +222,27 @@ async def test_a_consistent_rewrite_of_the_render_stream_is_caught_by_its_anchor
     manifest = json.loads((pkg / "manifest.json").read_bytes())
     manifest["head"]["hash"] = prev
     (pkg / "manifest.json").write_bytes(canonical_json(manifest))
-    code, out = _cli(pkg)
+    code, out = await _cli(pkg)
     assert code == 1 and "disagrees with the WORM anchor (chain rewritten)" in out
 
 
 async def test_dropping_the_render_seal_fails(pkg: Path) -> None:
     anchors = sorted(_read(pkg, "anchors.jsonl"), key=lambda a: str(a["key"]))
     _write(pkg, "anchors.jsonl", anchors[:-1])
-    code, out = _cli(pkg)
+    code, out = await _cli(pkg)
     assert code == 1 and "no matching WORM seal" in out
 
 
 async def test_an_edit_without_fixing_the_manifest_fails(pkg: Path) -> None:
     (pkg / "files.jsonl").write_bytes((pkg / "files.jsonl").read_bytes() + b"\n")
-    code, out = _cli(pkg)
+    code, out = await _cli(pkg)
     assert code == 1 and "does not match manifest" in out
 
 
 async def test_a_same_length_edit_without_fixing_the_manifest_fails(pkg: Path) -> None:
     data = (pkg / "files.jsonl").read_bytes()
     (pkg / "files.jsonl").write_bytes(data.replace(b'"part":', b'"Part":', 1))  # same lines, size
-    code, out = _cli(pkg)
+    code, out = await _cli(pkg)
     assert code == 1 and "files.jsonl: does not match manifest" in out
 
 
@@ -254,7 +254,7 @@ async def test_a_job_package_of_another_job_is_rejected(
         app_sessions, s3, settings, tenant_id=rendered.t.tenant_id, job_id=other,
         dest=tmp_path / "other",
     )  # fmt: skip
-    code, out = _cli(rendered.root / "embedded", "--job-package", tmp_path / "other")
+    code, out = await _cli(rendered.root / "embedded", "--job-package", tmp_path / "other")
     assert code == 1 and "belongs to another job" in out
 
 
@@ -263,7 +263,7 @@ async def test_an_altered_anchor_object_fails(pkg: Path) -> None:
     anchor = _read(pkg, "anchors.jsonl")[0]
     path = pkg / "objects" / str(anchor["sha256"])
     path.write_bytes(path.read_bytes().replace(b'"seq":', b'"seq": '))
-    code, out = _cli(pkg)
+    code, out = await _cli(pkg)
     assert (
         code == 1
         and f"objects/{anchor['sha256']}: bytes do not match the recorded sha256/size" in out
@@ -275,7 +275,7 @@ async def test_a_missing_object_or_a_planted_file_fails(pkg: Path) -> None:
     (pkg / "objects" / seal["sha256"]).unlink()
     (pkg / "objects" / ("0" * 64)).write_bytes(b"{}")
     (pkg / "notes.txt").write_bytes(b"planted")
-    code, out = _cli(pkg)
+    code, out = await _cli(pkg)
     assert code == 1
     assert f"job_seal.json: its object objects/{seal['sha256']} is not in the package" in out
     assert f"objects/{'0' * 64}: not part of this package" in out
@@ -293,7 +293,7 @@ def _without_natives(pkg: Path, fmt: str) -> None:
 
 async def test_format_2_packages_still_verify(pkg: Path) -> None:
     _without_natives(pkg, "edisc-render-package/2")
-    code, out = _cli(pkg)
+    code, out = await _cli(pkg)
     assert code == 0, out
 
 
@@ -316,7 +316,7 @@ async def test_format_1_packages_still_verify(pkg: Path) -> None:
     manifest = json.loads((pkg / "manifest.json").read_bytes())
     manifest["format"] = "edisc-render-package/1"
     (pkg / "manifest.json").write_bytes(canonical_json(manifest))
-    code, out = _cli(pkg)
+    code, out = await _cli(pkg)
     assert code == 0, out
 
 
@@ -338,15 +338,15 @@ async def test_the_zip_verifies_in_place_and_equals_the_directory(rendered: Rend
     for mode, directory in (("embed", "embedded"), ("reference", "referenced")):
         data = (rendered.root / f"{mode}.zip").read_bytes()
         assert _unzipped(data) == _tree(rendered.root / directory), mode
-    code, out = _cli(rendered.root / "embed.zip", "--job-package", rendered.root / "job")
+    code, out = await _cli(rendered.root / "embed.zip", "--job-package", rendered.root / "job")
     assert code == 0, out
     assert "VERIFIED  render package" in out and "job package: VERIFIED" in out
-    code, out = _cli(rendered.root / "reference.zip")
+    code, out = await _cli(rendered.root / "reference.zip")
     assert code == 1 and "not in the package and not supplied" in out
     args: list[str | Path] = [rendered.root / "reference.zip"]
     for p in sorted((rendered.root / "embedded" / "outputs").iterdir()):
         args += ["--file", p]
-    code, out = _cli(*args)
+    code, out = await _cli(*args)
     assert code == 0, out
     names = list(_unzipped((rendered.root / "embed.zip").read_bytes()))
     assert names[:6] == ["manifest.json", "events.jsonl", "files.jsonl", "natives.jsonl",
@@ -376,7 +376,7 @@ async def test_a_flipped_byte_inside_the_zip_fails(rendered: Rendered, tmp_path:
     at = data.index(f"outputs/{name}".encode()) + len(f"outputs/{name}") + 40
     data[at] ^= 0x01
     (tmp_path / "bad.zip").write_bytes(bytes(data))
-    code, out = _cli(tmp_path / "bad.zip")
+    code, out = await _cli(tmp_path / "bad.zip")
     assert code == 1 and f"output {name}: crc_mismatch" in out
 
 
@@ -390,7 +390,7 @@ async def test_a_consistently_rezipped_output_fails(rendered: Rendered, tmp_path
     with zipfile.ZipFile(tmp_path / "rezipped.zip", "w") as zf:
         for n, d in entries.items():
             zf.writestr(n, d)
-    code, out = _cli(tmp_path / "rezipped.zip")
+    code, out = await _cli(tmp_path / "rezipped.zip")
     assert code == 1 and "bytes do not match the recorded sha256/size" in out
 
 
@@ -423,7 +423,7 @@ async def test_other_unzippers_extract_a_package_that_verifies(
     output, _ = await proc.communicate()
     assert proc.returncode == 0, output
     assert _tree(out_dir) == _tree(rendered.root / "embedded")
-    code, out = _cli(out_dir)
+    code, out = await _cli(out_dir)
     assert code == 0, out
 
 
@@ -500,12 +500,12 @@ async def test_os_metadata_fails_by_default_and_is_tolerated_and_listed_with_the
 ) -> None:
     (pkg / name).parent.mkdir(parents=True, exist_ok=True)
     (pkg / name).write_bytes(b"\x00\x05\x16\x07")
-    code, out = _cli(pkg)
+    code, out = await _cli(pkg)
     assert code == 1 and f"ERROR {name}: not" in out
-    code, out = _cli(pkg, "--tolerate-os-metadata")
+    code, out = await _cli(pkg, "--tolerate-os-metadata")
     assert code == 0, out
     assert f"TOLERATED {name} (OS metadata, not part of the package)" in out
-    code, out = _cli(pkg, "--tolerate-os-metadata", "--json")
+    code, out = await _cli(pkg, "--tolerate-os-metadata", "--json")
     assert code == 0 and json.loads(out)["tolerated"] == [name]
 
 
@@ -516,7 +516,7 @@ async def test_anything_else_still_fails_with_the_option(pkg: Path, name: str) -
     (pkg / ".DS_Store").write_bytes(b"x")
     (pkg / name).parent.mkdir(parents=True, exist_ok=True)
     (pkg / name).write_bytes(b"planted")
-    code, out = _cli(pkg, "--tolerate-os-metadata")
+    code, out = await _cli(pkg, "--tolerate-os-metadata")
     assert code == 1 and f"ERROR {name}: not" in out
     assert "TOLERATED .DS_Store" in out
 
@@ -529,7 +529,7 @@ async def test_the_option_never_applies_to_a_zip(rendered: Rendered, tmp_path: P
         for n, d in entries.items():
             zf.writestr(n, d)
         zf.writestr("__MACOSX/._manifest.json", b"\x00")
-    code, out = _cli(tmp_path / "mac.zip", "--tolerate-os-metadata")
+    code, out = await _cli(tmp_path / "mac.zip", "--tolerate-os-metadata")
     assert code == 1 and "ERROR __MACOSX/._manifest.json: not part of this package" in out
     assert "does not apply to a zip" in out
 
@@ -543,3 +543,9 @@ async def test_the_planned_zip_size_is_the_streamed_size(
             render_id=rendered.render_id, outputs=mode,  # type: ignore[arg-type]
         )  # fmt: skip
         assert plan.zip_size == (rendered.root / f"{mode}.zip").stat().st_size, mode
+
+
+async def _cli(*args: Any, **kwargs: Any) -> Any:
+    """``_cli_blocking`` off the event loop: the CLI runs for seconds and the loop guard fails
+    a test whose loop waits on it (a synchronous subprocess wait on the loop thread)."""
+    return await asyncio.to_thread(_cli_blocking, *args, **kwargs)

@@ -637,3 +637,28 @@ Run `make test-real-idp` (`tests/real_idp/test_real_idp.py`: skipped with its re
 client id, `jwks_url` (registered, never discovered at sign-in), `groups_claim`,
 `login_client_auth = private_key_jwt`; on the platform side `EDISC_API_CLIENT_KEYS` (the KMS key
 and the certificate validity) and, for Okta's URL option, the base host public over https.
+
+## Implementation note: the groups claim is never read as "no groups" (2026-10-15, before step 4)
+Found reviewing the real-tenant list (Entra item 8): Entra ID replaces the `groups` claim with an
+overage marker (`_claim_names` / `_claim_sources`; `hasgroups` in implicit-flow tokens) above 200
+groups, and the sign-in and bearer paths read anything but a list as an EMPTY list, so a user would
+silently lose every role granted through IdP groups. Decided by the user: refuse.
+- `edisc_api.idp_groups.read` reports `overage`, `absent` or `malformed`. An overage refuses the
+  sign-in and a bearer token whatever the tenant's mapping (`groups_overage`). An absent or
+  malformed claim refuses them when the tenant's roles DEPEND on groups, i.e. a live role
+  assignment held by a group with an `external_id` (`groups_missing`); a present empty list is an
+  answer and is accepted.
+- Sign-in: the bounce page to `/?auth_error=groups_overage|groups_missing` (403), `login_failed`
+  with that reason (migration 0039 adds the two outcomes). Bearer: the generic 401 (ADR 0013: every
+  authentication failure looks the same). Both: an `authentication_refused` audit event (reason,
+  detail, `via`, issuer, principal) and an alert to the tenant admins, once per principal and reason
+  while unacknowledged (`alerts` kind = the reason).
+- **Okta to confirm:** a groups claim with a filter is OMITTED when no group matches; a tenant with
+  group-based roles must configure the claim so it is always emitted, or its users in no group
+  cannot sign in.
+- Fetching the groups from Microsoft Graph on an overage is a BACKLOG item.
+- Tests: `tests/integration/api/test_idp_groups.py` (overage by `_claim_names` and by `hasgroups`,
+  sign-in and bearer, the alert once; missing and malformed with group-based roles, sign-in and
+  bearer; present and empty lists accepted; a mapped group without a role does not make groups
+  required). The test helper's bearer tokens now carry `groups: []` by default, as a configured
+  IdP's would. Mutation round `m17-groups`: 6 breaks, all caught.

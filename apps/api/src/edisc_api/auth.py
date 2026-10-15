@@ -32,6 +32,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from edisc_api import idp_groups
 from edisc_api.errors import ApiError
 from edisc_api.sessions import token_hash, well_formed
 from edisc_core.logs import get_logger
@@ -268,9 +269,7 @@ class Authenticator:
         except jwt.PyJWTError as exc:
             raise AuthError(f"invalid token: {type(exc).__name__}") from exc
         subject = str(claims["sub"])
-        external_groups = claims.get(idp.groups_claim) or []
-        if not isinstance(external_groups, list):
-            external_groups = []
+        groups = idp_groups.read(claims, idp.groups_claim)
         async with tenant_tx(self.sessions, tenant_id) as s:
             principal = (
                 await s.execute(
@@ -282,14 +281,23 @@ class Authenticator:
             ).one_or_none()
             if principal is None or not principal.active:
                 raise AuthError("unknown or inactive principal")
-            result = await s.execute(
-                text(
-                    "SELECT id FROM groups WHERE external_id = ANY(:ext)"
-                    " UNION SELECT group_id FROM group_members WHERE principal_id = :p AND removed_at IS NULL"
-                ),
-                {"ext": [str(g) for g in external_groups], "p": principal.id},
-            )
-            group_ids: frozenset[uuid.UUID] = frozenset(result.scalars())
+            refused = idp_groups.refusal(groups, await idp_groups.depends_on_groups(s))
+            if refused is not None:  # audited and alerted; the answer stays the generic 401
+                await idp_groups.record_refusal(
+                    s, tenant_id=tenant_id, principal_id=principal.id, idp_issuer=issuer,
+                    code=refused, groups=groups, via="bearer", request_id=None,
+                )  # fmt: skip
+            else:
+                result = await s.execute(
+                    text(
+                        "SELECT id FROM groups WHERE external_id = ANY(:ext)"
+                        " UNION SELECT group_id FROM group_members WHERE principal_id = :p AND removed_at IS NULL"
+                    ),
+                    {"ext": groups.values or [], "p": principal.id},
+                )
+                group_ids: frozenset[uuid.UUID] = frozenset(result.scalars())
+        if refused is not None:  # after the commit: the audit and the alert stay
+            raise AuthError(f"refused: {refused}")
         signed_in = claims.get("auth_time", claims["iat"])
         authenticated_at = (
             datetime.fromtimestamp(signed_in, UTC)

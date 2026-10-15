@@ -60,7 +60,7 @@ async def report_worker(api: Api) -> AsyncIterator[None]:
         yield
 
 
-def _cli(*args: str | Path) -> tuple[int, str]:
+def _cli_blocking(*args: str | Path) -> tuple[int, str]:
     proc = subprocess.run(
         [sys.executable, "-m", "edisc_custody.cli", *map(str, args)],
         capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"}, timeout=300, check=False,
@@ -240,10 +240,10 @@ async def test_the_package_is_deterministic_and_recomputes_from_the_job_package(
         assert "outputs/report.json" in zf.namelist()
     (tmp_path / "report.zip").write_bytes(packages[0].content)
     (tmp_path / "job.zip").write_bytes(job_pkg.content)
-    code, out = _cli(tmp_path / "report.zip")
+    code, out = await _cli(tmp_path / "report.zip")
     assert code == 0, out
     assert "not recomputed (no --job-package given)" in out
-    code, out = _cli(tmp_path / "report.zip", "--job-package", tmp_path / "job.zip")
+    code, out = await _cli(tmp_path / "report.zip", "--job-package", tmp_path / "job.zip")
     assert code == 0, out
     # a job recorded with its unit facts (ADR 0018 §28): every unit row comes from the chain, and
     # units.jsonl is rebuilt from the job package byte for byte
@@ -266,13 +266,13 @@ async def test_a_tampered_chain_or_a_tampered_report_fails_verification(
         rpkg = (await c.get(f"/v1/reports/{report['id']}/package")).content
         jpkg = (await c.get(f"/v1/jobs/{job_id}/package", params={"objects": "omit"})).content
     good_report, good_job = _unzip(rpkg, tmp_path / "r"), _unzip(jpkg, tmp_path / "j")
-    assert _cli(good_report, "--job-package", good_job)[0] == 0
+    assert (await _cli(good_report, "--job-package", good_job))[0] == 0
 
     # a tampered chain: one unit event of the job says another count, and the forger even fixes the
     # package manifest's file hash: the event's own hash no longer matches its content
     bad_job = _unzip(jpkg, tmp_path / "j2")
     _edit_jsonl(bad_job / "events.jsonl", "unit_reconciled", "collected", 999)
-    code, out = _cli(good_report, "--job-package", bad_job)
+    code, out = await _cli(good_report, "--job-package", bad_job)
     assert code == 1 and "event_hash mismatch" in out, out
 
     # a tampered report: a units.jsonl row states another count (its recorded hash differs)
@@ -280,7 +280,7 @@ async def test_a_tampered_chain_or_a_tampered_report_fails_verification(
     lines = (bad_report / "outputs" / "units.jsonl").read_bytes().splitlines(keepends=True)
     lines[0] = lines[0].replace(b'"collected":', b'"collected":1', 1)
     (bad_report / "outputs" / "units.jsonl").write_bytes(b"".join(lines))
-    code, out = _cli(bad_report, "--job-package", good_job)
+    code, out = await _cli(bad_report, "--job-package", good_job)
     assert code == 1 and "outputs/units.jsonl" in out, out
 
 
@@ -305,8 +305,8 @@ async def test_a_report_built_to_other_facts_than_the_chain_fails_the_recomputat
         rpkg = (await c.get(f"/v1/reports/{report['id']}/package")).content
         jpkg = (await c.get(f"/v1/jobs/{job_id}/package", params={"objects": "omit"})).content
     r, j = _unzip(rpkg, tmp_path / "r"), _unzip(jpkg, tmp_path / "j")
-    assert _cli(r)[0] == 0  # alone, the package is consistent
-    code, out = _cli(r, "--job-package", j)
+    assert (await _cli(r))[0] == 0  # alone, the package is consistent
+    code, out = await _cli(r, "--job-package", j)
     assert code == 1, out
     assert "recomputed from the job chain: units.jsonl" in out and "expected" in out, out
 
@@ -332,8 +332,8 @@ async def test_a_unit_row_stating_other_database_facts_fails_the_byte_for_byte_r
         rpkg = (await c.get(f"/v1/reports/{report['id']}/package")).content
         jpkg = (await c.get(f"/v1/jobs/{job_id}/package", params={"objects": "omit"})).content
     r, j = _unzip(rpkg, tmp_path / "r"), _unzip(jpkg, tmp_path / "j")
-    assert _cli(r)[0] == 0
-    code, out = _cli(r, "--job-package", j)
+    assert (await _cli(r))[0] == 0
+    code, out = await _cli(r, "--job-package", j)
     assert code == 1, out
     assert "units.jsonl: the file is not what the chain gives" in out, out
     assert "scopes: written [7], recomputed [0]" in out, out
@@ -360,8 +360,8 @@ async def test_a_forged_clean_report_fails_the_verdict_from_the_chain(
     r, j = await _packages(api, tenant, job_id, report, tmp_path)
     doc = json.loads((r / "outputs" / "report.json").read_bytes())
     assert doc["job"]["clean"] is True and doc["job"]["status"] == "completed_with_gaps"
-    assert _cli(r)[0] == 0  # alone, the package is consistent
-    code, out = _cli(r, "--job-package", j)
+    assert (await _cli(r))[0] == 0  # alone, the package is consistent
+    code, out = await _cli(r, "--job-package", j)
     assert code == 1, out
     assert "VERDICT from the job chain alone: NOT clean" in out, out
     assert (
@@ -398,7 +398,7 @@ async def test_a_report_not_clean_for_a_clean_chain_passes_and_names_its_reasons
     r, j = await _packages(api, tenant, job_id, report, tmp_path)
     doc = json.loads((r / "outputs" / "report.json").read_bytes())
     assert (doc["job"]["status"], doc["job"]["clean"]) == ("completed", False)
-    code, out = _cli(r, "--job-package", j)
+    code, out = await _cli(r, "--job-package", j)
     assert code == 0, out
     assert "VERDICT from the job chain alone: clean" in out, out
     assert "the report states NOT clean although the chain gives clean" in out, out
@@ -430,7 +430,7 @@ async def test_normalizer_versions_are_recorded_and_recomputed_from_the_chain(
     r, j = await _packages(api, tenant, job_id, report, tmp_path)
     doc = json.loads((r / "outputs" / "report.json").read_bytes())
     assert doc["versions"]["normalizer_versions"] == [NORMALIZER_VERSION]
-    code, out = _cli(r, "--job-package", j)
+    code, out = await _cli(r, "--job-package", j)
     assert code == 0, out
     assert "normalizer-version sections" in out and "the normalizer versions (the job" not in out
 
@@ -544,5 +544,11 @@ async def test_the_verifier_is_strict_about_unlisted_files(
         rpkg = (await c.get(f"/v1/reports/{report['id']}/package")).content
     root = _unzip(rpkg, tmp_path / "r")
     (root / "outputs" / "extra.txt").write_bytes(b"not in the report")
-    code, out = _cli(root)
+    code, out = await _cli(root)
     assert code == 1 and "outputs/extra.txt: not part of this package" in out, out
+
+
+async def _cli(*args: Any, **kwargs: Any) -> Any:
+    """``_cli_blocking`` off the event loop: the CLI runs for seconds and the loop guard fails
+    a test whose loop waits on it (a synchronous subprocess wait on the loop thread)."""
+    return await asyncio.to_thread(_cli_blocking, *args, **kwargs)

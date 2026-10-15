@@ -21,7 +21,7 @@ from ..normalizer.harness import Sessions, new_tenant
 from ..renders.conftest import drive, new_render
 from ..renders.test_render_natives import BIG, OPTIONS
 from ..renders.test_render_store import _job
-from .test_render_package import _cli, _read, _write
+from .test_render_package import _cli_blocking, _read, _write
 
 
 @pytest.fixture(scope="module")
@@ -53,7 +53,7 @@ def _natives(pkg: Path) -> list[dict[str, object]]:
 
 
 def _fails(pkg: Path, *expected: str) -> str:
-    code, out = _cli(pkg)
+    code, out = _cli_blocking(pkg)
     assert code == 1, out
     for e in expected:
         assert e in out, out
@@ -63,7 +63,7 @@ def _fails(pkg: Path, *expected: str) -> str:
 def test_the_clean_package_verifies(exported: Path) -> None:
     natives = _natives(exported)
     assert natives
-    code, out = _cli(exported)
+    code, out = _cli_blocking(exported)
     assert code == 0, out
     assert f"{len(natives)} natives re-hashed" in out
 

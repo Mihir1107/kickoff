@@ -1287,3 +1287,15 @@ what was done and why.
     `tests/integration/api/test_pool_exhaustion.py` (503 + `Retry-After` + the log line, then a
     200). Mutation round `s24-pool-exhaustion` (5 breaks, all caught). The connection budget across
     replicas and PgBouncer are a BACKLOG hardening item.
+15. **A test's own CLI run blocked its loop (2026-10-15, diagnosed, test bug).** A local run of
+    `tests/integration/api` failed `test_the_package_is_deterministic_and_recomputes_from_the_job_package`
+    with one loop block over 250 ms, sampled in `subprocess.communicate` -> `selectors.select` under
+    the test's `_cli`: the async test ran `edisc-verify` through a SYNCHRONOUS `subprocess.run` on its
+    own event loop, so the loop waited as long as the CLI ran. Usually such a wait is classified
+    "idle" (the loop's thread parked in `select`); this time the thread was MEASURED busy for enough
+    of the window (process spawn and the output decode) and it counted, hence intermittent (it had
+    passed in every earlier full run). Same pattern in seven more files (every `edisc-verify` helper
+    called from async tests). Fix (tests only, no product code involved): each helper is
+    `<name>_blocking` plus an async `<name>` running it in a thread (`asyncio.to_thread`); async tests
+    await it, sync tests call the blocking one. `loopblock` deliberately excuses synchronous tools a
+    TEST drives on the loop (origin `test`), so it was not extended. Nothing was loosened.

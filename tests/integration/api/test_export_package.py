@@ -6,6 +6,7 @@ process with no database or cloud settings."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import shutil
@@ -15,6 +16,7 @@ import uuid
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -26,7 +28,7 @@ from .test_export_collection import THREADS, _export_connection, _job, _scope, _
 from .test_jobs import make_world
 
 
-def verify(pkg: Path, *archives: Path) -> tuple[int, str, dict[str, object]]:
+def verify_blocking(pkg: Path, *archives: Path) -> tuple[int, str, dict[str, object]]:
     args = [sys.executable, "-m", "edisc_custody.cli", str(pkg), "--json"]
     for a in archives:
         args += ["--archive", str(a)]
@@ -81,24 +83,24 @@ async def test_embedded_archive_verifies_offline(
     (older / "manifest.json").write_text(json.dumps(
         {**manifest, "format": "edisc-custody-package/2", "exported_at": "2026-10-01T00:00:00Z"}
     ))  # fmt: skip
-    assert verify(older)[0] == 0
+    assert (await verify(older))[0] == 0
     (archive,) = manifest["archives"]
     assert archive["embedded"] and archive["sha256"] == hashlib.sha256(data).hexdigest()
     assert (pkg / "objects" / archive["sha256"]).read_bytes() == data
-    code, out, report = verify(pkg)
+    code, out, report = await verify(pkg)
     assert code == 0, out
     # users.json, the 5 Jan day file, and the 1 and 9 Jan files read for thread context
     assert (report["archives_checked"], report["entries_checked"]) == (1, 4)
-    assert report["items_checked"] > 0 and "archive entries extracted and verified" in verify_text(
-        pkg
-    )
+    assert report[
+        "items_checked"
+    ] > 0 and "archive entries extracted and verified" in await verify_text(pkg)
 
     # a single flipped byte in the embedded zip: refused at the archive hash, no entry opened
     zip_path = pkg / "objects" / archive["sha256"]
     tampered = bytearray(zip_path.read_bytes())
     tampered[len(tampered) // 2] ^= 0x01
     zip_path.write_bytes(bytes(tampered))
-    code, out, report = verify(pkg)
+    code, out, report = await verify(pkg)
     assert code == 1 and "SHA-256/size do not match the record" in out
     assert report["entries_checked"] == 0
 
@@ -112,17 +114,17 @@ async def test_an_embedded_archive_is_read_inside_a_zip_package(
     exp, job_id, _ = export_job
     pkg = await _package(exp, tenant, job_id, tmp_path / "pkg", "embed")
     stored = zip_directory(pkg, tmp_path / "job.zip")
-    code, out = cli_without_writes(stored, "--json")
+    code, out = await cli_without_writes(stored, "--json")
     assert code == 0, out
     report = json.loads(out)
     assert (report["archives_checked"], report["entries_checked"]) == (1, 4)
     deflated = zip_directory(pkg, tmp_path / "deflated.zip", method=zipfile.ZIP_DEFLATED)
-    code, out, report = verify(deflated)
+    code, out, report = await verify(deflated)
     assert code == 1 and "not stored" in out, out
     assert report["entries_checked"] == 0
 
 
-def verify_text(pkg: Path, *archives: Path) -> str:
+def verify_text_blocking(pkg: Path, *archives: Path) -> str:
     args = [sys.executable, "-m", "edisc_custody.cli", str(pkg)]
     for a in archives:
         args += ["--archive", str(a)]
@@ -141,19 +143,19 @@ async def test_referenced_archive_is_supplied_and_hash_checked_first(
     assert not archive["embedded"] and not (pkg / "objects" / archive["sha256"]).exists()
     assert archive["limits"]["max_entries"] > 0  # verified under the export's own limits
 
-    code, out, report = verify(pkg)  # nothing supplied
+    code, out, report = await verify(pkg)  # nothing supplied
     assert code == 1 and "supply the archive with --archive" in out
     assert report["entries_checked"] == 0
 
     supplied = tmp_path / "any-name.zip"  # matched by content, not by file name
     supplied.write_bytes(data)
-    code, out, report = verify(pkg, supplied)
+    code, out, report = await verify(pkg, supplied)
     assert code == 0, out
     assert (report["archives_checked"], report["entries_checked"]) == (1, 4)
 
     wrong = tmp_path / "other.zip"
     wrong.write_bytes(_zip({"general/2026-01-05.json": []}))
-    code, out, report = verify(pkg, wrong)
+    code, out, report = await verify(pkg, wrong)
     assert code == 1 and report["entries_checked"] == 0
 
 
@@ -183,6 +185,18 @@ async def test_entry_records_are_checked_against_the_archive(
             "sha256": hashlib.sha256(body).hexdigest(), "lines": len(rows),
         }  # fmt: skip
         (copy / "manifest.json").write_bytes(canonical_json(manifest))
-        code, out, report = verify(copy)
+        code, out, report = await verify(copy)
         assert code == 1, (field, out)
         assert report["entries_checked"] == 3  # the other entries still verify
+
+
+async def verify_text(*args: Any, **kwargs: Any) -> Any:
+    """``verify_text_blocking`` off the event loop: the CLI runs for seconds and the loop guard fails
+    a test whose loop waits on it (a synchronous subprocess wait on the loop thread)."""
+    return await asyncio.to_thread(verify_text_blocking, *args, **kwargs)
+
+
+async def verify(*args: Any, **kwargs: Any) -> Any:
+    """``verify_blocking`` off the event loop: the CLI runs for seconds and the loop guard fails
+    a test whose loop waits on it (a synchronous subprocess wait on the loop thread)."""
+    return await asyncio.to_thread(verify_blocking, *args, **kwargs)

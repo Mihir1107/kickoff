@@ -6,12 +6,14 @@ object differs from its record."""
 
 from __future__ import annotations
 
+import asyncio
 import io
 import subprocess
 import sys
 import uuid
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -29,7 +31,7 @@ from .test_reports import _sealed_job, report_worker
 __all__ = ["report_worker"]  # the fixture, re-exported for pytest
 
 
-def _cli(*args: str | Path) -> tuple[int, str]:
+def _cli_blocking(*args: str | Path) -> tuple[int, str]:
     proc = subprocess.run(
         [sys.executable, "-m", "edisc_custody.cli", *map(str, args)],
         capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"}, timeout=300, check=False,
@@ -88,7 +90,7 @@ async def test_downloads_verify_are_byte_identical_and_equal_the_directory_expor
     for resp in (embed[0], omit):
         assert int(resp.headers["content-length"]) == len(resp.content)
     (tmp_path / "job.zip").write_bytes(embed[0].content)
-    code, out = _cli(tmp_path / "job.zip")
+    code, out = await _cli(tmp_path / "job.zip")
     assert code == 0, out
     assert "evidence objects re-hashed" in out
     # one generator: the directory export holds exactly the zip's entries and bytes
@@ -155,3 +157,9 @@ async def test_an_object_that_differs_from_its_record_aborts_the_stream(
             .all()
         )
     assert len(alerts) == 1 and job_id in alerts[0]
+
+
+async def _cli(*args: Any, **kwargs: Any) -> Any:
+    """``_cli_blocking`` off the event loop: the CLI runs for seconds and the loop guard fails
+    a test whose loop waits on it (a synchronous subprocess wait on the loop thread)."""
+    return await asyncio.to_thread(_cli_blocking, *args, **kwargs)

@@ -73,6 +73,9 @@ Rounds (ADR 0015):
   local/test/ci (start and callback), the discovery check, the published keys (base host only,
   thumbprint kid, deterministic certificate), key work off the loop, and each check of the test IdP
   (so the refused-variant tests are live).
+- ``m17-groups``: the IdP's groups claim is never read as "no groups": Entra's overage and an absent
+  or malformed claim (when roles depend on groups) refuse the sign-in and bearer tokens, audited and
+  alerted once.
 - ``m17-host-cookie``: the session cookie is host-only (``__Host-``, no ``Domain``) and a same-site
   request from a neighbouring subdomain is refused, both in real browsers (ADR 0016 §2).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
@@ -119,6 +122,8 @@ WK = "apps/api/src/edisc_api/routes/wellknown.py"
 TIDP = "tests/integration/api/oidc.py"
 ICA = "tests/integration/api/test_client_auth.py"
 UCA = "tests/unit/api/test_client_auth.py"
+IDG = "apps/api/src/edisc_api/idp_groups.py"
+TIG = "tests/integration/api/test_idp_groups.py"
 DC = "packages/connectors/dummy/src/edisc_connector_dummy/connector.py"
 ULG = "tests/unit/core/test_loopguard.py"
 LB = "packages/core/src/edisc_core/loopblock.py"
@@ -1376,6 +1381,22 @@ CATALOG: list[Mutation] = [
       '            return "no_assertion"', "            return None", ICA, "missing_assertion"),
     m("idp_client_secret_ok", "m17-client-auth", TIDP,
       '            return "client_secret"', "            return None", ICA, "client_secret_instead"),
+    # ------------------------------------------------------------------ groups claim (before step 4)
+    m("overage_read_as_no_groups", "m17-groups", IDG, '        return Groups(None, "overage")\n',
+      "        return Groups([])\n", TIG, "overage"),
+    m("missing_read_as_no_groups", "m17-groups", IDG, "    if groups.values is None and depends:\n",
+      "    if False:\n", TIG, "missing"),
+    m("malformed_read_as_no_groups", "m17-groups", IDG,
+      '        return Groups(None, "malformed")\n', "        return Groups([])\n", TIG,
+      "refuses_the_sign_in_when_roles"),
+    m("depends_ignores_roles", "m17-groups", IDG, '" WHERE r.revoked_at IS NULL AND g.external_id IS NOT NULL)"',
+      '" WHERE g.external_id IS NOT NULL) OR EXISTS (SELECT 1 FROM groups WHERE external_id IS NOT NULL)"',
+      TIG, "no_role_depends"),
+    m("bearer_groups_unchecked", "m17-groups", "apps/api/src/edisc_api/auth.py",
+      "            refused = idp_groups.refusal(groups, await idp_groups.depends_on_groups(s))\n",
+      "            refused = None\n", TIG, "bearer"),
+    m("groups_alert_repeated", "m17-groups", IDG, '" WHERE NOT EXISTS (SELECT 1 FROM alerts WHERE kind = :k AND message = :m"',
+      '" WHERE NOT EXISTS (SELECT 1 FROM alerts WHERE false AND message = :m"', TIG, "bearer_token_with"),
     # ------------------------------------------------------------------ host-only session cookie
     Mutation("session_cookie_domain_wide", "m17-host-cookie", SESP, (
         ('SESSION_COOKIE = "__Host-edisc_session"', 'SESSION_COOKIE = "edisc_session"'),

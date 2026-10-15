@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -23,7 +25,7 @@ from .conftest import run_job
 Sessions = async_sessionmaker[AsyncSession]
 
 
-def _cli(pkg: Path, *args: str) -> tuple[int, str]:
+def _cli_blocking(pkg: Path, *args: str) -> tuple[int, str]:
     """Run the verifier exactly as an expert would: separate process, no DB/S3 settings in its env."""
     proc = subprocess.run(
         [sys.executable, "-m", "edisc_custody.cli", str(pkg), *args],
@@ -63,7 +65,7 @@ async def package(app_sessions: Sessions, s3: S3Client, settings: Settings, tmp_
 
 
 async def test_clean_package_verifies_offline(package: Path) -> None:
-    code, out = _cli(package)
+    code, out = await _cli(package)
     assert code == 0, out
     assert "VERIFIED" in out
     assert "12 batches" in out
@@ -84,7 +86,7 @@ async def test_edit_without_fixing_manifest(package: Path) -> None:
     events = _read(package, "events.jsonl")
     events[2]["fields"]["actor"] = "mallory"  # type: ignore[index]
     _write(package, "events.jsonl", events, fix_manifest=False)
-    code, out = _cli(package)
+    code, out = await _cli(package)
     assert code == 1
     assert "does not match manifest" in out
 
@@ -100,7 +102,7 @@ async def test_consistent_offline_rewrite_is_caught_by_anchors(package: Path) ->
     manifest = json.loads((package / "manifest.json").read_bytes())
     manifest["head"]["hash"] = prev
     (package / "manifest.json").write_bytes(canonical_json(manifest))
-    code, out = _cli(package)
+    code, out = await _cli(package)
     assert code == 1
     assert "disagrees with the WORM anchor (chain rewritten)" in out
 
@@ -109,7 +111,7 @@ async def test_item_content_hash_change_breaks_merkle_and_key(package: Path) -> 
     items = _read(package, "items.jsonl")
     items[5]["content_hash"] = "ee" * 32
     _write(package, "items.jsonl", items, fix_manifest=True)
-    code, out = _cli(package)
+    code, out = await _cli(package)
     assert code == 1
     assert "Merkle root mismatch" in out
     assert "idempotency_key does not match" in out
@@ -118,7 +120,7 @@ async def test_item_content_hash_change_breaks_merkle_and_key(package: Path) -> 
 async def test_evidence_bytes_altered(package: Path) -> None:
     obj = next((package / "objects").iterdir())
     obj.write_bytes(obj.read_bytes().replace(b"msg", b"MSG", 1))
-    code, out = _cli(package)
+    code, out = await _cli(package)
     assert code == 1
     assert "bytes do not match recorded sha256" in out
 
@@ -129,7 +131,7 @@ async def test_raw_hash_checked_against_page_fragment(package: Path) -> None:
         "$.messages[1]" if items[0]["json_path"] != "$.messages[1]" else "$.messages[0]"
     )
     _write(package, "items.jsonl", items, fix_manifest=True)
-    code, out = _cli(package)
+    code, out = await _cli(package)
     assert code == 1
     assert "raw_hash does not match the page fragment" in out
 
@@ -142,13 +144,13 @@ async def test_dropping_the_seal_anchor_fails_a_finalized_package(package: Path)
         sorted(anchors, key=lambda a: str(a["key"]))[:-1],
         fix_manifest=True,
     )
-    code, out = _cli(package)
+    code, out = await _cli(package)
     assert code == 1
     assert "no matching WORM seal" in out
 
 
 def test_unreadable_package_exits_2(tmp_path: Path) -> None:
-    code, out = _cli(tmp_path)
+    code, out = _cli_blocking(tmp_path)
     assert code == 2, out
 
 
@@ -170,7 +172,7 @@ sys.exit(main(sys.argv[1:]))
 """
 
 
-def cli_without_writes(*args: str | Path) -> tuple[int, str]:
+def cli_without_writes_blocking(*args: str | Path) -> tuple[int, str]:
     """The verifier with an audit hook that fails on any file write, directory or temp file: a zip
     package is read where it lies, never copied out (ADR 0018 §28)."""
     proc = subprocess.run(
@@ -201,11 +203,11 @@ def zip_directory(src: Path, dest: Path, *, extra: dict[str, bytes] | None = Non
 
 async def test_a_file_the_manifest_does_not_list_fails_the_package(package: Path) -> None:
     (package / "notes.txt").write_text("added after export")
-    code, out = _cli(package)
+    code, out = await _cli(package)
     assert code == 1 and "notes.txt: not part of this package" in out, out
     (package / "notes.txt").unlink()
     (package / "objects" / ("ab" * 32)).write_bytes(b"an object nothing references")
-    code, out = _cli(package)
+    code, out = await _cli(package)
     assert code == 1 and f"objects/{'ab' * 32}: not an evidence object" in out, out
 
 
@@ -214,23 +216,23 @@ async def test_os_metadata_is_tolerated_only_in_a_directory_and_only_on_request(
 ) -> None:
     (package / ".DS_Store").write_bytes(b"\0\0\0\1Bud1")
     (package / "objects" / "._x").write_bytes(b"AppleDouble")
-    code, out = _cli(package)
+    code, out = await _cli(package)
     assert code == 1 and ".DS_Store: not part of this package" in out, out
-    code, out = _cli(package, "--tolerate-os-metadata")
+    code, out = await _cli(package, "--tolerate-os-metadata")
     assert code == 0, out
     assert "TOLERATED .DS_Store" in out and "TOLERATED objects/._x" in out
     # a zip is verified strictly, whatever the option says
     (package / ".DS_Store").unlink()
     (package / "objects" / "._x").unlink()
     pkg_zip = zip_directory(package, tmp_path / "job.zip", extra={".DS_Store": b"x"})
-    code, out = _cli(pkg_zip, "--tolerate-os-metadata")
+    code, out = await _cli(pkg_zip, "--tolerate-os-metadata")
     assert code == 1 and ".DS_Store: not part of this package" in out, out
     assert "does not apply to a zip" in out
 
 
 async def test_a_zip_package_is_verified_in_place(package: Path, tmp_path: Path) -> None:
     pkg_zip = zip_directory(package, tmp_path / "job.zip")
-    code, out = cli_without_writes(pkg_zip)
+    code, out = await cli_without_writes(pkg_zip)
     assert code == 0, out
     assert "48 items and 12 evidence objects re-hashed" in out
     # the control: the hook does catch a write (so the check above can fail)
@@ -241,5 +243,17 @@ async def test_a_zip_package_is_verified_in_place(package: Path, tmp_path: Path)
     at = data.find(b'"actor":"')
     data[at + 9] ^= 0x01
     (tmp_path / "bad.zip").write_bytes(bytes(data))
-    code, out = cli_without_writes(tmp_path / "bad.zip")
+    code, out = await cli_without_writes(tmp_path / "bad.zip")
     assert code in (1, 2) and not out.startswith("VERIFIED"), out
+
+
+async def _cli(*args: Any, **kwargs: Any) -> Any:
+    """``_cli_blocking`` off the event loop: the CLI runs for seconds and the loop guard fails
+    a test whose loop waits on it (a synchronous subprocess wait on the loop thread)."""
+    return await asyncio.to_thread(_cli_blocking, *args, **kwargs)
+
+
+async def cli_without_writes(*args: Any, **kwargs: Any) -> Any:
+    """``cli_without_writes_blocking`` off the event loop: the CLI runs for seconds and the loop guard fails
+    a test whose loop waits on it (a synchronous subprocess wait on the loop thread)."""
+    return await asyncio.to_thread(cli_without_writes_blocking, *args, **kwargs)

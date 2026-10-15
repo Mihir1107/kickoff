@@ -204,7 +204,7 @@ async def test_group_claims_grant_roles_and_revocation_removes_them(
             )
         ).json()
     with_claim = tenant.token(api.settings, subject=subject, groups=["lit-team"])
-    without = tenant.token(api.settings, subject=subject)
+    without = tenant.token(api.settings, subject=subject, groups=[])  # in no IdP group
     async with api.client(tenant.subdomain, with_claim) as c:
         assert (await c.get(f"/v1/matters/{world.m1}")).status_code == 200
     async with api.client(tenant.subdomain, without) as c:

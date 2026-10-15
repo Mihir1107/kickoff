@@ -93,6 +93,10 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   goes in that action's audit payload. A new sensitive route does the same and joins the table in
   `test_sessions.py::_sensitive_requests`.
 - Deactivation and admin revocation end every session in their own transaction. Nothing is deleted.
+- The IdP's groups claim only through `edisc_api.idp_groups` (sign-in and bearer): an overage
+  (`_claim_names`/`hasgroups`) or, when roles depend on groups, an absent/malformed claim REFUSES
+  (`groups_overage` / `groups_missing`, audited, alerted); never read as "no groups". An empty list is
+  an answer.
 - Client authentication at the IdP (M17 step 3b): `private_key_jwt` only, through
   `edisc_api.client_auth.ClientSigner` (ONE place builds client assertions; the Teams
   client-credentials leg reuses it). The platform key lives in KMS (`KmsSigner`), never in a setting,

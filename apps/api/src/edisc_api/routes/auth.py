@@ -35,7 +35,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from edisc_api import audit
+from edisc_api import audit, idp_groups
 from edisc_api.app import (
     CallerDep,
     RequestIdDep,
@@ -84,7 +84,7 @@ PROVIDER_ERRORS = frozenset({
 })  # fmt: skip
 FAILURE_STATUS = {
     "denied": 400, "expired": 400, "invalid": 400, "unknown_user": 401, "inactive": 401,
-    "reauth_mismatch": 403,
+    "reauth_mismatch": 403, idp_groups.OVERAGE: 403, idp_groups.MISSING: 403,
 }  # fmt: skip
 
 
@@ -414,6 +414,18 @@ async def _sign_in(
         return await _fail(request, res, tenant_id, a.id, "unknown_user", rid)
     if not principal.active:
         return await _fail(request, res, tenant_id, a.id, "inactive", rid, principal=principal.id)
+    async with tenant_tx(res.sessions, tenant_id) as s:
+        refused = idp_groups.refusal(claims.groups, await idp_groups.depends_on_groups(s))
+        if refused is not None:  # never read as "no groups": the roles they grant are unknown
+            await idp_groups.record_refusal(
+                s, tenant_id=tenant_id, principal_id=principal.id, idp_issuer=issuer, code=refused,
+                groups=claims.groups, via="sign_in", request_id=rid,
+            )  # fmt: skip
+    if refused is not None:
+        return await _fail(
+            request, res, tenant_id, a.id, refused, rid, detail=claims.groups.problem,
+            principal=principal.id,
+        )  # fmt: skip
     if a.reauth and (
         prior is None
         or prior.principal_id != principal.id
@@ -440,7 +452,7 @@ async def _sign_in(
             ),
             {"i": session_row, "t": tenant_id, "p": principal.id, "idp": a.idp_id,
              "h": token_hash(session_value), "now": now, "at": authenticated_at, "idle": idle,
-             "abs": absolute, "g": claims.groups, "ua": stored_user_agent(request.headers.get("user-agent")),
+             "abs": absolute, "g": claims.groups.values or [], "ua": stored_user_agent(request.headers.get("user-agent")),
              "ip": request.client.host if request.client else None, "rid": rid},
         )  # fmt: skip
         rotated = None

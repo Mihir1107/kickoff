@@ -29,7 +29,9 @@ from typing import Any
 import httpx
 import jwt
 
+from edisc_api import idp_groups
 from edisc_api.auth import ALLOWED_ALGS, JwksCache
+from edisc_api.idp_groups import Groups
 from edisc_core.settings import Settings
 
 DISCOVERY_SECONDS = 3600
@@ -76,7 +78,7 @@ def check_client_auth(provider: Provider, method: str) -> None:
 @dataclass(frozen=True)
 class IdToken:
     subject: str
-    groups: list[str]
+    groups: Groups  # never "no groups" for an overage or an absent claim (edisc_api.idp_groups)
     auth_time: datetime | None
     issued_at: datetime
 
@@ -207,10 +209,9 @@ class OidcClient:
         ):
             raise OidcError("invalid", "id_token issued in the future")
         auth_time = claims.get("auth_time")
-        groups = claims.get(groups_claim) or []
         return IdToken(
             subject=str(claims["sub"]),
-            groups=[str(g) for g in groups] if isinstance(groups, list) else [],
+            groups=idp_groups.read(claims, groups_claim),
             auth_time=(
                 datetime.fromtimestamp(auth_time, UTC)
                 if isinstance(auth_time, int | float) and not isinstance(auth_time, bool)

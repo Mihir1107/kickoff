@@ -5,6 +5,7 @@ while streaming, an aborted stream on a mismatch), and render packages carrying 
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import subprocess
@@ -35,7 +36,7 @@ BIG = spec(conversations=2, messages_per_unit=12, p_file=0.15, file_size_min=2 *
            file_size_span=64 << 10)  # fmt: skip
 
 
-def _cli(*args: str | Path) -> tuple[int, str]:
+def _cli_blocking(*args: str | Path) -> tuple[int, str]:
     proc = subprocess.run(
         [sys.executable, "-m", "edisc_custody.cli", *map(str, args)],
         capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"}, timeout=120, check=False,
@@ -212,7 +213,7 @@ async def test_packages_with_natives_verify_as_downloaded(
     assert min(i for i, n in enumerate(names) if n.startswith("natives/")) > last_output
     assert len(native_lines) == len(natives)
     (tmp_path / "embed.zip").write_bytes(embed[0].content)
-    code, out = _cli(tmp_path / "embed.zip")
+    code, out = await _cli(tmp_path / "embed.zip")
     assert code == 0, out
     assert f"{len(natives)} natives re-hashed" in out
 
@@ -233,9 +234,9 @@ async def test_packages_with_natives_verify_as_downloaded(
                 (await c.get(f"/v1/renders/{render['id']}/natives/{n['sha256']}/content")).content
             )
             supplied += ["--file", path]
-    code, out = _cli(tmp_path / "reference.zip", *supplied)
+    code, out = await _cli(tmp_path / "reference.zip", *supplied)
     assert code == 0, out
-    code, out = _cli(tmp_path / "reference.zip", *outputs_only)
+    code, out = await _cli(tmp_path / "reference.zip", *outputs_only)
     assert code == 1 and "not in the package and not supplied" in out, out
 
 
@@ -262,3 +263,9 @@ async def test_a_native_that_differs_from_its_record_aborts_the_package(
         if e.event_type == "audit.render_package_aborted"
     ]
     assert len(aborted) == 1 and aborted[0].payload["integrity"] is True
+
+
+async def _cli(*args: Any, **kwargs: Any) -> Any:
+    """``_cli_blocking`` off the event loop: the CLI runs for seconds and the loop guard fails
+    a test whose loop waits on it (a synchronous subprocess wait on the loop thread)."""
+    return await asyncio.to_thread(_cli_blocking, *args, **kwargs)
