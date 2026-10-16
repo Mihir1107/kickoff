@@ -12,8 +12,14 @@ download and stream (reason ``stalled``, audited)."""
 from __future__ import annotations
 
 import asyncio
+import io
+import itertools
+import struct
 import time
+import zipfile
 from typing import Any
+
+from sqlalchemy import event
 
 from edisc_api.app import create_app
 
@@ -31,6 +37,15 @@ STALLED = 50  # 40 natives + 10 render packages (embed: object members read from
 PACKAGES = 10
 STREAMS = 10
 SERVED_WITHIN = 20.0  # seconds for the other client's whole download; the stall bound is 60
+
+
+def _inside_a_large_member(package: bytes) -> int:
+    """An offset just past the start of the data of the first member over 1 MiB."""
+    with zipfile.ZipFile(io.BytesIO(package)) as zf:
+        member = next(i for i in zf.infolist() if i.file_size > (1 << 20))
+        header = package[member.header_offset : member.header_offset + 30]
+        name_len, extra_len = struct.unpack("<HH", header[26:30])
+    return member.header_offset + 30 + name_len + extra_len + 1
 
 
 def _s3_in_use(s3: Any) -> int:
@@ -69,11 +84,27 @@ async def test_stalled_clients_hold_nothing_pooled_and_others_are_served(
     host, token = host_of(api, tenant), tenant.token(api.settings)
     path = f"/v1/renders/{render['id']}/natives/{natives[0]['sha256']}/content"
     package = f"/v1/renders/{render['id']}/package?outputs=embed"
+    # every checkout of the API's database pool: (connection record) -> which checkout it is
+    pool = api.sessions.kw["bind"].sync_engine
+    out: dict[int, int] = {}
+    count = itertools.count()
+
+    def checkout(_dbapi: Any, record: Any, _proxy: Any) -> None:
+        out[id(record)] = next(count)
+
+    def checkin(_dbapi: Any, record: Any) -> None:
+        out.pop(id(record), None)
+
+    event.listen(pool, "checkout", checkout)
+    event.listen(pool, "checkin", checkin)
     async with api.client(tenant.subdomain, token) as c:
-        size = int((await c.get(package)).headers["content-length"])
-    # a package stalls half way: inside its object members (most of its bytes), not its header
+        whole_package = (await c.get(package)).content
+    # a package stalls INSIDE an object member larger than one S3 read (1 MiB): a member read in
+    # one piece is fully read (its connection back in the pool) before it is written, so stalling
+    # anywhere else would prove nothing about the object members
+    inside = _inside_a_large_member(whole_package)
     stalled = [
-        await _stalled_download(app, host, package, token, after=size // 2) for _ in range(PACKAGES)
+        await _stalled_download(app, host, package, token, after=inside) for _ in range(PACKAGES)
     ] + [await _stalled_download(app, host, path, token) for _ in range(STALLED - PACKAGES)]
     await asyncio.wait_for(asyncio.gather(*(p.first.wait() for p, _ in stalled)), 120)
     job = await new_job(api, tenant)
@@ -84,8 +115,13 @@ async def test_stalled_clients_hold_nothing_pooled_and_others_are_served(
         await sse.next()
         sse.pause()  # the next write (the keepalive) blocks
     try:
-        engine = api.sessions.kw["bind"]
-        assert engine.pool.checkedout() == 0, "a stalled response holds a database connection"
+        # the streams' feed polls and session checks use the pool in short transactions while
+        # everything is stalled; nothing may STAY checked out: whatever is out now must be back
+        # after several poll cycles (an instant count would also see a poll in flight)
+        before = dict(out)
+        await asyncio.sleep(3 * api.settings.api_stream_poll_seconds + 1)
+        held = {k for k, n in before.items() if out.get(k) == n}
+        assert not held, "a stalled response holds a database connection"
         in_use = list(api.resources.redis.connection_pool._get_in_use_connections())
         assert in_use == [], "a stalled response holds a Redis connection"
         assert _s3_in_use(api.s3) == 0, "a stalled response holds a pooled S3 connection"
@@ -105,6 +141,8 @@ async def test_stalled_clients_hold_nothing_pooled_and_others_are_served(
         for sse in streams:
             sse.resume()
             await sse.close()
+        event.remove(pool, "checkout", checkout)
+        event.remove(pool, "checkin", checkin)
 
 
 async def test_the_stall_bound_cuts_a_stalled_stream(api: Api, tenant: TenantCtx) -> None:
