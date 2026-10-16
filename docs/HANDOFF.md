@@ -21,8 +21,10 @@ Run 38577569420 green on `43f41b4` (step 3); run 38536427956's failure on `4a8c0
 and fixed (below).
 
 ## Done: the step-5 fixes, then M17 step 5b (2026-10-16)
-**CI:** run 38887605999 on `45c8aba` (the fixes): see the 5b commit's message/HANDOFF commit for
-the final status; 5b's run is recorded below once green.
+**CI:** run 38889003488 green on `4068bca` (5b, which contains the fixes), every job. Run
+38887605999 on `45c8aba` (the fixes alone) passed lint, typecheck, unit, api-compat, report-pdf and
+production-install; its integration shards were CANCELLED by the 5b push (`cancel-in-progress`), so
+the fixes' integration result is the 5b run's.
 
 **Step-5 fixes (commit `45c8aba`; ADR 0016 "Implementation notes: the step-5 fixes"; round
 `m17-stream-fixes` 17/17):**
