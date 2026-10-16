@@ -26,6 +26,7 @@ from edisc_worker.renders import create_render
 
 from ..custody.conftest import superuser
 from .conftest import Api, TenantCtx, add_principal
+from .cut import check_cut, cut_download, full_length
 from .first_byte import first_byte
 from .test_jobs import custody
 from .test_renders import render_worker, sealed_job, wait_render
@@ -298,3 +299,14 @@ async def _cli(*args: Any, **kwargs: Any) -> Any:
     """``_cli_blocking`` off the event loop: the CLI runs for seconds and the loop guard fails
     a test whose loop waits on it (a synchronous subprocess wait on the loop thread)."""
     return await asyncio.to_thread(_cli_blocking, *args, **kwargs)
+
+
+# ------------------------------------------------------------------ cut when the session ends (5b)
+async def test_a_package_is_cut_when_the_session_is_revoked_and_is_no_zip(
+    api: Api, tenant: TenantCtx, render_worker: None
+) -> None:
+    _, render = await _rendered(api, tenant)
+    path = f"/v1/renders/{render['id']}/package"
+    await full_length(api, tenant, path, "outputs=embed")
+    cut = await cut_download(api, tenant, path, "outputs=embed")
+    check_cut(cut, "render_package", zip_file=True)

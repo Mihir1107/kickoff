@@ -1,4 +1,4 @@
-# Handoff (2026-10-15: every route's error codes from one registry, checked at test time; M17 step 5 (job streams, SSE) built; the 500-stream measurement; next: M17 step 5b (download cut-off on revocation), real-tenant confirmation of 3b in parallel)
+# Handoff (2026-10-16: the step-5 fixes (bounded replay + reset, 422 bodies as sent, real-uvicorn test, the session watch's two halves) and M17 step 5b (downloads cut when the session ends) built; next: step 6, real-tenant confirmation of 3b in parallel)
 
 This file alone is enough to continue. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisions §1-§18, notes
@@ -7,9 +7,9 @@ design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisi
 `docs/runs/2026-10-12-m16-complete.md`. Expert guide: `docs/VERIFYING.md`. Demo: `docs/DEMO.md`.
 **M17 plan: `docs/plans/m17.md`** (every decision taken: its §12; design changes in ADR 0016
 Amendments 1 and 2; build notes for steps 2, 3 and 3b at the end of ADR 0016). Steps 0, 2, 3 and 3b
-4 and 5 (SSE) are built (3b approved; its confirmation on real Entra and Okta tenants runs in
-parallel, the user is setting the tenants up); 5b (the download cut-off, plan §1.5) is next; step 7
-is on hold (legal review). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
+4, 5 (SSE) and 5b (download cut-off) are built (3b approved; its confirmation on real Entra and
+Okta tenants runs in parallel, the user is setting the tenants up); step 6 is next; step 7 is on
+hold (legal review). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
 
 ## Current state
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`.
@@ -19,6 +19,43 @@ Migrations at head: **0039** (login outcomes `groups_overage`, `groups_missing`)
 the unit job prints the real-IdP skips).
 Run 38577569420 green on `43f41b4` (step 3); run 38536427956's failure on `4a8c05f` is diagnosed
 and fixed (below).
+
+## Done: the step-5 fixes, then M17 step 5b (2026-10-16)
+**CI:** run 38887605999 on `45c8aba` (the fixes): see the 5b commit's message/HANDOFF commit for
+the final status; 5b's run is recorded below once green.
+
+**Step-5 fixes (commit `45c8aba`; ADR 0016 "Implementation notes: the step-5 fixes"; round
+`m17-stream-fixes` 17/17):**
+1. **Bounded replay:** `EDISC_SSE_REPLAY_MAX` (10,000 unit events; `LIMIT cap+1` tells "at" from
+   "over") and, for reconnects, `EDISC_SSE_REPLAY_MAX_AGE_SECONDS` (1 h, the oldest replayed
+   event, database clock); beyond, or a `Last-Event-ID` past the head: ONE `reset` event (`id` =
+   head, `reason` `replay_limit` / `replay_age` / `unknown_position`), the snapshot, then live.
+   Published (`ResetEvent`, `ResetReason` in `x-sse-events`). Tested at the cap, one over, fresh
+   start, age, past the head.
+2. **Found:** the 15 s bound could be 30 s for a second stream of one session (the watch cached for
+   the whole bound and each stream asked once per bound). Now two halves (`SessionWatch.interval`).
+3. **422 bodies as sent:** `ValidationErrorOut` (closed) / `UnprocessableOut` (detail issues or
+   text; open to server-state fields: found the export routes' `digest_mismatch` carries the
+   hashes). The test client validates EVERY error body against the document;
+   `test_error_bodies.py` checks real bodies against the committed file. Allow-list entries may
+   list `operations`; the one pre-client entry (34 list operations, frontend `aeee68e` reads no 422
+   type) was removed in the 5b commit, as merged entries must be.
+4. **Headers** `no-cache, no-store, no-transform` + `X-Accel-Buffering: no`; **real uvicorn**
+   (`test_stream_uvicorn.py`): first event < 5 s through `create_app` and behind GZipMiddleware (the
+   next write would be the 7.5 s keepalive, so any buffering exceeds it).
+
+**M17 step 5b (ADR 0016 "Implementation notes: M17 step 5b"; round `m17-cutoff` 10/10):**
+`edisc_api.downloads.guarded` on all eight content routes (evidence content, render file, native,
+render package, job package, report file, report package, preview): session (cookie) or principal
+(bearer) re-checked between pieces of at most `EDISC_API_DOWNLOAD_CHUNK_BYTES` (64 KiB) through the
+shared `SessionWatch`; a cut writes `download_aborted` (route, ids, exact `bytes_sent`, size, reason,
+`read_seq`), anchors it, then raises `DownloadCut` (connection reset short of the exact
+`Content-Length` every content route now declares; evidence content, render file and preview did
+not). Tests: one cut per route (`tests/integration/api/cut.py`), packages cut are not zips, a bearer
+principal deactivated, a steady reader at the production 15 s bound, the client's view through a
+real uvicorn (`RemoteProtocolError`), and a unit test that every route anchoring a read is guarded
+and has a cut test. Not covered by design: a client that stops reading (nothing leaves until it
+reads; the next boundary cuts); permission loss mid-download (A5 names session and principal).
 
 ## Done: error codes, then M17 step 5 (2026-10-15, third session)
 **CI:** run 38745179430 green on `98044d1` (error codes); run 38766458358 green on `4af4912` (step 5,
@@ -53,7 +90,7 @@ tests' loops on first use (built once in a thread now; ADR 0015 §24.16); the AP
 503 `service_busy`; round `s24-pool-exhaustion` 8/8). **Measurement**
 (docs/runs/2026-10-15-sse-500-streams.md): 500 streams on 50 jobs: 298 statements/s, p99 1.10 s,
 every delivery; on 500 jobs: 1,062 statements/s, p99 1.69 s; about 72-75 KB of Python per open
-stream. **Not built: 5b, cutting off in-flight downloads on revocation (plan §1.5).**
+stream. (5b, the download cut-off, built 2026-10-16: above.)
 
 ## Done: the groups claim, then M17 step 4 (2026-10-15, second session)
 **CI:** run 38734057961 green on `a6fa14c` (groups), run 38736314014 green on `9056361` (step 4,
@@ -210,7 +247,12 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
   `job` (snapshot), `units` (settled units with their chain `seq`), `end` (`data.reason`; the
   server closes: reconnect only for `lifetime`, re-authenticate for `session_*`, stop for
   `sealed` / `permission_lost` / `principal_deactivated`, reconnect for `slow_consumer`). The
-  browser resends `Last-Event-ID` itself; nothing is missed or repeated. 429 `too_many_streams`
+  browser resends `Last-Event-ID` itself; nothing is missed or repeated. **`reset`** (since
+  2026-10-16: too many or too old units to replay): reload the job and `/units` from the list
+  endpoints, keep the stream open (the snapshot and live events follow).
+- **Downloads (5b):** a download can be cut when the session ends: the connection closes short of
+  its `Content-Length`; treat it as failed (never save a partial file), then re-authenticate.
+- **422 bodies:** `ValidationErrorOut` / `UnprocessableOut` in the document (regenerate types). 429 `too_many_streams`
   above 10 open streams per user. Fallback: poll `GET /v1/jobs/{id}` and `/units`.
 - **Error codes:** every operation's `x-error-codes` in the document; `service_busy` (503) and
   `db_pool_exhausted` (503) mean retry after `Retry-After`.
@@ -288,7 +330,7 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
    developer tenants; `make test-real-idp`; record every answer in ADR 0016 "To confirm on real
    tenants"; Entra's `auth_time` optional claim and Okta's omitted groups claim are the likeliest
    findings).
-2. Step 5b (the download cut-off on revocation, plan §1.5, reusing `SessionWatch`), step 6 (install flows, migration 0040, the relay, the operator-only move
+2. Step 6 (install flows, migration 0040, the relay, the operator-only move
 CLI with its no-route test), step 8 (directory snapshots, `check-connections`, the pause deadline
 24 h..90 d). Step 7 waits for legal review.
 

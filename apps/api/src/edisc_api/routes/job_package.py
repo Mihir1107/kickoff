@@ -28,6 +28,7 @@ from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller
 from edisc_api.authz import P, Scope, authorize, perm
+from edisc_api.downloads import Download, guarded
 from edisc_api.error_codes import E
 from edisc_api.errors import ApiError, not_found
 from edisc_core.ids import new_id
@@ -93,8 +94,10 @@ async def job_package(
             await _aborted(res, caller, rid, plan, base, exc)
             raise  # the response is aborted, never completed
 
+    cut = Download("job_package", {"job_id": str(job_id), "objects": objects,
+                                   "archives": archives}, plan.zip_size, read.seq)  # fmt: skip
     return StreamingResponse(
-        body(),
+        guarded(body(), res=res, caller=caller, request_id=rid, download=cut),
         media_type="application/zip",
         headers={
             "x-manifest-sha256": plan.manifest_sha256,

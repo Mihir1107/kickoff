@@ -35,6 +35,7 @@ from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller, require_recent_sign_in
 from edisc_api.authz import P, Permission, Scope, authorize, perm
+from edisc_api.downloads import Download, guarded
 from edisc_api.error_codes import E
 from edisc_api.errors import ApiError, RecordedText, conflict, not_found
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, page_of
@@ -329,8 +330,10 @@ async def report_file_content(
             )  # fmt: skip
             raise
 
+    cut = Download("report_file_content", {"report_id": str(report_id), "name": f.name},
+                   f.size_bytes, read.seq)  # fmt: skip
     return StreamingResponse(
-        body(),
+        guarded(body(), res=res, caller=caller, request_id=rid, download=cut),
         media_type=f.media_type,
         headers={
             "x-evidence-sha256": f.sha256,
@@ -386,8 +389,9 @@ async def report_package(
                            "report_package_mismatch", base, exc)  # fmt: skip
             raise
 
+    cut = Download("report_package", {"report_id": str(report_id)}, plan.zip_size, read.seq)
     return StreamingResponse(
-        body(),
+        guarded(body(), res=res, caller=caller, request_id=rid, download=cut),
         media_type="application/zip",
         headers={
             "x-manifest-sha256": plan.manifest_sha256,

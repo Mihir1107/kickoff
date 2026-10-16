@@ -419,7 +419,9 @@ class Settings(BaseSettings):
         gt=0,
         le=15,
         description="session, principal and job.read re-checked at most this far apart on an open"
-        " stream: a revoked session or a lost permission ends it within this bound (D3)",
+        " stream, and the session or principal on an in-flight download: a revoked session, a"
+        " deactivated principal or a lost permission ends it within this bound (D3; the session is"
+        " asked every half of it, edisc_api.stream.SessionWatch)",
     )
     api_stream_queue_events: int = Field(
         default=64,
@@ -430,6 +432,13 @@ class Settings(BaseSettings):
     )
     api_stream_max_seconds: float = Field(
         default=1800, gt=0, description="maximum lifetime of one stream (then reason lifetime)"
+    )
+    api_download_chunk_bytes: int = Field(
+        default=65_536,
+        ge=1024,
+        le=8 * 1024 * 1024,
+        description="content downloads are written in pieces of at most this size: the session is"
+        " re-checked between pieces (edisc_api.downloads), so a big chunk still has boundaries",
     )
     sse_replay_max: int = Field(
         default=10_000,

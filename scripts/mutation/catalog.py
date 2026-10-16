@@ -91,6 +91,9 @@ Rounds (ADR 0015):
   ``reset`` event, published; the session watch's two halves (cache and cadence); the stream's
   proxy headers and the real-uvicorn first-event test (a buffering compressor); the published 422
   bodies checked at test time and against the committed document; allow-list operation lists.
+- ``m17-cutoff``: in-flight downloads end with the session (M17 step 5b): the re-check at piece
+  boundaries, the cut (an error, never a completed response), its audit with the exact bytes and
+  its anchor, the re-cut pieces, Content-Length, every content route guarded.
 - ``m17-host-cookie``: the session cookie is host-only (``__Host-``, no ``Domain``) and a same-site
   request from a neighbouring subdomain is refused, both in real browsers (ADR 0016 §2).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
@@ -149,6 +152,9 @@ TJS = "tests/integration/api/test_job_stream.py"
 USM = "tests/unit/api/test_stream_module.py"
 TSU = "tests/integration/api/test_stream_uvicorn.py"
 TEB = "tests/integration/api/test_error_bodies.py"
+DLS = "apps/api/src/edisc_api/downloads.py"
+CRA = "tests/integration/api/test_content_reads_anchored.py"
+UDR = "tests/unit/api/test_download_routes.py"
 TIG = "tests/integration/api/test_idp_groups.py"
 DC = "packages/connectors/dummy/src/edisc_connector_dummy/connector.py"
 ULG = "tests/unit/core/test_loopguard.py"
@@ -1613,6 +1619,39 @@ CATALOG: list[Mutation] = [
       "        e for i, e in enumerate(allowlist) if any((i, op) not in used for op in _operations(e))",
       "        e for i, e in enumerate(allowlist) if all((i, op) not in used for op in _operations(e))",
       UAC, "list_operations"),
+    # ------------------------------------------------------------------ download cut-off (M17 5b)
+    m("download_never_rechecked", "m17-cutoff", DLS,
+      "            if time.monotonic() - checked >= watch.interval:\n", "            if False:\n", CRA,
+      "evidence_content_is_cut"),
+    m("download_cut_unaudited", "m17-cutoff", DLS,
+      "                    await shielded(_record(res, caller, request_id, download, sent, reason))\n",
+      "", CRA, "evidence_content_is_cut"),
+    m("download_cut_not_anchored", "m17-cutoff", DLS,
+      "    await audit.anchor_now(res.sessions, res.s3, res.settings, caller.tenant_id, event)\n",
+      "", CRA, "evidence_content_is_cut"),
+    m("download_cut_completes", "m17-cutoff", DLS, "                    raise DownloadCut(reason)\n",
+      "                    return\n", CRA, "evidence_content_is_cut"),
+    m("download_bytes_miscounted", "m17-cutoff", DLS, "            sent += len(part)\n",
+      "            sent += len(chunk)\n", "tests/integration/api/test_render_natives.py",
+      "deactivated"),  # S3 chunks exceed a piece there (zip chunks of a package may not)
+    Mutation("download_not_rechunked", "m17-cutoff", DLS, (
+        ("        for start in range(0, len(chunk), piece):\n", "        for start in range(0, 1):\n"),
+        ("            part = chunk if len(chunk) <= piece else chunk[start : start + piece]\n",
+         "            part = chunk\n"),
+    ), "tests/integration/api/test_preview.py", "is_cut"),
+    m("evidence_content_length_dropped", "m17-cutoff", JOBS,
+      '        headers={"x-evidence-sha256": row.sha256, "content-length": str(row.size_bytes),\n',
+      '        headers={"x-evidence-sha256": row.sha256,\n', CRA, "evidence_content_is_cut"),
+    m("preview_unguarded", "m17-cutoff", "apps/api/src/edisc_api/routes/preview.py",
+      "        guarded(one_chunk(out.html), res=res, caller=caller, request_id=rid, download=cut),\n",
+      "        one_chunk(out.html),\n", UDR, ""),
+    m("job_package_unguarded", "m17-cutoff", "apps/api/src/edisc_api/routes/job_package.py",
+      "        guarded(body(), res=res, caller=caller, request_id=rid, download=cut),\n",
+      "        body(),\n", "tests/integration/api/test_job_package.py", "is_cut"),
+    m("watch_ignores_bearer_principal", "m17-cutoff", STR,
+      "                reason = None if active else EndReason.PRINCIPAL_DEACTIVATED\n",
+      "                reason = None\n", "tests/integration/api/test_render_natives.py",
+      "deactivated"),
     # ------------------------------------------------------------------ host-only session cookie
     Mutation("session_cookie_domain_wide", "m17-host-cookie", SESP, (
         ('SESSION_COOKIE = "__Host-edisc_session"', 'SESSION_COOKIE = "edisc_session"'),

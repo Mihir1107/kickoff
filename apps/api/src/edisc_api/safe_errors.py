@@ -213,6 +213,11 @@ def log_unhandled(exc: BaseException, *, path: str, request_id: str | None, star
     )  # fmt: skip
 
 
+class ResponseCut(Exception):  # noqa: N818 (an intended reset, not an error)
+    """Raised by a response body after its first byte to make the server reset the connection
+    (never complete it): a download cut by revocation (``edisc_api.downloads.DownloadCut``)."""
+
+
 class SafeErrors:
     """Outermost middleware: an unhandled exception becomes a fixed 500 (before the first byte) and
     a log line without its message; after the first byte it is logged the same way and re-raised."""
@@ -234,6 +239,8 @@ class SafeErrors:
 
         try:
             await self.app(scope, receive, tracking_send)
+        except ResponseCut:
+            raise  # deliberate (edisc_api.downloads logged and audited it): reset, never a 500
         except Exception as exc:
             rid = _request_id(scope)
             log_unhandled(

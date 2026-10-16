@@ -15,6 +15,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from sqlalchemy import text
 
@@ -25,6 +26,7 @@ from edisc_db.session import tenant_tx
 from ..custody.conftest import superuser
 from ..worker.conftest import spec
 from .conftest import Api, TenantCtx, add_principal
+from .cut import check_cut, cut_download, cut_through_uvicorn, full_length, steady_cut
 from .first_byte import first_byte
 from .test_jobs import custody, make_world, wait_status
 from .test_renders import render_worker, wait_render
@@ -269,3 +271,43 @@ async def _cli(*args: Any, **kwargs: Any) -> Any:
     """``_cli_blocking`` off the event loop: the CLI runs for seconds and the loop guard fails
     a test whose loop waits on it (a synchronous subprocess wait on the loop thread)."""
     return await asyncio.to_thread(_cli_blocking, *args, **kwargs)
+
+
+# ------------------------------------------------------------------ cut when the session ends (5b)
+async def test_a_native_is_cut_when_its_bearer_principal_is_deactivated(
+    api: Api, tenant: TenantCtx, render_worker: None
+) -> None:
+    """Bearer downloads: the principal's active flag is re-checked (an IdP token is not ours to
+    revoke)."""
+    _, render, natives = await _rendered(api, tenant)
+    path = f"/v1/renders/{render['id']}/natives/{natives[0]['sha256']}/content"
+    await full_length(api, tenant, path)
+    cut = await cut_download(api, tenant, path, how="deactivate")
+    check_cut(cut, "render_native_content", reason="principal_deactivated")
+
+
+async def test_a_steady_reader_is_cut_within_15_seconds_of_the_revocation(
+    api: Api, tenant: TenantCtx, render_worker: None
+) -> None:
+    """The production bound (D3): a client reading a 1 MiB native one KiB every 20 ms (about 20 s
+    in all) loses its session after the first piece; no piece arrives more than 15 s later."""
+    _, render, natives = await _rendered(api, tenant)
+    path = f"/v1/renders/{render['id']}/natives/{natives[0]['sha256']}/content"
+    got = await steady_cut(api, tenant, path, every=0.02)
+    assert got.declared >= MIB and got.received < got.declared
+    assert type(got.error).__name__ == "DownloadCut", repr(got.error)
+    assert got.last_piece_after_end <= 15.0 + 0.5, got.last_piece_after_end
+    assert got.audit is not None and got.audit.payload["bytes_sent"] == got.received
+
+
+async def test_the_client_sees_a_cut_download_as_an_error_through_uvicorn(
+    api: Api, tenant: TenantCtx, render_worker: None
+) -> None:
+    """Over a real server and HTTP client: the connection ends short of its Content-Length, and
+    the client raises instead of returning a shorter file."""
+    _, render, natives = await _rendered(api, tenant)
+    path = f"/v1/renders/{render['id']}/natives/{natives[0]['sha256']}/content"
+    saw = await cut_through_uvicorn(api, tenant, path)
+    assert saw.declared == natives[0]["size"]
+    assert 0 < len(saw.received) < saw.declared
+    assert isinstance(saw.error, httpx.RemoteProtocolError), repr(saw.error)

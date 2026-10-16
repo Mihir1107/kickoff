@@ -830,3 +830,35 @@ timing; the deterministic overlap test was added).
    until the next write or the end exceeds the bound; the honest path costs tens of milliseconds.
    Production has no compression middleware; Starlette's excludes `text/event-stream` (a compressor
    without that exclusion is the mutation the test catches).
+
+## Implementation notes: M17 step 5b, in-flight downloads end with the session (2026-10-16)
+
+Built (plan §1.5, A5, D3): `edisc_api.downloads.guarded` wraps the body of every content route:
+evidence content, render file, native, render package, job package, report file, report package,
+preview (a unit test finds content routes as the routes that anchor a read, and fails one that is
+not guarded or has no cut test).
+1. **Re-checked at piece boundaries**, never inside a write, at most `SessionWatch.interval` apart
+   (the same shared watch and two halves as the streams: revocation to cut <= 15 s of streaming):
+   the session row for cookie callers (revoked, idle or absolute expiry), the principal's active
+   flag for bearer callers. Bodies are re-cut into pieces of at most `EDISC_API_DOWNLOAD_CHUNK_BYTES`
+   (64 KiB), so a large chunk or a whole preview page still has boundaries.
+2. **The cut is an error, never a shorter file.** Every content route now declares an exact
+   `Content-Length` (evidence content, the render file and the preview did not); the guard raises
+   `DownloadCut` (a `safe_errors.ResponseCut`: no 500 line) after the response started, so the
+   server closes the connection short of it. Proven through a real uvicorn and HTTP client
+   (`httpx.RemoteProtocolError`, fewer bytes than declared). A cut package has no central
+   directory: not a zip (tested for the render, job and report packages).
+3. **Audited:** `download_aborted` (operationId, what was served, `bytes_sent` = exactly the bytes
+   handed to the server, `size`, reason `session_revoked` / `session_expired` /
+   `principal_deactivated`, `read_seq` of the read) committed and anchored before the cut. Bytes
+   already sent cannot be recalled; the audit says how many.
+4. **What is not covered:** a client that stops reading holds the server in its write; nothing more
+   leaves until it reads again, and then the next boundary cuts. A download that completes within
+   the bound after a revocation completes (the bound, not an instant cut, is the promise).
+   `job.read`-style permission loss is not re-checked on downloads (A5 names the session and the
+   principal only); the read was authorized and audited at its start.
+Tests: a cut per route (`cut.py`: the server's second write held, the session revoked, one
+interval, released), a bearer principal deactivated mid-native, a steady reader at the production
+15 s bound (no piece later than 15 s after the revocation), the real-server client view, full
+downloads equal to their Content-Length. Round `m17-cutoff`: 10 breaks, all caught (one first
+pointed at a test where it was equivalent: a package's zip chunks are smaller than a piece).

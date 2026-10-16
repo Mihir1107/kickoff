@@ -35,6 +35,7 @@ from edisc_worker.workflows import ReportWorkflow
 
 from ..worker.conftest import WORKFLOWS, spec
 from .conftest import Api, TenantCtx, add_principal
+from .cut import check_cut, cut_download, full_length
 from .first_byte import first_byte
 from .test_jobs import custody, make_world, wait_status
 
@@ -552,3 +553,17 @@ async def _cli(*args: Any, **kwargs: Any) -> Any:
     """``_cli_blocking`` off the event loop: the CLI runs for seconds and the loop guard fails
     a test whose loop waits on it (a synchronous subprocess wait on the loop thread)."""
     return await asyncio.to_thread(_cli_blocking, *args, **kwargs)
+
+
+# ------------------------------------------------------------------ cut when the session ends (5b)
+async def test_report_downloads_are_cut_when_the_session_is_revoked(
+    api: Api, tenant: TenantCtx, report_worker: None
+) -> None:
+    _, _, report = await _reported(api, tenant)
+    rid = report["id"]
+    for path, route, is_zip in (
+        (f"/v1/reports/{rid}/files/report.html/content", "report_file_content", False),
+        (f"/v1/reports/{rid}/package", "report_package", True),
+    ):
+        await full_length(api, tenant, path)
+        check_cut(await cut_download(api, tenant, path), route, zip_file=is_zip)

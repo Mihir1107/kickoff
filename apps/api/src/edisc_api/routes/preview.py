@@ -22,13 +22,14 @@ from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Query
-from fastapi.responses import Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 
 from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller
 from edisc_api.authz import P, Scope, authorize, perm
+from edisc_api.downloads import Download, guarded, one_chunk
 from edisc_api.error_codes import E
 from edisc_api.errors import ApiError, not_found
 from edisc_core.ids import new_id
@@ -80,7 +81,7 @@ async def preview(
     day: Annotated[date, Query()],
     zone: Annotated[str, Query(min_length=1, max_length=64)] = "UTC",
     page: Annotated[int, Query(ge=1, le=1_000_000)] = 1,
-) -> Response:
+) -> StreamingResponse:
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         job = (
             await s.execute(
@@ -118,10 +119,13 @@ async def preview(
         )  # fmt: skip
     # committed AND anchored (forced, checked to cover the read) before any byte (§10)
     await audit.anchor_now(res.sessions, res.s3, res.settings, caller.tenant_id, read)
-    return Response(
-        content=out.html,
+    cut = Download("preview", {"job_id": str(job_id), "conversation_id": conversation,
+                                   "day": day.isoformat(), "page": page},
+                   len(out.html), read.seq)  # fmt: skip
+    return StreamingResponse(
+        guarded(one_chunk(out.html), res=res, caller=caller, request_id=rid, download=cut),
         media_type="text/html; charset=utf-8",
-        headers={**HEADERS, "x-preview-sha256": out.sha256},
+        headers={**HEADERS, "x-preview-sha256": out.sha256, "content-length": str(len(out.html))},
     )
 
 

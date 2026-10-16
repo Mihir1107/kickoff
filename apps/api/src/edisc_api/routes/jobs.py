@@ -37,6 +37,7 @@ from edisc_api.authz import (
     permissions,
     roles_at,
 )
+from edisc_api.downloads import Download, guarded
 from edisc_api.error_codes import E
 from edisc_api.errors import ApiError, RecordedText, conflict, not_found, unprocessable
 from edisc_api.pagination import (
@@ -916,13 +917,15 @@ async def evidence_content(
         async for chunk in chunks:
             yield chunk
 
+    cut = Download("evidence_content", {"evidence_id": str(evidence_id)}, row.size_bytes, read.seq)
     return StreamingResponse(
-        body(),
+        guarded(body(), res=res, caller=caller, request_id=rid, download=cut),
         media_type="application/json"
         if row.kind in ("page", "archive_entry")
         else "application/octet-stream",
-        headers={"x-evidence-sha256": row.sha256, "cache-control": "no-store"},
-    )
+        headers={"x-evidence-sha256": row.sha256, "content-length": str(row.size_bytes),
+                 "cache-control": "no-store"},
+    )  # fmt: skip
 
 
 # ------------------------------------------------------------------ custody events (M17 plan §3.2)
