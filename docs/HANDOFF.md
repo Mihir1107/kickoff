@@ -25,6 +25,8 @@ and fixed (below).
 failed `test_stalled_clients` -- DIAGNOSED as a test bug (below), fixed in `c6ef043`. Run
 38897021941 on `c6ef043`: green but shard 2, which failed the step-5 replay test -- DIAGNOSED as a
 PRODUCT bug (a snapshot read across READ COMMITTED statements, item 7 below), fixed with step 6.
+**Run 38905234604 green on `da6efe0` (step 6 + both fixes), every job** (api-compat,
+production-install with the D10 check, integration 0-3, report-pdf).
 
 **Fixes before step 6 (commit `3665ca1`; ADR 0016 "Implementation notes: the fixes before step 6";
 round `m17-pre6` 8/8):**
