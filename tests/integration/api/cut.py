@@ -37,7 +37,9 @@ from .oidc import Browser
 from .sessions_flow import enable_login, host_of, sign_in
 from .test_job_stream import tuned
 
-CUT = {"api_stream_recheck_seconds": 1.0, "api_download_chunk_bytes": 1024}
+# the stall bound well above the 0.5 s a held write waits in the other cases
+CUT = {"api_stream_recheck_seconds": 1.0, "api_download_chunk_bytes": 1024,
+       "download_stall_seconds": 3.0}  # fmt: skip
 
 
 @dataclass
@@ -100,8 +102,23 @@ async def _holder(api: Api, t: TenantCtx, how: str) -> _Holder:
                                      " revoke_reason = 'admin' WHERE revoked_at IS NULL"))  # fmt: skip
 
         return _Holder({"cookie": cookie, "sec-fetch-site": "same-origin"}, revoke)
-    assert how == "deactivate"  # a bearer principal, deactivated
     pid, subject = await add_principal(api, t, roles=[("tenant_admin", "tenant", None)])
+    bearer = {"authorization": f"Bearer {t.token(api.settings, subject=subject)}"}
+    if how == "unpermit":  # a bearer principal whose role is revoked: the read permission is gone
+
+        async def unpermit() -> None:
+            async with tenant_tx(api.sessions, t.tenant_id) as s:
+                await s.execute(text("UPDATE role_assignments SET revoked_at = now(),"
+                                     " revoked_by = 'tests' WHERE principal_id = :p"), {"p": pid})  # fmt: skip
+
+        return _Holder(bearer, unpermit)
+    if how == "stall":  # nothing ends: the client just stops reading
+
+        async def nothing() -> None:
+            return None
+
+        return _Holder(bearer, nothing)
+    assert how == "deactivate"  # a bearer principal, deactivated
 
     async def deactivate() -> None:
         async with tenant_tx(api.sessions, t.tenant_id) as s:
@@ -123,8 +140,11 @@ def _scope(host: str, path: str, query: str, headers: dict[str, str]) -> dict[st
 
 @dataclass
 class _Pause:
-    """Holds the app's second body write until released (a client that read one piece)."""
+    """Holds the app's body writes once more than ``after`` bytes went through (by default: after
+    the first write) until released (a client that stopped reading there)."""
 
+    after: int = 0
+    seen: int = 0
     first: asyncio.Event = field(default_factory=asyncio.Event)
     release: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -135,7 +155,9 @@ class _Pause:
                     if self.first.is_set():
                         await self.release.wait()
                     await send(message)
-                    self.first.set()
+                    self.seen += len(message["body"])
+                    if self.seen > self.after:
+                        self.first.set()
                     return
                 await send(message)
 
@@ -172,8 +194,9 @@ async def cut_download(
     await asyncio.wait_for(pause.first.wait(), 60)
     await holder.end()
     ended = time.monotonic()
-    await asyncio.sleep(api.resources.watch.interval)  # the next boundary is past the interval
-    pause.release.set()
+    if how != "stall":  # stalled: the held write is never released
+        await asyncio.sleep(api.resources.watch.interval)  # the next boundary is past it
+        pause.release.set()
     error: BaseException | None = None
     try:
         await asyncio.wait_for(task, 30)
@@ -194,6 +217,18 @@ READS = (
 )  # fmt: skip
 
 
+CASES = (("revoke", "session_revoked"), ("unpermit", "permission_lost"), ("stall", "stalled"))
+
+
+async def cut_every_way(
+    api: Api, t: TenantCtx, path: str, query: str = "", *, route: str, zip_file: bool = False
+) -> None:
+    """The session revoked, the permission lost, the client stalled: each cuts, audited."""
+    for how, reason in CASES:
+        cut = await cut_download(api, t, path, query, how=how)
+        check_cut(cut, route, reason=reason, zip_file=zip_file)
+
+
 def check_cut(cut: Cut, route: str, *, reason: str = "session_revoked", zip_file: bool = False,
               piece: int = CUT["api_download_chunk_bytes"]) -> None:  # fmt: skip
     """What every cut must show (plan §1.5): an error, not a completed response; fewer bytes than
@@ -204,11 +239,16 @@ def check_cut(cut: Cut, route: str, *, reason: str = "session_revoked", zip_file
     ), repr(cut.error)
     assert cut.declared > 2 * piece, f"the object is too small to cut: {cut.declared}"
     assert 0 < len(cut.received) < cut.declared  # the client can tell: short of Content-Length
-    assert cut.after_revocation < CUT["api_stream_recheck_seconds"] + 2
+    bound = (
+        CUT["download_stall_seconds"] if reason == "stalled" else CUT["api_stream_recheck_seconds"]
+    )
+    assert cut.after_revocation < bound + 2, cut.after_revocation
     assert cut.audit is not None, "no download_aborted"
     payload = cut.audit.payload
     assert (payload["route"], payload["reason"]) == (route, reason), payload
     assert (payload["bytes_sent"], payload["size"]) == (len(cut.received), cut.declared), payload
+    if reason == "stalled":  # the held write never completed: only the first write counts
+        assert 0 < payload["bytes_sent"] <= piece, payload
     assert cut.read is not None and payload["read_seq"] == cut.read.seq
     assert cut.anchored >= cut.audit.seq  # committed AND anchored
     if zip_file:

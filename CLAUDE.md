@@ -84,7 +84,12 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   `guarded(...)` with a `Download(operationId, ids, size, read.seq)` and declares an exact
   `Content-Length`; the session (or a bearer principal) is re-checked between pieces, a cut is
   audited (`download_aborted`, bytes sent), anchored, then the connection is reset (`DownloadCut`).
-  A new content route needs `guarded` and a cut test (`tests/unit/api/test_download_routes.py`).
+  A new content route needs `guarded` + `GuardedResponse` + `still_permitted` (the read
+  permission is re-checked too) and a cut test (`tests/unit/api/test_download_routes.py`). Every
+  write is timed (`EDISC_DOWNLOAD_STALL_SECONDS`: a stalled client is cut, `stalled`). Nothing
+  pooled is held while bytes flow: S3 by ranges (`edisc_evidence.worm.read_ranges`, never a
+  GetObject body across a yield), no transaction across a write, and NO `BaseHTTPMiddleware`
+  (`@app.middleware("http")` buffers bodies in its own task; plain ASGI middleware only).
 - Lists (M17 step 3): a cursor is bound to its route, path and filters (`pagination.bind_cursors`,
   app-wide; mismatch 422 `cursor_mismatch`). A list shows exactly what the matching GET would
   authorize (`GET /v1/jobs`: a `job.read` role at the job's matter, client or tenant, as a join on

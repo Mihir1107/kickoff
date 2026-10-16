@@ -39,7 +39,7 @@ from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller, require_recent_sign_in
 from edisc_api.authz import P, Permission, Scope, authorize, perm
-from edisc_api.downloads import Download, guarded
+from edisc_api.downloads import Download, GuardedResponse, guarded, still_permitted
 from edisc_api.error_codes import E
 from edisc_api.errors import ApiError, RecordedText, conflict, not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, decode_text, encode_text, page_of
@@ -527,8 +527,15 @@ async def render_file_content(
 
     cut = Download("render_file_content", {"render_id": str(render_id), "ord": file_ord},
                    f.size_bytes, read.seq)  # fmt: skip
-    return StreamingResponse(
-        guarded(body(), res=res, caller=caller, request_id=rid, download=cut),
+    return GuardedResponse(
+        guarded(
+            body(),
+            res=res,
+            caller=caller,
+            request_id=rid,
+            download=cut,
+            permitted=still_permitted(res, caller, P.EXPORT_READ, Scope("matter", row.matter_id)),
+        ),
         media_type="message/rfc822",
         headers={
             "x-evidence-sha256": f.sha256,
@@ -647,8 +654,15 @@ async def render_native_content(
 
     cut = Download("render_native_content", {"render_id": str(render_id), "sha256": n.sha256},
                    n.size_bytes, read.seq)  # fmt: skip
-    return StreamingResponse(
-        guarded(body(), res=res, caller=caller, request_id=rid, download=cut),
+    return GuardedResponse(
+        guarded(
+            body(),
+            res=res,
+            caller=caller,
+            request_id=rid,
+            download=cut,
+            permitted=still_permitted(res, caller, P.EXPORT_READ, Scope("matter", row.matter_id)),
+        ),
         media_type="application/octet-stream",
         headers={
             "x-evidence-sha256": n.sha256,
@@ -722,8 +736,15 @@ async def render_package(
 
     cut = Download("render_package", {"render_id": str(render_id), "mode": outputs},
                    plan.zip_size, read.seq)  # fmt: skip
-    return StreamingResponse(
-        guarded(body(), res=res, caller=caller, request_id=rid, download=cut),
+    return GuardedResponse(
+        guarded(
+            body(),
+            res=res,
+            caller=caller,
+            request_id=rid,
+            download=cut,
+            permitted=still_permitted(res, caller, P.EXPORT_READ, Scope("matter", row.matter_id)),
+        ),
         media_type="application/zip",
         headers={
             "x-manifest-sha256": plan.manifest_sha256,

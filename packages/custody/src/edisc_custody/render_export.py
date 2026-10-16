@@ -47,7 +47,7 @@ from edisc_custody.render_files import RENDER_STARTED
 from edisc_custody.render_package import RENDER_PACKAGE_FORMAT
 from edisc_custody.zipwriter import ZipMember, ZipSizer
 from edisc_db.session import tenant_tx
-from edisc_evidence.worm import get_bytes, list_versions
+from edisc_evidence.worm import get_bytes, list_versions, read_ranges
 
 Outputs = Literal["embed", "reference"]
 CHUNK = 1 << 20
@@ -442,14 +442,14 @@ def _object_member(
 ) -> ZipMember:
     async def chunks() -> AsyncIterator[bytes]:
         digest, seen = hashlib.sha256(), 0
-        resp = await s3.get_object(Bucket=bucket, Key=key, VersionId=version_id)  # PINNED version
-        async with resp["Body"] as body:
-            async for chunk in body.iter_chunks(CHUNK):
-                seen += len(chunk)
-                if seen > size:
-                    raise PackageIntegrityError(name, f"more than the recorded {size} bytes")
-                digest.update(chunk)
-                yield chunk
+        # the PINNED version, range by range (no pooled connection held while the client reads)
+        async for chunk in read_ranges(s3, bucket=bucket, key=key, version_id=version_id,
+                                       chunk=CHUNK):  # fmt: skip
+            seen += len(chunk)
+            if seen > size:
+                raise PackageIntegrityError(name, f"more than the recorded {size} bytes")
+            digest.update(chunk)
+            yield chunk
         if (digest.hexdigest(), seen) != (sha256, size):
             raise PackageIntegrityError(
                 name, f"read {seen} bytes sha256 {digest.hexdigest()}, recorded {size} {sha256}"

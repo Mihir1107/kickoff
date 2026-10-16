@@ -75,6 +75,34 @@ async def get_bytes(
     return data
 
 
+async def read_ranges(
+    client: S3Client, *, bucket: str, key: str, version_id: str, chunk: int = 1 << 20
+) -> AsyncIterator[bytes]:
+    """A pinned version's bytes, one ``Range`` GET of at most ``chunk`` bytes at a time, each read
+    WHOLE and its connection returned to the pool BEFORE it is yielded: a consumer that stalls
+    (a client that stopped reading a download) holds memory, never a pooled S3 connection. Ends at
+    the object's real end (``Content-Range``), never at a recorded size, so callers still see
+    every byte there is."""
+    start, total = 0, None
+    while total is None or start < total:
+        try:
+            resp = await client.get_object(
+                Bucket=bucket, Key=key, VersionId=version_id,
+                Range=f"bytes={start}-{start + chunk - 1}",
+            )  # fmt: skip
+        except ClientError as exc:
+            if start == 0 and exc.response.get("Error", {}).get("Code") == "InvalidRange":
+                return  # an empty object has no byte 0
+            raise
+        async with resp["Body"] as stream:
+            data: bytes = await stream.read()
+        total = int(resp["ContentRange"].rsplit("/", 1)[1])
+        if not data:
+            raise RuntimeError(f"{key}: empty range at {start} of {total}")
+        start += len(data)
+        yield data
+
+
 @dataclass(frozen=True)
 class ObjectVersion:
     key: str

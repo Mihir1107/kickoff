@@ -35,7 +35,7 @@ from edisc_worker.workflows import ReportWorkflow
 
 from ..worker.conftest import WORKFLOWS, spec
 from .conftest import Api, TenantCtx, add_principal
-from .cut import check_cut, cut_download, full_length
+from .cut import cut_every_way, full_length
 from .first_byte import first_byte
 from .test_jobs import custody, make_world, wait_status
 
@@ -566,4 +566,4 @@ async def test_report_downloads_are_cut_when_the_session_is_revoked(
         (f"/v1/reports/{rid}/package", "report_package", True),
     ):
         await full_length(api, tenant, path)
-        check_cut(await cut_download(api, tenant, path), route, zip_file=is_zip)
+        await cut_every_way(api, tenant, path, route=route, zip_file=is_zip)

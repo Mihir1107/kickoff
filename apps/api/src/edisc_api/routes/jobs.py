@@ -37,7 +37,7 @@ from edisc_api.authz import (
     permissions,
     roles_at,
 )
-from edisc_api.downloads import Download, guarded
+from edisc_api.downloads import Download, GuardedResponse, guarded, still_permitted
 from edisc_api.error_codes import E
 from edisc_api.errors import ApiError, RecordedText, conflict, not_found, unprocessable
 from edisc_api.pagination import (
@@ -619,6 +619,7 @@ async def stream_job(
     job_id: uuid.UUID,
     who: Annotated[Caller, Depends(passive_caller)],
     res: ResourcesDep,
+    rid: RequestIdDep,
     last_event_id: Annotated[str | None, Header(alias="Last-Event-ID", max_length=64)] = None,
 ) -> StreamingResponse:
     """Server-Sent Events of one job: its state, units as the chain settles them, and a final
@@ -655,7 +656,13 @@ async def stream_job(
         ):  # fmt: skip
             yield chunk
 
-    return StreamingResponse(body(), media_type="text/event-stream", headers=SSE_HEADERS)
+    # timed writes: a client that reads nothing for download_stall_seconds is cut (``stalled``);
+    # session and permission are re-checked by stream_body itself
+    stream = Download("stream_job", {"job_id": str(job_id)}, None, None)
+    return GuardedResponse(
+        guarded(body(), res=res, caller=who, request_id=rid, download=stream, permitted=None),
+        media_type="text/event-stream", headers=SSE_HEADERS,
+    )  # fmt: skip
 
 
 # ------------------------------------------------------------------ actions
@@ -918,8 +925,10 @@ async def evidence_content(
             yield chunk
 
     cut = Download("evidence_content", {"evidence_id": str(evidence_id)}, row.size_bytes, read.seq)
-    return StreamingResponse(
-        guarded(body(), res=res, caller=caller, request_id=rid, download=cut),
+    return GuardedResponse(
+        guarded(body(), res=res, caller=caller, request_id=rid, download=cut,
+                permitted=still_permitted(res, caller, P.EVIDENCE_READ, Scope("matter", row.matter_id)),
+        ),
         media_type="application/json"
         if row.kind in ("page", "archive_entry")
         else "application/octet-stream",

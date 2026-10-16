@@ -1,4 +1,5 @@
-"""Every content route is cut when its session ends (M17 step 5b, plan §1.5).
+"""Every content route is cut when its session or permission ends or its client stalls (M17 step 5b
+and the fixes before step 6); the job stream is cut when its client stalls.
 
 A content route is one that anchors its read before the first byte (CLAUDE.md: every route that
 returns evidence bytes calls ``audit.anchor_now`` before the response starts). Each must pass its
@@ -56,5 +57,22 @@ def test_every_content_route_is_guarded_and_has_a_cut_test() -> None:
     for name, calls in _routes().items():
         if name in content:
             assert "guarded" in calls, f"{name} streams without edisc_api.downloads.guarded"
+            assert "GuardedResponse" in calls, f"{name}: writes not timed (stalled clients)"
+            assert "still_permitted" in calls, f"{name}: the read permission is not re-checked"
+    assert {"guarded", "GuardedResponse"} <= _routes()["stream_job"], "the stream is not timed"
     for name, file in CUT_TESTS.items():
         assert f'"{name}"' in (TESTS / file).read_text(), f"no cut test names {name} in {file}"
+
+
+def test_no_middleware_buffers_a_response_body() -> None:
+    """Starlette's BaseHTTPMiddleware (``@app.middleware("http")``) forwards bodies through its
+    own task and buffer: a route's write would complete into it, the write timeout would never see
+    a stalled client and a cut would never reach the server. Plain ASGI middleware only."""
+    from starlette.middleware.base import BaseHTTPMiddleware
+
+    from edisc_api.app import create_app
+    from edisc_core.settings import Environment, Settings
+
+    app = create_app(Settings.model_construct(env=Environment.TEST))
+    classes = [m.cls for m in app.user_middleware]
+    assert BaseHTTPMiddleware not in classes, classes

@@ -29,7 +29,7 @@ from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller
 from edisc_api.authz import P, Scope, authorize, perm
-from edisc_api.downloads import Download, guarded, one_chunk
+from edisc_api.downloads import Download, GuardedResponse, guarded, one_chunk, still_permitted
 from edisc_api.error_codes import E
 from edisc_api.errors import ApiError, not_found
 from edisc_core.ids import new_id
@@ -122,8 +122,15 @@ async def preview(
     cut = Download("preview", {"job_id": str(job_id), "conversation_id": conversation,
                                    "day": day.isoformat(), "page": page},
                    len(out.html), read.seq)  # fmt: skip
-    return StreamingResponse(
-        guarded(one_chunk(out.html), res=res, caller=caller, request_id=rid, download=cut),
+    return GuardedResponse(
+        guarded(
+            one_chunk(out.html),
+            res=res,
+            caller=caller,
+            request_id=rid,
+            download=cut,
+            permitted=still_permitted(res, caller, P.EVIDENCE_READ, Scope("matter", job.matter_id)),
+        ),
         media_type="text/html; charset=utf-8",
         headers={**HEADERS, "x-preview-sha256": out.sha256, "content-length": str(len(out.html))},
     )

@@ -45,7 +45,7 @@ from edisc_core.time import ensure_utc
 from edisc_db.session import tenant_tx
 from edisc_evidence.retention import effective_retain_until, extension_needed
 from edisc_evidence.upload import Lock, UploadResult, rehash_object, stream_upload
-from edisc_evidence.worm import list_versions
+from edisc_evidence.worm import list_versions, read_ranges
 
 log = get_logger(__name__)
 
@@ -1017,12 +1017,12 @@ class EvidenceWriter:
     ) -> AsyncIterator[bytes]:
         """Stream the evidence bytes for review/export: always the pinned version."""
         row = await self._pinned(tenant_id, evidence_id)
-        resp = await self._s3.get_object(
-            Bucket=self._bucket, Key=row.storage_key, VersionId=row.version_id
-        )
-        async with resp["Body"] as body:
-            async for data in body.iter_chunks(chunk):
-                yield data
+        # range by range: a stalled reader never holds a pooled S3 connection (worm.read_ranges)
+        async for data in read_ranges(
+            self._s3, bucket=self._bucket, key=row.storage_key, version_id=row.version_id,
+            chunk=chunk,
+        ):  # fmt: skip
+            yield data
 
     async def verify(self, *, tenant_id: uuid.UUID, evidence_id: uuid.UUID) -> VerifyResult:
         """Re-hash the pinned version against the registry, and report any other version at the key."""

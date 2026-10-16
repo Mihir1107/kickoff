@@ -862,3 +862,37 @@ interval, released), a bearer principal deactivated mid-native, a steady reader 
 15 s bound (no piece later than 15 s after the revocation), the real-server client view, full
 downloads equal to their Content-Length. Round `m17-cutoff`: 10 breaks, all caught (one first
 pointed at a test where it was equivalent: a package's zip chunks are smaller than a piece).
+
+## Implementation notes: the fixes before step 6 (2026-10-16)
+
+1. **Stalled readers are cut.** Every write of a content download AND of the job stream is timed
+   (`downloads.GuardedResponse`): one not completed after `EDISC_DOWNLOAD_STALL_SECONDS` (60 s) cuts
+   the connection, audited `download_aborted` reason `stalled` (the stream: route `stream_job`,
+   no size, no read). Why 60 s: a write blocks only once the client's receive window and our send
+   buffer are full, i.e. it read nothing for that long; TCP's own retransmission backoff gives up
+   on an unreachable peer after about a minute; browser and network hiccups last seconds.
+2. **Found: Starlette's `BaseHTTPMiddleware` (our request-context middleware) buffered every
+   streamed body** through its own task: a route's write "completed" into that buffer, so
+   `bytes_sent` counted one write the client had not received, and a cut raised in the route never
+   reached the server (the middleware's forwarding task stayed blocked on the stalled client: in
+   production a stalled download would never have been closed). The middleware is now plain ASGI
+   (`app.RequestContext`, same behaviour); a unit test refuses `BaseHTTPMiddleware`.
+3. **Found: a stalled download held a pooled S3 connection.** `EvidenceWriter.open` and the
+   packages' object members kept a GetObject body open across every write; 50 stalled clients
+   (the S3 client's pool) would have starved every other download and the S3 anchor every content
+   read writes. Both now read pinned versions range by range (`worm.read_ranges`: each range read
+   whole and its connection returned before it is yielded; the end is the object's real end, so
+   "more bytes than recorded" is still seen). Database work while streaming is one short
+   transaction per page, never across a write; Redis is not used. Tested with 40 stalled natives,
+   10 render packages stalled inside their object members and 10 stalled streams: no database
+   connection checked out, no Redis connection in use, no S3 connection lent out, and another
+   client downloads the native whole and reads its permissions (200, well within the bound).
+4. **Permission loss cuts downloads** (`permission_lost`): at the same 7.5 s boundary, after the
+   session, each content route's own read authorization on its object's matter is asked again
+   (`still_permitted`, never cached). Tested on all eight routes (a bearer principal whose role is
+   revoked), with the revocation and the stall cases (`cut.cut_every_way`).
+5. **CI:** branches and pull requests still cancel older runs; on main every commit has its own
+   concurrency group and nothing is cancelled (GitHub cancels a PENDING run of a group even
+   without `cancel-in-progress`). `tests/unit/test_ci_workflow.py` evaluates both expressions.
+Round `m17-pre6`: 8 breaks, all caught (the S3 one for packages only after the test stalled the
+packages inside their object members, not at their first write).

@@ -9,7 +9,7 @@ import urllib.parse
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
-from typing import Annotated, Any
+from typing import Annotated
 
 import httpx
 import redis.asyncio as aioredis
@@ -19,6 +19,8 @@ from fastapi.routing import APIRoute
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from temporalio.client import Client
 from types_aiobotocore_s3 import S3Client
 
@@ -179,32 +181,52 @@ def warm_routes(app: FastAPI) -> int:
 def add_request_context(app: FastAPI) -> None:
     """Every request gets an id (client-supplied X-Request-Id if sane), bound to all its log lines
     and returned in the response; routes put it in custody and audit payloads. Writes the access
-    line (uvicorn's own prints the raw request line: switched off in main)."""
+    line (uvicorn's own prints the raw request line: switched off in main).
 
-    @app.middleware("http")
-    async def _request_context(request: Request, call_next: Any) -> Any:
+    A PLAIN ASGI middleware, not ``@app.middleware("http")``: Starlette's ``BaseHTTPMiddleware``
+    forwards a streamed body through its own task and buffer, so a route's write "completed" into
+    that buffer, a stalled client was never seen by the route's write timeout, and a cut never
+    reached the server (found by the stalled-download tests, before M17 step 6)."""
+    app.add_middleware(RequestContext)
+
+
+class RequestContext:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope)
         rid = request_id(request)
         request.state.request_id = rid
         clear_context()
         path = request_path(request)  # never a client-chosen segment, never the query string
         bind_context(request_id=rid, path=path)
         started = time.monotonic()
+        cookie = SESSION_COOKIE in request.cookies
+
+        async def respond(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                route = scope.get("route")
+                log.info(
+                    "request", method=request.method, route=getattr(route, "path", None),
+                    status=message["status"], ms=round((time.monotonic() - started) * 1000, 1),
+                )  # fmt: skip
+                headers["x-request-id"] = rid
+                if cookie:  # never cached, never shared (ADR 0016 §2)
+                    if "no-store" not in headers.get("cache-control", ""):
+                        headers["cache-control"] = "no-store"
+                    vary = headers.get("vary")
+                    headers["vary"] = f"{vary}, Cookie" if vary else "Cookie"
+            await send(message)
+
         try:
-            response = await call_next(request)
-            route = request.scope.get("route")
-            log.info(
-                "request", method=request.method, route=getattr(route, "path", None),
-                status=response.status_code, ms=round((time.monotonic() - started) * 1000, 1),
-            )  # fmt: skip
+            await self.app(scope, receive, respond)
         finally:
             clear_context()
-        response.headers["x-request-id"] = rid
-        if SESSION_COOKIE in request.cookies:  # never cached, never shared (ADR 0016 §2)
-            if "no-store" not in response.headers.get("cache-control", ""):
-                response.headers["cache-control"] = "no-store"
-            vary = response.headers.get("vary")
-            response.headers["vary"] = f"{vary}, Cookie" if vary else "Cookie"
-        return response
 
 
 def create_app(settings: Settings, resources: Resources | None = None) -> FastAPI:

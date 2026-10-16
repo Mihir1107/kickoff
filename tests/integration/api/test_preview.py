@@ -25,7 +25,7 @@ from edisc_worker.preview import build_preview
 
 from ..worker.conftest import spec
 from .conftest import Api, TenantCtx, add_principal, secret
-from .cut import check_cut, cut_download, full_length
+from .cut import cut_every_way, full_length
 from .first_byte import first_byte
 from .test_jobs import custody, make_world, wait_status
 from .test_reports import report_worker
@@ -268,4 +268,4 @@ async def test_a_preview_is_cut_when_the_session_is_revoked(
     ds = Dataset(w.sp)
     query = f"conversation={ds.conversations()[0].id}&day={ds.day(0).isoformat()}"
     await full_length(api, tenant, _url(job_id), query)
-    check_cut(await cut_download(api, tenant, _url(job_id), query), "preview")
+    await cut_every_way(api, tenant, _url(job_id), query, route="preview")

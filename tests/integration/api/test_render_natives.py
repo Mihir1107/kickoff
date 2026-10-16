@@ -26,7 +26,14 @@ from edisc_db.session import tenant_tx
 from ..custody.conftest import superuser
 from ..worker.conftest import spec
 from .conftest import Api, TenantCtx, add_principal
-from .cut import check_cut, cut_download, cut_through_uvicorn, full_length, steady_cut
+from .cut import (
+    check_cut,
+    cut_download,
+    cut_every_way,
+    cut_through_uvicorn,
+    full_length,
+    steady_cut,
+)
 from .first_byte import first_byte
 from .test_jobs import custody, make_world, wait_status
 from .test_renders import render_worker, wait_render
@@ -284,6 +291,7 @@ async def test_a_native_is_cut_when_its_bearer_principal_is_deactivated(
     await full_length(api, tenant, path)
     cut = await cut_download(api, tenant, path, how="deactivate")
     check_cut(cut, "render_native_content", reason="principal_deactivated")
+    await cut_every_way(api, tenant, path, route="render_native_content")
 
 
 async def test_a_steady_reader_is_cut_within_15_seconds_of_the_revocation(

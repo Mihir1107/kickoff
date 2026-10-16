@@ -15,7 +15,7 @@ from sqlalchemy import text
 from edisc_db.session import tenant_tx
 
 from .conftest import Api, TenantCtx
-from .cut import check_cut, cut_download, full_length
+from .cut import cut_every_way, full_length
 from .first_byte import first_byte
 from .test_renders import render_worker, sealed_job, wait_render
 
@@ -71,7 +71,7 @@ async def test_evidence_content_is_cut_when_the_session_is_revoked(
             {"j": uuid.UUID(job_id)})).scalar_one()  # fmt: skip
     path = f"/v1/evidence/{evidence_id}/content"
     await full_length(api, tenant, path, "purpose=download")
-    check_cut(await cut_download(api, tenant, path, "purpose=download"), "evidence_content")
+    await cut_every_way(api, tenant, path, "purpose=download", route="evidence_content")
 
 
 async def test_a_render_file_is_cut_when_the_session_is_revoked(
@@ -84,4 +84,4 @@ async def test_a_render_file_is_cut_when_the_session_is_revoked(
         )
     path = f"/v1/renders/{render['id']}/files/0/content"
     await full_length(api, tenant, path)
-    check_cut(await cut_download(api, tenant, path), "render_file_content")
+    await cut_every_way(api, tenant, path, route="render_file_content")

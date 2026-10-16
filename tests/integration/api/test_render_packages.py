@@ -26,7 +26,7 @@ from edisc_worker.renders import create_render
 
 from ..custody.conftest import superuser
 from .conftest import Api, TenantCtx, add_principal
-from .cut import check_cut, cut_download, full_length
+from .cut import cut_every_way, full_length
 from .first_byte import first_byte
 from .test_jobs import custody
 from .test_renders import render_worker, sealed_job, wait_render
@@ -308,5 +308,4 @@ async def test_a_package_is_cut_when_the_session_is_revoked_and_is_no_zip(
     _, render = await _rendered(api, tenant)
     path = f"/v1/renders/{render['id']}/package"
     await full_length(api, tenant, path, "outputs=embed")
-    cut = await cut_download(api, tenant, path, "outputs=embed")
-    check_cut(cut, "render_package", zip_file=True)
+    await cut_every_way(api, tenant, path, "outputs=embed", route="render_package", zip_file=True)

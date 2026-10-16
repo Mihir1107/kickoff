@@ -94,6 +94,9 @@ Rounds (ADR 0015):
 - ``m17-cutoff``: in-flight downloads end with the session (M17 step 5b): the re-check at piece
   boundaries, the cut (an error, never a completed response), its audit with the exact bytes and
   its anchor, the re-cut pieces, Content-Length, every content route guarded.
+- ``m17-pre6``: the fixes before M17 step 6: every write of a download or stream timed (a stalled
+  client is cut and audited), nothing pooled held while bytes flow (S3 by ranges, no buffering
+  middleware), the read permission re-checked on downloads, CI never cancels a main commit.
 - ``m17-host-cookie``: the session cookie is host-only (``__Host-``, no ``Domain``) and a same-site
   request from a neighbouring subdomain is refused, both in real browsers (ADR 0016 §2).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
@@ -155,6 +158,7 @@ TEB = "tests/integration/api/test_error_bodies.py"
 DLS = "apps/api/src/edisc_api/downloads.py"
 CRA = "tests/integration/api/test_content_reads_anchored.py"
 UDR = "tests/unit/api/test_download_routes.py"
+TSC = "tests/integration/api/test_stalled_clients.py"
 TIG = "tests/integration/api/test_idp_groups.py"
 DC = "packages/connectors/dummy/src/edisc_connector_dummy/connector.py"
 ULG = "tests/unit/core/test_loopguard.py"
@@ -1272,8 +1276,8 @@ CATALOG: list[Mutation] = [
       '    if site is not None and site not in ("same-origin", "same-site", "none"):', SES,
       "another_site_or_a_sibling_subdomain"),
     m("cookie_responses_cacheable", "m17-sessions", APPM,
-      '            response.headers["cache-control"] = "no-store"\n            vary',
-      "            vary", SES, "strict_host_only_session"),
+      '                        headers["cache-control"] = "no-store"\n                    vary',
+      "                        pass\n                    vary", SES, "strict_host_only_session"),
     m("login_state_reusable", "m17-sessions", AUR, '" WHERE state_hash = :h AND consumed_at IS NULL"',
       '" WHERE state_hash = :h"', SES, "state_is_single_use"),
     m("login_handle_unchecked", "m17-sessions", AUR,
@@ -1621,18 +1625,19 @@ CATALOG: list[Mutation] = [
       UAC, "list_operations"),
     # ------------------------------------------------------------------ download cut-off (M17 5b)
     m("download_never_rechecked", "m17-cutoff", DLS,
-      "            if time.monotonic() - checked >= watch.interval:\n", "            if False:\n", CRA,
+      "                if self.permitted is not None and time.monotonic() - checked >= watch.interval:\n",
+      "                if False:\n", CRA,
       "evidence_content_is_cut"),
     m("download_cut_unaudited", "m17-cutoff", DLS,
-      "                    await shielded(_record(res, caller, request_id, download, sent, reason))\n",
-      "", CRA, "evidence_content_is_cut"),
+      "        await shielded(self._record(reason))\n", "", CRA, "evidence_content_is_cut"),
     m("download_cut_not_anchored", "m17-cutoff", DLS,
       "    await audit.anchor_now(res.sessions, res.s3, res.settings, caller.tenant_id, event)\n",
       "", CRA, "evidence_content_is_cut"),
-    m("download_cut_completes", "m17-cutoff", DLS, "                    raise DownloadCut(reason)\n",
-      "                    return\n", CRA, "evidence_content_is_cut"),
-    m("download_bytes_miscounted", "m17-cutoff", DLS, "            sent += len(part)\n",
-      "            sent += len(chunk)\n", "tests/integration/api/test_render_natives.py",
+    m("download_cut_completes", "m17-cutoff", DLS, "        raise DownloadCut(reason)\n",
+      "        return\n", CRA, "evidence_content_is_cut"),
+    m("download_bytes_miscounted", "m17-cutoff", DLS,
+      "                self.sent += len(part)  # its write completed (the server awaited it)\n",
+      "                self.sent += len(chunk)\n", "tests/integration/api/test_render_natives.py",
       "deactivated"),  # S3 chunks exceed a piece there (zip chunks of a package may not)
     Mutation("download_not_rechunked", "m17-cutoff", DLS, (
         ("        for start in range(0, len(chunk), piece):\n", "        for start in range(0, 1):\n"),
@@ -1643,15 +1648,50 @@ CATALOG: list[Mutation] = [
       '        headers={"x-evidence-sha256": row.sha256, "content-length": str(row.size_bytes),\n',
       '        headers={"x-evidence-sha256": row.sha256,\n', CRA, "evidence_content_is_cut"),
     m("preview_unguarded", "m17-cutoff", "apps/api/src/edisc_api/routes/preview.py",
-      "        guarded(one_chunk(out.html), res=res, caller=caller, request_id=rid, download=cut),\n",
-      "        one_chunk(out.html),\n", UDR, ""),
+      '            permitted=still_permitted(res, caller, P.EVIDENCE_READ, Scope("matter", job.matter_id)),\n',
+      "            permitted=None,\n", UDR, ""),
     m("job_package_unguarded", "m17-cutoff", "apps/api/src/edisc_api/routes/job_package.py",
-      "        guarded(body(), res=res, caller=caller, request_id=rid, download=cut),\n",
-      "        body(),\n", "tests/integration/api/test_job_package.py", "is_cut"),
+      "    return GuardedResponse(\n", "    return StreamingResponse(\n",
+      "tests/integration/api/test_job_package.py", "is_cut"),
     m("watch_ignores_bearer_principal", "m17-cutoff", STR,
       "                reason = None if active else EndReason.PRINCIPAL_DEACTIVATED\n",
       "                reason = None\n", "tests/integration/api/test_render_natives.py",
       "deactivated"),
+    # ------------------------------------------------------------------ fixes before step 6
+    m("download_writes_untimed", "m17-pre6", DLS,
+      "                await asyncio.wait_for(send(message), stall)\n", "                await send(message)\n",
+      CRA, "evidence_content_is_cut"),
+    m("stream_writes_untimed", "m17-pre6", JOBS,
+      "    return GuardedResponse(\n        guarded(body(), res=res, caller=who, request_id=rid, download=stream, permitted=None),\n",
+      "    return StreamingResponse(\n        body(),\n", TSC, "stalled_stream"),
+    m("download_permission_unchecked", "m17-pre6", DLS,
+      "                    if reason is None and not await shielded(self.permitted()):\n",
+      "                    if False:\n", CRA, "evidence_content_is_cut"),
+    m("native_body_held_open", "m17-pre6", "packages/evidence/src/edisc_evidence/writer.py",
+      "        async for data in read_ranges(\n",
+      "        resp = await self._s3.get_object(Bucket=self._bucket, Key=row.storage_key,"
+      " VersionId=row.version_id)\n        async with resp['Body'] as held:\n"
+      "            async for data in held.iter_chunks(chunk):\n                yield data\n"
+      "        return\n        async for data in read_ranges(\n", TSC, "hold_nothing"),
+    m("package_object_held_open", "m17-pre6", "packages/custody/src/edisc_custody/render_export.py",
+      "        async for chunk in read_ranges(s3, bucket=bucket, key=key, version_id=version_id,\n",
+      "        resp = await s3.get_object(Bucket=bucket, Key=key, VersionId=version_id)\n"
+      "        async with resp['Body'] as held:\n            async for chunk in held.iter_chunks(CHUNK):\n"
+      "                yield chunk\n        return\n"
+      "        async for chunk in read_ranges(s3, bucket=bucket, key=key, version_id=version_id,\n", TSC,
+      "hold_nothing"),
+    m("buffering_middleware", "m17-pre6", APPM, "    app.add_middleware(RequestContext)\n",
+      "    from starlette.middleware.base import BaseHTTPMiddleware as _B\n\n"
+      "    async def _through(request: Request, call_next: Any) -> Any:\n"
+      "        return await call_next(request)\n\n"
+      "    app.add_middleware(RequestContext)\n    app.add_middleware(_B, dispatch=_through)\n",
+      CRA, "evidence_content_is_cut"),
+    m("ci_cancels_main", "m17-pre6", ".github/workflows/ci.yml",
+      "  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}\n", "  cancel-in-progress: true\n",
+      "tests/unit/test_ci_workflow.py", ""),
+    m("ci_main_shares_a_group", "m17-pre6", ".github/workflows/ci.yml",
+      "  group: ci-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}', github.sha) || '' }}\n",
+      "  group: ci-${{ github.ref }}\n", "tests/unit/test_ci_workflow.py", ""),
     # ------------------------------------------------------------------ host-only session cookie
     Mutation("session_cookie_domain_wide", "m17-host-cookie", SESP, (
         ('SESSION_COOKIE = "__Host-edisc_session"', 'SESSION_COOKIE = "edisc_session"'),

@@ -433,6 +433,17 @@ class Settings(BaseSettings):
     api_stream_max_seconds: float = Field(
         default=1800, gt=0, description="maximum lifetime of one stream (then reason lifetime)"
     )
+    download_stall_seconds: float = Field(
+        default=60,
+        gt=0,
+        le=600,
+        description="a content download or job stream whose write to the client has not completed"
+        " for this long is cut (reason stalled, audited): a client that reads nothing holds memory"
+        " and a socket, never more. 60 s: a write blocks only once the client's receive window and"
+        " our send buffer are full, i.e. it read nothing for that long; TCP's own retransmission"
+        " backoff (1+2+...+32 s) gives up on an unreachable peer after about a minute, and"
+        " browser or network hiccups (tab throttling, a Wi-Fi handover) last seconds",
+    )
     api_download_chunk_bytes: int = Field(
         default=65_536,
         ge=1024,

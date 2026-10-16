@@ -35,7 +35,7 @@ from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller, require_recent_sign_in
 from edisc_api.authz import P, Permission, Scope, authorize, perm
-from edisc_api.downloads import Download, guarded
+from edisc_api.downloads import Download, GuardedResponse, guarded, still_permitted
 from edisc_api.error_codes import E
 from edisc_api.errors import ApiError, RecordedText, conflict, not_found
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, page_of
@@ -332,8 +332,15 @@ async def report_file_content(
 
     cut = Download("report_file_content", {"report_id": str(report_id), "name": f.name},
                    f.size_bytes, read.seq)  # fmt: skip
-    return StreamingResponse(
-        guarded(body(), res=res, caller=caller, request_id=rid, download=cut),
+    return GuardedResponse(
+        guarded(
+            body(),
+            res=res,
+            caller=caller,
+            request_id=rid,
+            download=cut,
+            permitted=still_permitted(res, caller, P.REPORT_READ, Scope("matter", row.matter_id)),
+        ),
         media_type=f.media_type,
         headers={
             "x-evidence-sha256": f.sha256,
@@ -390,8 +397,15 @@ async def report_package(
             raise
 
     cut = Download("report_package", {"report_id": str(report_id)}, plan.zip_size, read.seq)
-    return StreamingResponse(
-        guarded(body(), res=res, caller=caller, request_id=rid, download=cut),
+    return GuardedResponse(
+        guarded(
+            body(),
+            res=res,
+            caller=caller,
+            request_id=rid,
+            download=cut,
+            permitted=still_permitted(res, caller, P.REPORT_READ, Scope("matter", row.matter_id)),
+        ),
         media_type="application/zip",
         headers={
             "x-manifest-sha256": plan.manifest_sha256,
