@@ -11,6 +11,11 @@ a ``units`` event's id is the sequence number of the last chain event it reports
 ``job`` snapshot's id is ``"<head>.<digest>"``, the head it was taken at plus a digest of its content.
 A reconnect with ``Last-Event-ID`` gets exactly the unit events after that sequence number, and the
 snapshot only if it differs from the one the client last saw: nothing missed, nothing twice.
+
+The replay is bounded (``EDISC_SSE_REPLAY_MAX`` unit events, and for a reconnect
+``EDISC_SSE_REPLAY_MAX_AGE_SECONDS``): beyond it the stream sends ONE ``reset`` (id = the head),
+the snapshot, then continues live. A client receiving ``reset`` reloads the job and its units from
+the list endpoints (``GET /v1/jobs/{id}``, ``GET /v1/jobs/{id}/units``) and keeps the stream open.
 """
 
 from __future__ import annotations
@@ -67,6 +72,19 @@ class EndReason(StrEnum):
     LIFETIME = "lifetime"  # the stream's maximum lifetime: reconnect (and re-authenticate)
 
 
+class ResetReason(StrEnum):
+    REPLAY_LIMIT = "replay_limit"  # more settled units since Last-Event-ID than the replay cap
+    REPLAY_AGE = "replay_age"  # the replay would reach further back than the maximum age
+    UNKNOWN_POSITION = "unknown_position"  # Last-Event-ID is past this job's chain head
+
+
+class ResetEvent(Strict):
+    """``event: reset`` -- the units since ``Last-Event-ID`` are NOT replayed: reload the job and
+    its units from the list endpoints, then keep reading (the snapshot and live events follow)."""
+
+    reason: ResetReason
+
+
 class EndEvent(Strict):
     """``event: end`` -- the last event of a stream, then the server closes it."""
 
@@ -74,14 +92,18 @@ class EndEvent(Strict):
 
 
 MAX_UNITS = 500
-EVENTS: dict[str, type[Strict]] = {"job": JobEvent, "units": UnitsEvent, "end": EndEvent}
-SCHEMAS = ("JobEvent", "UnitsEvent", "UnitState", "EndEvent", "EndReason")
+EVENTS: dict[str, type[Strict]] = {
+    "job": JobEvent, "units": UnitsEvent, "reset": ResetEvent, "end": EndEvent,
+}  # fmt: skip
+SCHEMAS = (
+    "JobEvent", "UnitsEvent", "UnitState", "ResetEvent", "ResetReason", "EndEvent", "EndReason",
+)  # fmt: skip
 
 
 def add_schemas(doc: dict[str, Any]) -> dict[str, Any]:
     """Publish the event models as components (the route's ``x-sse-events`` names them)."""
     schemas = doc.setdefault("components", {}).setdefault("schemas", {})
-    for model in (JobEvent, UnitsEvent, EndEvent):
+    for model in (JobEvent, UnitsEvent, ResetEvent, EndEvent):
         generated = model.model_json_schema(ref_template="#/components/schemas/{model}")
         for name, sub in generated.pop("$defs", {}).items():
             schemas[name] = sub

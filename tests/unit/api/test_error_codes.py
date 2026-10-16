@@ -69,6 +69,47 @@ def test_an_error_without_a_code_fails(check: ErrorCodeCheck) -> None:
         _run(check, _response("GET", "/v1/jobs/0190", 500, "<p>oops</p>", html=True))
 
 
+ISSUE = {"type": "missing", "loc": ["query", "purpose"], "msg": "Field required"}
+
+
+def test_an_error_body_must_match_its_documented_schema(check: ErrorCodeCheck) -> None:
+    """422 bodies are what edisc_api.safe_errors writes; the document says so (ValidationErrorOut,
+    or UnprocessableOut where the operation also answers a text 422)."""
+    ok = {"error": "validation_error", "detail": [ISSUE]}
+    _run(check, _response("GET", "/v1/evidence/0190/content", 422, ok))
+    _run(check, _response("GET", "/v1/jobs", 422, ok))  # a list: UnprocessableOut
+    _run(check, _response("GET", "/v1/jobs", 422,
+                          {"error": "cursor_mismatch", "detail": "another route's cursor"}))  # fmt: skip
+    bad = {
+        "framework input": {"error": "validation_error", "detail": [{**ISSUE, "input": "x"}]},
+        "detail as text": {"error": "validation_error", "detail": "Field required"},
+        "loc as text": {"error": "validation_error", "detail": [{**ISSUE, "loc": "query"}]},
+        "another field": {"error": "validation_error", "detail": [ISSUE], "input": "x"},
+    }
+    for path in ("/v1/evidence/0190/content", "/v1/jobs"):
+        for body in bad.values():
+            with pytest.raises(AssertionError, match="documented schema"):
+                _run(check, _response("GET", path, 422, body))
+    # a 422 of another code is held to the operation's documented schema (UnprocessableOut)
+    with pytest.raises(AssertionError, match="documented schema"):
+        _run(check, _response("GET", "/v1/jobs", 422,
+                              {"error": "cursor_mismatch", "detail": 7}))  # fmt: skip
+
+
+def test_the_422_schemas_are_published() -> None:
+    schemas = DOC["components"]["schemas"]
+    assert schemas["ValidationIssue"]["additionalProperties"] is False
+    assert schemas["ValidationErrorOut"]["properties"]["error"]["enum"] == ["validation_error"]
+    get = DOC["paths"]["/v1/evidence/{evidence_id}/content"]["get"]["responses"]["422"]
+    assert get["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ValidationErrorOut"
+    }
+    listed = DOC["paths"]["/v1/jobs"]["get"]["responses"]["422"]
+    assert listed["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/UnprocessableOut"
+    }
+
+
 def test_static_paths_win_over_templates(check: ErrorCodeCheck) -> None:
     op = check.operation("GET", "/v1/me/permissions")
     assert op is not None and op["operationId"] == "my_permissions"

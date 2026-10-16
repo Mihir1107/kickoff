@@ -14,8 +14,14 @@ list into the document as ``x-error-codes``, plus one response per status naming
   and ``csrf`` for a state change;
 - a list (a ``cursor`` query parameter): ``cursor_mismatch`` and ``unprocessable`` (a bad cursor).
 
+Bodies: ``ErrorOut`` (``error`` + ``detail`` text); a 422 ``validation_error`` is
+``ValidationErrorOut`` (``error`` + ``detail``: a list of ``ValidationIssue`` {type, loc, msg},
+exactly what ``edisc_api.safe_errors`` writes: never FastAPI's ``input``/``ctx``). A 422 that can
+also be another code (``cursor_mismatch``, ``unprocessable``) documents either shape (``anyOf``).
+
 The API test client fails a test on any error answer whose code is not declared for the operation
-that answered it, or whose status is not the code's (``tests/integration/api/conftest.py``), so the
+that answered it, whose body does not validate against the documented schema of its status, or
+whose status is not the code's (``tests/integration/api/conftest.py``), so the
 declarations cannot drift from the code. ``scripts/api_compat.py`` fails a change that removes a
 declared code (``edisc-error-code-removed``).
 """
@@ -100,6 +106,9 @@ EVERY = (E.INTERNAL_ERROR, E.DB_POOL_EXHAUSTED, E.SERVICE_BUSY)
 AUTHENTICATED = (E.UNAUTHORIZED, E.TOO_MANY_REQUESTS, E.AMBIGUOUS_CREDENTIALS, E.CROSS_SITE)
 LIST = (E.CURSOR_MISMATCH, E.UNPROCESSABLE)
 ERROR_SCHEMA = "ErrorOut"
+VALIDATION_SCHEMA = "ValidationErrorOut"
+UNPROCESSABLE_SCHEMA = "UnprocessableOut"
+ISSUE_SCHEMA = "ValidationIssue"
 
 
 class ErrorCodeError(RuntimeError):
@@ -137,6 +146,39 @@ def complete(doc: dict[str, Any]) -> dict[str, Any]:
                        "detail": {"title": "Detail"}},
         "additionalProperties": True,
     }  # fmt: skip
+    # the 422 body edisc_api.safe_errors.validation_error_body writes, exactly
+    schemas[ISSUE_SCHEMA] = {
+        "type": "object", "title": ISSUE_SCHEMA, "required": ["type", "loc", "msg"],
+        "properties": {
+            "type": {"type": "string", "title": "Error Type"},
+            "loc": {"type": "array", "title": "Location",
+                    "items": {"anyOf": [{"type": "string"}, {"type": "integer"}]}},
+            "msg": {"type": "string", "title": "Message"},
+        },
+        "additionalProperties": False,
+    }  # fmt: skip
+    schemas[VALIDATION_SCHEMA] = {
+        "type": "object", "title": VALIDATION_SCHEMA, "required": ["error", "detail"],
+        "properties": {
+            "error": {"type": "string", "enum": [E.VALIDATION_ERROR.code], "title": "Error"},
+            "detail": {"type": "array", "title": "Detail",
+                       "items": {"$ref": f"#/components/schemas/{ISSUE_SCHEMA}"}},
+        },
+        "additionalProperties": False,
+    }  # fmt: skip
+    # a 422 that may also be another code: one object, detail the issues OR a text
+    schemas[UNPROCESSABLE_SCHEMA] = {
+        "type": "object", "title": UNPROCESSABLE_SCHEMA, "required": ["error", "detail"],
+        "properties": {
+            "error": {"type": "string", "title": "Error"},
+            "detail": {"title": "Detail", "anyOf": [
+                {"type": "array", "items": {"$ref": f"#/components/schemas/{ISSUE_SCHEMA}"}},
+                {"type": "string"}]},
+        },
+        # other 422 codes may add server state (digest_mismatch: the declared and received
+        # hashes); a validation_error is held to ValidationErrorOut itself (closed)
+        "additionalProperties": True,
+    }  # fmt: skip
     for item in doc.get("paths", {}).values():
         for method, op in item.items():
             if not isinstance(op, dict) or "responses" not in op:
@@ -155,10 +197,14 @@ def complete(doc: dict[str, Any]) -> dict[str, Any]:
                 response = op["responses"].setdefault(str(status), {})
                 listed = ", ".join(sorted(names))
                 response["description"] = f"error: {listed}"
-                if (
-                    str(status) != "422"
-                ):  # 422 keeps FastAPI's validation schema: our body (safe_errors)
-                    # is that shape plus "error", never with its optional input/ctx
-                    response["content"] = {"application/json": {
-                        "schema": {"$ref": f"#/components/schemas/{ERROR_SCHEMA}"}}}  # fmt: skip
+                response["content"] = {"application/json": {"schema": _schema(names)}}
     return doc
+
+
+def _schema(names: list[str]) -> dict[str, Any]:
+    error = {"$ref": f"#/components/schemas/{ERROR_SCHEMA}"}
+    if E.VALIDATION_ERROR.code not in names:
+        return error
+    if names == [E.VALIDATION_ERROR.code]:
+        return {"$ref": f"#/components/schemas/{VALIDATION_SCHEMA}"}
+    return {"$ref": f"#/components/schemas/{UNPROCESSABLE_SCHEMA}"}

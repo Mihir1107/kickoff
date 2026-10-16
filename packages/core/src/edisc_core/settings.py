@@ -431,6 +431,20 @@ class Settings(BaseSettings):
     api_stream_max_seconds: float = Field(
         default=1800, gt=0, description="maximum lifetime of one stream (then reason lifetime)"
     )
+    sse_replay_max: int = Field(
+        default=10_000,
+        ge=1,
+        le=1_000_000,
+        description="a job stream's replay after Last-Event-ID (or from the start): at most this"
+        " many settled-unit events; beyond, ONE reset event (reload from the list endpoints), the"
+        " snapshot, then live (bounds the catch-up's time and memory)",
+    )
+    sse_replay_max_age_seconds: float = Field(
+        default=3600,
+        gt=0,
+        description="a reconnect's replay never reaches back further than this (the oldest unit"
+        " event it would send): beyond, a reset event instead",
+    )
     api_stream_per_principal: int = Field(
         default=10, ge=1, description="concurrent streams per principal per API process (then 429)"
     )

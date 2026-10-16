@@ -19,7 +19,9 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 
-from edisc_api.stream_events import EndReason
+from edisc_api.auth import Caller
+from edisc_api.stream import SessionWatch
+from edisc_api.stream_events import EndReason, ResetReason
 from edisc_core.ids import new_id
 from edisc_custody.log import append
 from edisc_db.session import tenant_tx
@@ -145,7 +147,7 @@ async def test_events_follow_the_chain_and_the_stream_ends_when_sealed(
     async with stream(api, tenant, job) as sse:
         assert sse.status == 200
         assert sse.response_headers["content-type"].startswith("text/event-stream")
-        assert sse.response_headers["cache-control"] == "no-store, no-transform"
+        assert sse.response_headers["cache-control"] == "no-cache, no-store, no-transform"
         assert sse.response_headers["x-accel-buffering"] == "no"
         first = await sse.next()
         assert first.name == "job" and first.data["status"] == "running"
@@ -266,6 +268,101 @@ async def test_an_unreadable_last_event_id_is_a_fresh_start(api: Api, tenant: Te
         assert [e.name for e in [await sse.next(), await sse.next()]] == ["units", "job"]
 
 
+# ------------------------------------------------------------------ the replay's bound
+async def _head(api: Api, t: TenantCtx, job: Job) -> int:
+    async with tenant_tx(api.sessions, t.tenant_id) as s:
+        return int((await s.execute(text("SELECT max(seq) FROM custody_events WHERE stream_id = :j"),
+                                    {"j": job.id})).scalar_one())  # fmt: skip
+
+
+@pytest.mark.parametrize("away", [3, 4], ids=["exactly_at_the_cap", "one_over_the_cap"])
+async def test_the_replay_is_bounded_and_one_over_the_cap_is_one_reset(
+    api: Api, tenant: TenantCtx, away: int
+) -> None:
+    """EDISC_SSE_REPLAY_MAX = 3: three units settled while away are replayed; four give ONE
+    ``reset`` (id = the head), the snapshot, then live events (reload from the lists)."""
+    api = tuned(api, sse_replay_max=3)
+    job = await new_job(api, tenant, units=6)
+    async with stream(api, tenant, job) as first:
+        snapshot = await first.next()
+    for key in job.units[:away]:
+        await settle(api, tenant, job, key)
+    head = await _head(api, tenant, job)
+    async with stream(api, tenant, job, **{"Last-Event-ID": snapshot.id or ""}) as second:
+        caught = await second.until("job")
+        await settle(api, tenant, job, job.units[away])
+        live = await second.next()
+    if away == 3:
+        assert [e.name for e in caught] == ["units", "job"]
+        assert [u["unit_key"] for u in caught[0].data["units"]] == job.units[:3]
+    else:
+        assert [(e.name, e.id, e.data) for e in caught[:1]] == [
+            ("reset", str(head), {"reason": "replay_limit"})
+        ]
+        assert [e.name for e in caught[1:]] == ["job"] and caught[1].id.startswith(f"{head}.")  # type: ignore[union-attr]
+    # live events continue after either: exactly the next unit
+    assert live.name == "units" and [u["unit_key"] for u in live.data["units"]] == [job.units[away]]
+
+
+async def test_a_fresh_start_over_the_cap_is_one_reset(api: Api, tenant: TenantCtx) -> None:
+    api = tuned(api, sse_replay_max=2)
+    job = await new_job(api, tenant)
+    for key in job.units[:3]:
+        await settle(api, tenant, job, key)
+    async with stream(api, tenant, job) as sse:
+        got = await sse.until("job")
+    assert [(e.name, e.data.get("reason")) for e in got] == [
+        ("reset", "replay_limit"),
+        ("job", None),
+    ]
+
+
+async def _older_than(api: Api, t: TenantCtx, job: Job, seq: int, seconds: float) -> None:
+    """Waits (a condition, by the database clock) until chain event ``seq`` is older than this."""
+    while True:
+        async with tenant_tx(api.sessions, t.tenant_id) as s:
+            if (await s.execute(text(
+                "SELECT now() - created_at > make_interval(secs => :a) FROM custody_events"
+                " WHERE stream_id = :j AND seq = :q"), {"a": seconds, "j": job.id, "q": seq},
+            )).scalar_one():  # fmt: skip
+                return
+        await asyncio.sleep(0.05)
+
+
+async def test_a_replay_older_than_the_maximum_age_is_one_reset(
+    api: Api, tenant: TenantCtx
+) -> None:
+    """The age of the OLDEST unit event the replay would send counts: from before the old unit,
+    a reset; from just after it, the newer unit is replayed."""
+    api = tuned(api, sse_replay_max_age_seconds=0.5)
+    job = await new_job(api, tenant)
+    async with stream(api, tenant, job) as first:
+        snapshot = await first.next()
+    old = await settle(api, tenant, job, job.units[0])
+    await _older_than(api, tenant, job, old, 0.5)
+    await settle(api, tenant, job, job.units[1])
+    async with stream(api, tenant, job, **{"Last-Event-ID": snapshot.id or ""}) as sse:
+        got = await sse.until("job")
+    assert [(e.name, e.data.get("reason")) for e in got] == [("reset", "replay_age"), ("job", None)]
+    async with stream(api, tenant, job, **{"Last-Event-ID": str(old)}) as sse:
+        got = await sse.until("job")
+    assert [e.name for e in got] == ["units", "job"]
+    assert [u["unit_key"] for u in got[0].data["units"]] == [job.units[1]]
+
+
+async def test_a_position_past_the_head_is_one_reset(api: Api, tenant: TenantCtx) -> None:
+    api = tuned(api)
+    job = await new_job(api, tenant)
+    async with stream(api, tenant, job, **{"Last-Event-ID": "999999"}) as sse:
+        got = await sse.until("job")
+        await settle(api, tenant, job, job.units[0])
+        live = await sse.next()
+    assert [(e.name, e.data.get("reason")) for e in got] == [
+        ("reset", "unknown_position"), ("job", None)
+    ]  # fmt: skip
+    assert [u["unit_key"] for u in live.data["units"]] == [job.units[0]]
+
+
 # ------------------------------------------------------------------ continuous authorization
 async def test_a_revoked_session_ends_the_stream_within_15_seconds(
     api: Api, tenant: TenantCtx
@@ -289,6 +386,47 @@ async def test_a_revoked_session_ends_the_stream_within_15_seconds(
     assert end.data == {"reason": "session_revoked"}
     assert time.monotonic() - revoked <= 15.5
     assert await sse.ended()
+
+
+async def test_the_session_watch_answers_no_older_than_half_the_bound(
+    api: Api, tenant: TenantCtx
+) -> None:
+    """Every stream and download of a session shares one cached answer. A stream checks every
+    ``interval`` and accepts an answer at most ``interval`` old: revocation to cut <= the bound.
+    (Caching for the whole bound let a second stream of the session use an answer read just
+    before the revocation, then wait a full period: up to twice the bound.)"""
+    await enable_login(api, tenant)
+    browser = Browser()
+    assert (await sign_in(api, tenant, browser)).status_code == 200
+    async with tenant_tx(api.sessions, tenant.tenant_id) as s:
+        sid, pid = (await s.execute(text("SELECT id, principal_id FROM sessions"
+                                         " WHERE revoked_at IS NULL"))).one()  # fmt: skip
+    caller = Caller(tenant.tenant_id, pid, "user", "iss", "sub", frozenset(), session_id=sid)
+    watch = SessionWatch(api.sessions, seconds=1.0)
+    assert watch.interval == 0.5
+    assert await watch.check(caller) is None  # read now, cached
+    read_at = time.monotonic()
+    async with tenant_tx(api.sessions, tenant.tenant_id) as s:
+        await s.execute(text("UPDATE sessions SET revoked_at = now(), revoked_by = 'tests',"
+                             " revoke_reason = 'admin' WHERE id = :s"), {"s": sid})  # fmt: skip
+    # until the cached answer has aged one interval (before that it may still be used)
+    await asyncio.sleep(max(0.0, watch.interval - (time.monotonic() - read_at)))
+    assert await watch.check(caller) == EndReason.SESSION_REVOKED  # never an older one
+
+
+async def test_a_stream_rechecks_the_session_every_half_the_bound(
+    api: Api, tenant: TenantCtx
+) -> None:
+    """The other half of the bound (the watch's answer is at most ``interval`` old): a stream asks
+    every ``interval`` = recheck / 2, so revocation to ``end`` <= recheck. The keepalive follows
+    each re-check: the first comes at 2 s for a 4 s bound (at 4 s if it asked once per bound)."""
+    api = tuned(api, api_stream_recheck_seconds=4.0)
+    job = await new_job(api, tenant)
+    async with stream(api, tenant, job) as sse:
+        await sse.next()
+        opened = time.monotonic()
+        first = await sse.keepalive(within=10)
+    assert 1.9 <= first - opened < 3.0, first - opened
 
 
 async def test_a_lost_permission_ends_the_stream(api: Api, tenant: TenantCtx) -> None:
@@ -422,10 +560,23 @@ def test_the_end_reasons_are_the_published_ones() -> None:
     from edisc_api import openapi_doc
 
     doc = openapi_doc.document()
-    assert set(doc["components"]["schemas"]["EndReason"]["enum"]) == {r.value for r in EndReason}
+    schemas = doc["components"]["schemas"]
+    assert set(schemas["EndReason"]["enum"]) == {r.value for r in EndReason}
+    assert set(schemas["ResetReason"]["enum"]) == {r.value for r in ResetReason}
+    assert schemas["ResetEvent"]["properties"]["reason"] == {
+        "$ref": "#/components/schemas/ResetReason"
+    }
     op = doc["paths"]["/v1/jobs/{job_id}/stream"]["get"]
     assert op["x-sse-events"] == sorted(
-        ["EndEvent", "EndReason", "JobEvent", "UnitState", "UnitsEvent"]
+        [
+            "EndEvent",
+            "EndReason",
+            "JobEvent",
+            "ResetEvent",
+            "ResetReason",
+            "UnitState",
+            "UnitsEvent",
+        ]
     )
     assert json.dumps(op["responses"]["200"]["content"]) == json.dumps(
         {"text/event-stream": {"schema": {"type": "string"}}}

@@ -25,9 +25,11 @@ Compares ``docs/api/openapi.json`` (or ``--new``) with the spec at ``--base-ref`
    oasdiff rates a NEW response enum value ERR (``response-property-enum-value-added``); decision
    D9 makes it not breaking, so it is reported as a warning.
 3. **The allow-list** ``docs/api/breaking-allowlist.yaml``: an intended break needs an entry with
-   ``rule`` (the finding's id), ``operation`` (the operationId, or ``"METHOD /path"``), ``reason``
-   and ``frontend_commit`` (the frontend commit that absorbs it). An entry missing any of the four,
-   or one that matches nothing, FAILS: the list holds only live, explained exceptions.
+   ``rule`` (the finding's id), ``operation`` (the operationId, or ``"METHOD /path"``; or
+   ``operations``: a list of them, for ONE change seen on several operations), ``reason`` and
+   ``frontend_commit`` (the frontend commit that absorbs it). An entry missing any of the four, or
+   one with an operation that matches nothing, FAILS: the list holds only live, explained
+   exceptions.
 
 Exit 0 when nothing breaks; 1 otherwise. With ``GITHUB_STEP_SUMMARY`` set, a summary is appended.
 """
@@ -247,8 +249,16 @@ def load_allowlist(path: Path) -> list[dict[str, str]]:
     if not isinstance(entries, list):
         raise CompatError(f"{path}: a list of entries")
     for i, e in enumerate(entries):
+        if isinstance(e, dict) and "operations" in e and "operation" not in e:
+            ops = e["operations"]
+            if not (isinstance(ops, list) and ops
+                    and all(isinstance(o, str) and o.strip() for o in ops)):  # fmt: skip
+                raise CompatError(f"{path} entry {i}: operations must be a non-empty list of names")
+            if len(set(ops)) != len(ops):
+                raise CompatError(f"{path} entry {i}: an operation listed twice")
         missing = [k for k in ("rule", "operation", "reason", "frontend_commit")
-                   if not (isinstance(e, dict) and isinstance(e.get(k), str) and e[k].strip())]  # fmt: skip
+                   if not (isinstance(e, dict) and isinstance(e.get(k), str) and e[k].strip())
+                   and not (k == "operation" and isinstance(e, dict) and "operations" in e)]  # fmt: skip
         if missing:
             raise CompatError(f"{path} entry {i}: missing {', '.join(missing)}")
         if not COMMIT.match(e["frontend_commit"]):
@@ -268,19 +278,27 @@ class Verdict:
         return not self.breaking and not self.unused
 
 
-def judge(findings: list[Finding], allowlist: list[dict[str, str]]) -> Verdict:
+def _operations(entry: dict[str, Any]) -> list[str]:
+    return list(entry["operations"]) if "operations" in entry else [entry["operation"]]
+
+
+def judge(findings: list[Finding], allowlist: list[dict[str, Any]]) -> Verdict:
     breaking, allowed, used = [], [], set()
     for f in (f for f in findings if f.level >= ERR):
         hit = [
-            i for i, e in enumerate(allowlist) if e["rule"] == f.id and f.matches(e["operation"])
-        ]
+            (i, op) for i, e in enumerate(allowlist) if e["rule"] == f.id
+            for op in _operations(e) if f.matches(op)
+        ]  # fmt: skip
         if hit:
             allowed.append(f)
             used.update(hit)
         else:
             breaking.append(f)
     warnings = [f for f in findings if f.level == WARN]
-    unused = [e for i, e in enumerate(allowlist) if i not in used]
+    # every operation an entry names must have matched: a stale name fails like a stale entry
+    unused = [
+        e for i, e in enumerate(allowlist) if any((i, op) not in used for op in _operations(e))
+    ]
     return Verdict(breaking, allowed, warnings, unused)
 
 
@@ -302,7 +320,7 @@ def summary(v: Verdict) -> str:
         lines.append("")
     if v.unused:
         lines.append(f"**Allow-list entries matching nothing (fail):** {len(v.unused)}")
-        lines += [f"- `{e['rule']}` {e['operation']}" for e in v.unused]
+        lines += [f"- `{e['rule']}` {', '.join(_operations(e))}" for e in v.unused]
     return "\n".join(lines) + "\n"
 
 

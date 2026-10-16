@@ -59,7 +59,7 @@ def _schemas(doc: dict[str, object]) -> dict[str, dict[str, object]]:
 def test_a_change_to_a_published_event_schema_is_breaking() -> None:
     """`edisc-sse-event-changed` on REAL input: the published stream operation's events."""
     doc = openapi_doc.document()
-    for name in ("JobEvent", "UnitState", "EndReason"):
+    for name in ("JobEvent", "UnitState", "ResetEvent", "ResetReason", "EndReason"):
         new = copy.deepcopy(doc)
         schema = _schemas(new)[name]
         if "enum" in schema:

@@ -2,8 +2,9 @@
 
 The API test client (`conftest.Api.client`) runs :class:`ErrorCodeCheck` on every response: a 4xx
 or 5xx answer of a documented operation must carry a code (``{"error": ...}``, or the sign-in bounce
-page's ``auth_error=``), the code must be in that operation's ``x-error-codes`` and its status must
-be the registry's. A failure fails the test that made the request, so the published document
+page's ``auth_error=``), the code must be in that operation's ``x-error-codes``, its status must
+be the registry's, and a JSON body must validate against the schema the document publishes for
+that status (a ``validation_error`` against ``ValidationErrorOut`` itself: no other field). A failure fails the test that made the request, so the published document
 cannot drift from what the routes answer. A path or method no operation documents is not checked
 (Starlette answers it, not a route)."""
 
@@ -16,9 +17,10 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+import jsonschema
 from fastapi import FastAPI
 
-from edisc_api.error_codes import REGISTRY, complete
+from edisc_api.error_codes import REGISTRY, VALIDATION_SCHEMA, complete
 
 BOUNCE = re.compile(r"auth_error=([a-z_]+)")
 METHODS = ("get", "put", "post", "delete", "patch", "head", "options")
@@ -32,6 +34,15 @@ def SHARED() -> ErrorCodeCheck | None:  # noqa: N802 (reads like the constant it
 @dataclass
 class ErrorCodeCheck:
     operations: list[tuple[str, re.Pattern[str], dict[str, Any]]]
+    components: dict[str, Any]
+
+    def validate(self, schema: dict[str, Any], body: Any, where: str) -> None:
+        """``body`` against a schema of the document ($refs resolved in its components)."""
+        root = {**schema, "components": self.components}
+        errors = list(jsonschema.Draft202012Validator(root).iter_errors(body))
+        assert not errors, (
+            f"{where}: the body does not match its documented schema: {errors[0].message}"
+        )
 
     @classmethod
     def for_app(cls, app: FastAPI) -> ErrorCodeCheck:
@@ -50,7 +61,7 @@ class ErrorCodeCheck:
                     ops.append((method.upper(), pattern, op))
         # static segments win over templates (a literal path before a parameterised one)
         ops.sort(key=lambda o: o[1].pattern.count("[^/]+"))
-        return cls(ops)
+        return cls(ops, doc["components"])
 
     @classmethod
     async def shared(cls, app: FastAPI) -> ErrorCodeCheck:
@@ -86,6 +97,13 @@ class ErrorCodeCheck:
         assert known.status == response.status_code, (
             f"{where} answered {code!r} with {response.status_code}; the registry says {known.status}"
         )
+        if response.headers.get("content-type", "").startswith("application/json"):
+            documented = op["responses"][str(response.status_code)]["content"]["application/json"]
+            data = json.loads(body)
+            self.validate(documented["schema"], data, where)
+            if code == "validation_error":
+                ref = {"$ref": f"#/components/schemas/{VALIDATION_SCHEMA}"}
+                self.validate(ref, data, where)
 
 
 def _code(content_type: str, body: str) -> str | None:

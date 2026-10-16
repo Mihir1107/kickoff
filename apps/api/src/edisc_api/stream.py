@@ -43,6 +43,8 @@ from edisc_api.stream_events import (
     EndEvent,
     EndReason,
     JobEvent,
+    ResetEvent,
+    ResetReason,
     Strict,
     UnitsEvent,
     UnitState,
@@ -60,10 +62,11 @@ HEAD = (
     " (SELECT max(e.seq) FROM custody_events e WHERE e.stream_id = j.id) AS head"
     " FROM collection_jobs j WHERE j.id = :j"
 )
-SETTLED_SINCE = (
-    "SELECT e.seq, e.payload->>'unit_key' AS unit_key FROM custody_events e"
+SETTLED_SINCE = (  # :limit / :age NULL for a feed's poll (LIMIT NULL = no limit)
+    "SELECT e.seq, e.payload->>'unit_key' AS unit_key,"
+    " now() - e.created_at > make_interval(secs => :age) AS stale FROM custody_events e"
     " WHERE e.stream_id = :j AND e.seq > :after AND e.seq <= :head"
-    " AND e.event_type IN ('unit_reconciled', 'unit_failed') ORDER BY e.seq"
+    " AND e.event_type IN ('unit_reconciled', 'unit_failed') ORDER BY e.seq LIMIT :limit"
 )
 UNITS = (
     "SELECT unit_key, conversation_id, day, status, recon_status, expected_count,"
@@ -113,15 +116,41 @@ def parse_last_event_id(value: str | None) -> tuple[int, str | None]:
     return int(head), value if digest else None
 
 
-async def read_changes(s: AsyncSession, job_id: uuid.UUID, after: int) -> tuple[list[Sent], Sent]:
+@dataclass(frozen=True)
+class Replay:
+    """The bound of a subscriber's catch-up (``EDISC_SSE_REPLAY_MAX``, ``..._MAX_AGE_SECONDS``)."""
+
+    max_events: int
+    max_age_seconds: float
+
+
+async def read_changes(
+    s: AsyncSession, job_id: uuid.UUID, after: int, replay: Replay | None = None
+) -> tuple[list[Sent], Sent]:
     """Unit events in ``(after, head]`` (chain order, at most MAX_UNITS per event), then the
     snapshot at ``head``. Reading the head FIRST bounds the unit events: every later one has a
-    greater sequence number than the snapshot's id."""
+    greater sequence number than the snapshot's id. With ``replay`` (a subscriber's catch-up),
+    more than ``max_events`` unit events, or (after a ``Last-Event-ID``) an oldest one older than
+    ``max_age_seconds``, or a position past the head, gives ONE ``reset`` instead of the units."""
     row = (await s.execute(text(HEAD), {"j": job_id})).one()
     head = int(row.head or 0)
+    bound: dict[str, float | None] = {"limit": None, "age": None}
+    if replay is not None:  # one row past the cap tells "over" from "exactly at"
+        bound = {"limit": replay.max_events + 1,
+                 "age": replay.max_age_seconds if after > 0 else None}  # fmt: skip
     settled = (
-        await s.execute(text(SETTLED_SINCE), {"j": job_id, "after": after, "head": head})
+        await s.execute(text(SETTLED_SINCE), {"j": job_id, "after": after, "head": head, **bound})
     ).all()
+    reset: ResetReason | None = None
+    if replay is not None:
+        if after > head:
+            reset = ResetReason.UNKNOWN_POSITION
+        elif len(settled) > replay.max_events:
+            reset = ResetReason.REPLAY_LIMIT
+        elif settled and settled[0].stale:
+            reset = ResetReason.REPLAY_AGE
+    if reset is not None:
+        settled = []
     keys = sorted({r.unit_key for r in settled})
     units = {u.unit_key: u for u in (await s.execute(text(UNITS), {"j": job_id, "k": keys})).all()}
     events: list[Sent] = []
@@ -157,6 +186,8 @@ async def read_changes(s: AsyncSession, job_id: uuid.UUID, after: int) -> tuple[
         units_by_recon_status=dict(sorted(by_recon.items())),
     )  # fmt: skip
     digest = hashlib.sha256(canonical_json(snapshot.model_dump(mode="json"))).hexdigest()[:12]
+    if reset is not None:
+        events = [Sent(str(head), "reset", ResetEvent(reason=reset), head)]
     return events, Sent(f"{head}.{digest}", "job", snapshot, head, final=bool(row.sealed))
 
 
@@ -197,13 +228,15 @@ class JobFeed:
                     self.subscribers.discard(sub)
                     break
 
-    async def join(self, size: int, after: int) -> tuple[Subscriber, list[Sent], Sent]:
+    async def join(
+        self, size: int, after: int, replay: Replay
+    ) -> tuple[Subscriber, list[Sent], Sent]:
         """Subscribe and catch up atomically with respect to polls (the module docstring)."""
         async with self.lock:
             sub = self.subscribe(size)
             try:
                 async with tenant_tx(self.sessions, self.tenant_id) as s:
-                    events, snapshot = await read_changes(s, self.job_id, after)
+                    events, snapshot = await read_changes(s, self.job_id, after, replay)
             except BaseException:  # never leave a subscriber that no writer will drain
                 self.subscribers.discard(sub)
                 raise
@@ -274,17 +307,27 @@ class JobFeeds:
 @dataclass
 class SessionWatch:
     """The session row (cookie callers) or the principal's active flag (bearer callers), checked by
-    the DATABASE clock, at most once per ``seconds`` per session across all its streams."""
+    the DATABASE clock, shared by all the streams and downloads of one session.
+
+    The bound ``seconds`` (D3: <= 15) is the SUM of two halves: a stream or download calls
+    :meth:`check` every :attr:`interval` (``seconds / 2``), and a cached answer is at most
+    ``interval`` old. Caching for the whole bound while also checking every ``seconds`` let a second
+    stream of one session use an answer read just before a revocation, then wait a full period:
+    up to twice the bound (found while building 5b; ``test_two_streams_of_one_session...``)."""
 
     sessions: Sessions
     seconds: float
     cache: dict[uuid.UUID, tuple[float, EndReason | None]] = field(default_factory=dict)
 
+    @property
+    def interval(self) -> float:
+        return self.seconds / 2
+
     async def check(self, caller: Caller) -> EndReason | None:
         key = caller.session_id or caller.principal_id
         now = time.monotonic()
         hit = self.cache.get(key)
-        if hit is not None and now - hit[0] < self.seconds:
+        if hit is not None and now - hit[0] < self.interval:
             return hit[1]
         async with tenant_tx(self.sessions, caller.tenant_id) as s:
             if caller.session_id is not None:
@@ -323,7 +366,7 @@ async def shielded[T](work: Awaitable[T], undo: Callable[[T], None] | None = Non
 async def stream_body(
     *, feeds: JobFeeds, watch: SessionWatch, caller: Caller, job_id: uuid.UUID,
     last_event_id: str | None, authorized: Authorized, queue_size: int, recheck_seconds: float,
-    max_seconds: float, on_close: Callable[[], None],
+    max_seconds: float, replay: Replay, on_close: Callable[[], None],
 ) -> AsyncIterator[bytes]:  # fmt: skip
     feed = feeds.feed(caller.tenant_id, job_id)
     started = time.monotonic()
@@ -333,6 +376,8 @@ async def stream_body(
     def fresh(event: Sent) -> Sent | None:
         """The part of ``event`` this client has not had: a feed's event may overlap its catch-up
         (it covers chain events since the FEED's last head), so units are trimmed one by one."""
+        if event.name == "reset":
+            return event
         if event.name == "units":
             kept = [u for u in event.model.units if u.seq > last_seq]  # type: ignore[attr-defined]
             if not kept:
@@ -346,7 +391,7 @@ async def stream_body(
     try:
         yield b"retry: 3000\n\n"
         joined, events, snapshot = await shielded(
-            feed.join(queue_size, last_seq), lambda done: _leave(feeds, feed, done[0])
+            feed.join(queue_size, last_seq, replay), lambda done: _leave(feeds, feed, done[0])
         )
         sub = joined
         feeds.start(feed)
@@ -354,18 +399,23 @@ async def stream_body(
             event = fresh(caught)
             if event is not None:
                 yield event.wire()
+                if event.name == "reset":  # the client reloads: positions restart at the head
+                    last_seq, last_snapshot = event.seq, None
+                    continue
                 last_seq = max(last_seq, event.seq)
                 if event.name == "job":
                     last_snapshot = event.id
         if snapshot.final:
             yield end(EndReason.SEALED)
             return
-        checked = time.monotonic()
+        # the session every watch.interval (its cache is at most as old: <= recheck_seconds in
+        # all, SessionWatch), job.read every recheck_seconds (never cached)
+        checked = permitted = time.monotonic()
         while True:
             if joined.overflowed:
                 yield end(EndReason.SLOW_CONSUMER)
                 return
-            wait = max(0.0, recheck_seconds - (time.monotonic() - checked))
+            wait = max(0.0, watch.interval - (time.monotonic() - checked))
             live: Sent | None
             try:
                 live = await asyncio.wait_for(joined.queue.get(), timeout=wait)
@@ -380,10 +430,12 @@ async def stream_body(
                 if live.final:
                     yield end(EndReason.SEALED)
                     return
-            if time.monotonic() - checked >= recheck_seconds:
+            if time.monotonic() - checked >= watch.interval:
                 reason = await shielded(watch.check(caller))
-                if reason is None and not await shielded(authorized()):
-                    reason = EndReason.PERMISSION_LOST
+                if reason is None and time.monotonic() - permitted >= recheck_seconds:
+                    if not await shielded(authorized()):
+                        reason = EndReason.PERMISSION_LOST
+                    permitted = time.monotonic()
                 if reason is None and time.monotonic() - started >= max_seconds:
                     reason = EndReason.LIFETIME
                 if reason is not None:

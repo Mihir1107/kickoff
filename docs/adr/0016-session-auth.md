@@ -792,3 +792,41 @@ Tests: `tests/integration/api/test_job_stream.py` (17), `tests/unit/api/test_str
 the Redis pool test. Measurement: docs/runs/2026-10-15-sse-500-streams.md. Mutation round
 `m17-stream`: 16 breaks, all caught (the first run left the per-entry trim uncaught: it depended on
 timing; the deterministic overlap test was added).
+
+## Implementation notes: the step-5 fixes (2026-10-16, before 5b)
+
+1. **The replay is bounded.** A subscriber's catch-up sends at most `EDISC_SSE_REPLAY_MAX` (10,000)
+   settled-unit events; for a reconnect, never one older than `EDISC_SSE_REPLAY_MAX_AGE_SECONDS`
+   (1 h, measured on the OLDEST unit event the replay would send, by the database clock: a quiet job
+   whose last event is old still replays nothing old); a `Last-Event-ID` past the chain head is
+   refused the same way. Beyond, ONE `reset` event (`id` = the head, `reason` `replay_limit` /
+   `replay_age` / `unknown_position`), the snapshot, then live events: the client reloads the job and
+   its units from the list endpoints and keeps the stream. One row past the cap is read
+   (`LIMIT cap + 1`), so "exactly at" and "one over" differ without counting the rest. A fresh start
+   (no `Last-Event-ID`) has the count cap but not the age. `ResetEvent` / `ResetReason` are in
+   `x-sse-events` (adding them is not breaking; changing them is). Tested at the cap, one over, the
+   fresh start, the age (old unit vs a newer one), past the head.
+2. **The 15 s bound had a hole (found while designing 5b).** `SessionWatch` cached an answer for the
+   whole bound and each stream asked once per bound, so a second stream of one session could use an
+   answer read just before a revocation and then wait a full period: up to 30 s. Now the bound is
+   the sum of two halves: every stream (and download) asks every `interval` = bound / 2, and a
+   cached answer is at most `interval` old. `job.read` is still asked once per bound (never cached).
+   Tested on both halves (the watch's answer age, the stream's cadence via its keepalives).
+3. **422 bodies are published as sent** (`edisc_api.error_codes.complete`): `ValidationErrorOut`
+   (`error` = `validation_error`, `detail`: `ValidationIssue` {type, loc, msg}, nothing else) where a
+   422 can only be a validation error, `UnprocessableOut` (detail: the issues or a text) where it can
+   also be `cursor_mismatch` / `unprocessable` (open to extra server-state fields, like `ErrorOut`: the export routes' `digest_mismatch` carries the declared and received hashes; found by the new check). The test client validates every error body of every
+   API test against its documented schema (and validation errors against `ValidationErrorOut`
+   itself); `test_error_bodies.py` validates real bodies against the COMMITTED document. The change
+   on 34 list operations (`detail` widened by `string`) is one allow-list entry, "pre-client": the
+   frontend (`aeee68e`) has no code reading the 422 type. Allow-list entries may now name
+   `operations` (a list; each must match, or the entry fails as stale).
+4. **Proxies:** `Cache-Control: no-cache, no-store, no-transform` (no-cache as the plan asked;
+   no-store stays: every cookie response is no-store) and `X-Accel-Buffering: no`. The plan's
+   real-server test is built (`test_stream_uvicorn.py`): `create_app` (so whatever middleware
+   production adds) served by uvicorn over TCP, read chunk by chunk, plus a case behind Starlette's
+   `GZipMiddleware`: the first event within 5 s. Why 5 s: with production settings and an unchanged
+   job the next write after the catch-up is the first keepalive at 7.5 s, so a layer that buffers
+   until the next write or the end exceeds the bound; the honest path costs tens of milliseconds.
+   Production has no compression middleware; Starlette's excludes `text/event-stream` (a compressor
+   without that exclusion is the mutation the test catches).

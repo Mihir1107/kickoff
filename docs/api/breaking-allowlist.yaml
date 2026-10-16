@@ -1,7 +1,52 @@
 # Intended breaking API changes (scripts/api_compat.py, M17 plan §5). Each entry needs all four:
 #   - rule: the finding id (oasdiff's or edisc-...)
-#     operation: the operationId, or "METHOD /path" (schema findings: the schema location)
+#     operation: the operationId, or "METHOD /path" (schema findings: the schema location);
+#       or operations: a list of them, for one change seen on several operations (each must match)
 #     reason: why the break is accepted
 #     frontend_commit: the feat/web-ui commit that absorbs it
 # An entry that matches no finding fails the check: remove it once its change has merged.
-[]
+- rule: response-property-list-of-types-widened
+  operations:
+    - assign_role
+    - client_retention_gaps
+    - complete_export
+    - create_connection
+    - create_job
+    - create_matter
+    - create_render_route
+    - custody_events
+    - list_all_jobs
+    - list_assignments
+    - list_client_connections
+    - list_clients
+    - list_exports
+    - list_groups
+    - list_jobs
+    - list_matter_connections
+    - list_matters
+    - list_members
+    - list_principals
+    - list_render_files
+    - list_render_natives
+    - list_renders
+    - list_reports
+    - list_units
+    - list_workspaces
+    - matter_retention_gaps
+    - my_permissions
+    - my_sessions
+    - preview
+    - reopen_matter
+    - rerun_job
+    - roles
+    - upload_part
+    - verify
+  reason: >-
+    Pre-client correction of the 422 documentation (2026-10-16). The document claimed FastAPI's
+    HTTPValidationError for every 422; the body is edisc_api.safe_errors' {error, detail} and, on
+    these list and cursor operations, a 422 can also be cursor_mismatch or unprocessable whose
+    detail is a text. UnprocessableOut now says so (detail: the issues or a text), and the API test
+    client validates every real error body against its documented schema. No client reads this
+    schema yet: on feat/web-ui (aeee68e) only the generated schema.gen.ts, made from an older
+    apps/web/openapi.json, names the 422 type; no frontend code uses it.
+  frontend_commit: aeee68e

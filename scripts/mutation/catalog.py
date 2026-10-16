@@ -86,6 +86,11 @@ Rounds (ADR 0015):
   permission), passive authentication, Last-Event-ID without misses or repeats, the bounded buffer
   and its slow_consumer end, the sealed and lifetime ends, the per-principal cap, the module's
   import and SQL boundaries, no evidence content, the SSE compat rule on the real document.
+- ``m17-stream-fixes``: the step-5 fixes (2026-10-16): the bounded replay (count cap exactly at
+  and one over, maximum age of the oldest replayed unit, a position past the head) with ONE
+  ``reset`` event, published; the session watch's two halves (cache and cadence); the stream's
+  proxy headers and the real-uvicorn first-event test (a buffering compressor); the published 422
+  bodies checked at test time and against the committed document; allow-list operation lists.
 - ``m17-host-cookie``: the session cookie is host-only (``__Host-``, no ``Domain``) and a same-site
   request from a neighbouring subdomain is refused, both in real browsers (ADR 0016 §2).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
@@ -142,6 +147,8 @@ UEC = "tests/unit/api/test_error_codes.py"
 STR = "apps/api/src/edisc_api/stream.py"
 TJS = "tests/integration/api/test_job_stream.py"
 USM = "tests/unit/api/test_stream_module.py"
+TSU = "tests/integration/api/test_stream_uvicorn.py"
+TEB = "tests/integration/api/test_error_bodies.py"
 TIG = "tests/integration/api/test_idp_groups.py"
 DC = "packages/connectors/dummy/src/edisc_connector_dummy/connector.py"
 ULG = "tests/unit/core/test_loopguard.py"
@@ -1477,7 +1484,7 @@ CATALOG: list[Mutation] = [
       "        return not self.breaking and not self.unused", "        return not self.breaking",
       UAC, "matching_nothing or another_operation"),
     m("allowlist_any_operation", "m17-openapi", ACS,
-      'if e["rule"] == f.id and f.matches(e["operation"])\n', 'if e["rule"] == f.id\n', UAC,
+      "            for op in _operations(e) if f.matches(op)\n", "            for op in _operations(e)\n", UAC,
       "another_operation"),
     m("oasdiff_checksum_unchecked", "m17-openapi", ACS,
       "    if digest != OASDIFF_SHA256[plat]:\n", "    if False:\n", UAC, "another_checksum"),
@@ -1508,8 +1515,8 @@ CATALOG: list[Mutation] = [
     m("stream_session_unchecked", "m17-stream", STR, "                reason = await shielded(watch.check(caller))\n",
       "                reason = None\n", TJS, "revoked_session or deactivated or never_extends"),
     m("stream_permission_unchecked", "m17-stream", STR,
-      "                if reason is None and not await shielded(authorized()):\n",
-      "                if False:\n", TJS, "lost_permission"),
+      "                    if not await shielded(authorized()):\n",
+      "                    if False:\n", TJS, "lost_permission"),
     m("stream_queue_unbounded", "m17-stream", STR, "        sub = Subscriber(asyncio.Queue(maxsize=size))\n",
       "        sub = Subscriber(asyncio.Queue())\n", TJS, "slow_client"),
     m("stream_overflow_not_ended", "m17-stream", STR,
@@ -1530,8 +1537,8 @@ CATALOG: list[Mutation] = [
       "        return cached if cached is not None else await asyncio.to_thread(self._signing_key, key_id)",
       "        return cached if cached is not None else self._signing_key(key_id)", ICA, "published"),
     m("stream_join_leaks_subscriber", "m17-stream", STR,
-      "            feed.join(queue_size, last_seq), lambda done: _leave(feeds, feed, done[0])\n",
-      "            feed.join(queue_size, last_seq), None\n", TJS, "client_gone"),
+      "            feed.join(queue_size, last_seq, replay), lambda done: _leave(feeds, feed, done[0])\n",
+      "            feed.join(queue_size, last_seq, replay), None\n", TJS, "client_gone"),
     m("stream_lifetime_unbounded", "m17-stream", STR,
       "                if reason is None and time.monotonic() - started >= max_seconds:\n",
       "                if False:\n", TJS, "maximum_lifetime"),
@@ -1539,8 +1546,8 @@ CATALOG: list[Mutation] = [
       "    if counts.get(who.principal_id, 0) >= settings.api_stream_per_principal:\n",
       "    if False:\n", TJS, "capped"),
     Mutation("stream_leaks_a_custody_payload", "m17-stream", STR, (
-        ("    \"SELECT e.seq, e.payload->>'unit_key' AS unit_key FROM custody_events e\"",
-         "    \"SELECT e.seq, e.payload->>'unit_key' AS unit_key, e.payload::text AS raw FROM custody_events e\""),
+        ("    \"SELECT e.seq, e.payload->>'unit_key' AS unit_key,\"",
+         "    \"SELECT e.seq, e.payload->>'unit_key' AS unit_key, e.payload::text AS raw,\""),
         ("                unit_key=u.unit_key,\n", "                unit_key=u.unit_key + r.raw,\n"),
     ), TJS, "no_evidence_content"),
     m("stream_imports_evidence", "m17-stream", STR, "from edisc_api.auth import Caller\n",
@@ -1549,6 +1556,63 @@ CATALOG: list[Mutation] = [
     m("compat_sse_rule_on_the_stream", "m17-stream", ACS,
       "            elif schemas[0].get(name) != schemas[1].get(name):",
       "            elif False:", USM, "published_event_schema"),
+    # ------------------------------------------------------------------ step 5 fixes (2026-10-16)
+    m("replay_cap_off_by_one", "m17-stream-fixes", STR,
+      "        elif len(settled) > replay.max_events:\n", "        elif len(settled) >= replay.max_events:\n",
+      TJS, "exactly_at_the_cap"),
+    m("replay_unbounded", "m17-stream-fixes", STR,
+      "        elif len(settled) > replay.max_events:\n", "        elif False:\n", TJS,
+      "one_over_the_cap or fresh_start_over"),
+    m("replay_age_unchecked", "m17-stream-fixes", STR,
+      "        elif settled and settled[0].stale:\n", "        elif False:\n", TJS, "maximum_age"),
+    m("replay_age_of_the_newest", "m17-stream-fixes", STR,
+      "        elif settled and settled[0].stale:\n", "        elif settled and settled[-1].stale:\n",
+      TJS, "maximum_age"),
+    m("replay_past_the_head_silent", "m17-stream-fixes", STR, "        if after > head:\n",
+      "        if False:\n", TJS, "past_the_head"),
+    m("replay_reset_keeps_old_position", "m17-stream-fixes", STR,
+      "                    last_seq, last_snapshot = event.seq, None\n",
+      "                    last_seq, last_snapshot = last_seq, last_snapshot\n", TJS, "past_the_head"),
+    m("reset_event_unpublished", "m17-stream-fixes", "apps/api/src/edisc_api/stream_events.py",
+      "    for model in (JobEvent, UnitsEvent, ResetEvent, EndEvent):",
+      "    for model in (JobEvent, UnitsEvent, EndEvent):", TJS, "published_ones"),
+    m("watch_cache_whole_bound", "m17-stream-fixes", STR,
+      "        if hit is not None and now - hit[0] < self.interval:\n",
+      "        if hit is not None and now - hit[0] < self.seconds:\n", TJS, "half_the_bound"),
+    m("stream_checks_once_per_bound", "m17-stream-fixes", STR,
+      "            wait = max(0.0, watch.interval - (time.monotonic() - checked))",
+      "            wait = max(0.0, recheck_seconds - (time.monotonic() - checked))", TJS,
+      "half_the_bound"),
+    m("sse_header_no_cache_dropped", "m17-stream-fixes", JOBS,
+      'SSE_HEADERS = {"cache-control": "no-cache, no-store, no-transform", "x-accel-buffering": "no"}',
+      'SSE_HEADERS = {"cache-control": "no-store, no-transform", "x-accel-buffering": "no"}', TSU,
+      "production"),
+    m("sse_header_accel_dropped", "m17-stream-fixes", JOBS,
+      'SSE_HEADERS = {"cache-control": "no-cache, no-store, no-transform", "x-accel-buffering": "no"}',
+      'SSE_HEADERS = {"cache-control": "no-cache, no-store, no-transform"}', TSU, "production"),
+    m("stream_compressed_and_buffered", "m17-stream-fixes", APPM,
+      "    install_safe_errors(app, register(app))  # last: its middleware wraps every other one\n",
+      "    app.add_middleware(__import__('starlette.middleware.gzip', fromlist=['GZipMiddleware'])"
+      ".GZipMiddleware, minimum_size=0, exclude_content_types=())\n"
+      "    install_safe_errors(app, register(app))  # last: its middleware wraps every other one\n",
+      TSU, "production"),
+    m("error_check_skips_bodies", "m17-stream-fixes", ECK,
+      '            self.validate(documented["schema"], data, where)\n', "", UEC,
+      "documented_schema"),
+    m("error_check_validation_shape_loose", "m17-stream-fixes", ECK,
+      '            if code == "validation_error":\n', "            if False:\n", UEC,
+      "documented_schema"),
+    m("issue_schema_allows_framework_fields", "m17-stream-fixes", ECD,
+      '        "additionalProperties": False,\n    }  # fmt: skip\n    schemas[VALIDATION_SCHEMA]',
+      '        "additionalProperties": True,\n    }  # fmt: skip\n    schemas[VALIDATION_SCHEMA]', UEC,
+      "documented_schema or published"),
+    m("validation_body_echoes_input", "m17-stream-fixes", "apps/api/src/edisc_api/safe_errors.py",
+      '                "msg": _message(e),\n', '                "msg": _message(e),\n                "input": "x",\n',
+      TEB, "published_document"),
+    m("allowlist_operations_any_match", "m17-stream-fixes", ACS,
+      "        e for i, e in enumerate(allowlist) if any((i, op) not in used for op in _operations(e))",
+      "        e for i, e in enumerate(allowlist) if all((i, op) not in used for op in _operations(e))",
+      UAC, "list_operations"),
     # ------------------------------------------------------------------ host-only session cookie
     Mutation("session_cookie_domain_wide", "m17-host-cookie", SESP, (
         ('SESSION_COOKIE = "__Host-edisc_session"', 'SESSION_COOKIE = "edisc_session"'),

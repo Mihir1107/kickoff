@@ -51,7 +51,7 @@ from edisc_api.pagination import (
     page_of,
 )
 from edisc_api.routes.hierarchy import ensure_matter_open
-from edisc_api.stream import stream_body
+from edisc_api.stream import Replay, stream_body
 from edisc_api.stream_events import SCHEMAS
 from edisc_connector_dummy.guard import source_permitted
 from edisc_connector_slack_export.archive_access import open_archive_entry
@@ -597,7 +597,11 @@ async def passive_caller(request: Request) -> Caller:
     return await caller(request)
 
 
-SSE_HEADERS = {"cache-control": "no-store, no-transform", "x-accel-buffering": "no"}
+# no-cache (proxies and the browser revalidate, never serve a stored copy), no-store (every cookie
+# response, ADR 0016), no-transform (no recompression); X-Accel-Buffering: nginx-style proxies
+# pass each event on as it is written. tests/integration/api/test_stream_uvicorn.py proves the
+# first event arrives through the real server.
+SSE_HEADERS = {"cache-control": "no-cache, no-store, no-transform", "x-accel-buffering": "no"}
 
 
 @router.get(
@@ -607,7 +611,7 @@ SSE_HEADERS = {"cache-control": "no-store, no-transform", "x-accel-buffering": "
         **perm(P.JOB_READ, E.FORBIDDEN, E.NOT_FOUND, E.TOO_MANY_STREAMS),
         "x-sse-events": sorted(SCHEMAS),  # every schema an event carries
     },
-    responses={200: {"description": "events: job, units, end (edisc_api.stream_events)",
+    responses={200: {"description": "events: job, units, reset, end (edisc_api.stream_events)",
                      "content": {"text/event-stream": {"schema": {"type": "string"}}}}},
 )  # fmt: skip
 async def stream_job(
@@ -646,6 +650,7 @@ async def stream_job(
             queue_size=settings.api_stream_queue_events,
             recheck_seconds=settings.api_stream_recheck_seconds,
             max_seconds=settings.api_stream_max_seconds, on_close=closed,
+            replay=Replay(settings.sse_replay_max, settings.sse_replay_max_age_seconds),
         ):  # fmt: skip
             yield chunk
 

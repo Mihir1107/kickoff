@@ -168,6 +168,19 @@ def test_an_entry_for_another_operation_or_rule_allows_nothing(tmp_path: Path) -
     assert not verdict.ok and verdict.unused == [other]
 
 
+def test_an_entry_may_list_operations_and_each_must_match(tmp_path: Path) -> None:
+    listed = {k: v for k, v in ENTRY.items() if k != "operation"}
+    both = {**listed, "operations": ["get_thing", "GET /v1/things/{thing_id}"]}
+    changed = _changed(BREAKING["x_permission_changed"][0])
+    assert compare(BASE, changed, _allow(tmp_path, [both])).ok
+    stale = {**listed, "operations": ["get_thing", "create_thing"]}  # create_thing: no finding
+    verdict = compare(BASE, changed, _allow(tmp_path, [stale]))
+    assert not verdict.ok and verdict.unused == [stale]
+    for bad in ([], ["get_thing", "get_thing"], [""], "get_thing"):
+        with pytest.raises(CompatError, match="operation"):
+            _allow(tmp_path, [{**listed, "operations": bad}])
+
+
 def test_an_entry_matching_nothing_fails(tmp_path: Path) -> None:
     verdict = judge([], _allow(tmp_path, [ENTRY]))
     assert not verdict.ok and verdict.unused == [ENTRY]

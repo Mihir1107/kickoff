@@ -71,11 +71,14 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   every API change (a unit test and CI's `api-compat` job fail on drift); operationId = function name.
   `scripts/api_compat.py` (pinned oasdiff + our rules) fails CI on a breaking change; an intended one
   needs `/v2` or a `docs/api/breaking-allowlist.yaml` entry (rule, operation, reason, frontend commit).
-  A new response enum value is not breaking (D9).
+  A new response enum value is not breaking (D9). Error bodies are published as sent (422:
+  `ValidationErrorOut` / `UnprocessableOut`) and validated against the document at test time.
 - Job streams (M17 step 5, `edisc_api.stream`): only the models of `edisc_api.stream_events`, only
   the statements in `stream.STATEMENTS`, nothing that reads evidence; ids follow the job's chain
   (no missed or repeated units across `Last-Event-ID`); passive authentication (never extends a
-  session), re-checked <= 15 s; bounded per-subscriber queues (overflow ends with `slow_consumer`).
+  session), re-checked <= 15 s as two halves (`SessionWatch.interval`: ask every bound/2, answers at
+  most bound/2 old); bounded per-subscriber queues (overflow ends with `slow_consumer`); the replay
+  is bounded (`EDISC_SSE_REPLAY_MAX`, `..._MAX_AGE_SECONDS`; beyond: ONE `reset` event).
   A change to an event schema breaks `api_compat` (`x-sse-events`).
 - Lists (M17 step 3): a cursor is bound to its route, path and filters (`pagination.bind_cursors`,
   app-wide; mismatch 422 `cursor_mismatch`). A list shows exactly what the matching GET would

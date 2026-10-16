@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,11 +36,13 @@ class SseStream:
     events: asyncio.Queue[Event] = field(default_factory=asyncio.Queue)
     all_events: list[Event] = field(default_factory=list)
     chunks: int = 0
+    keepalives: list[float] = field(default_factory=list)  # monotonic time of each keepalive
     _buffer: str = ""
     _started: asyncio.Event = field(default_factory=asyncio.Event)
     _disconnect: asyncio.Event = field(default_factory=asyncio.Event)
     _flowing: asyncio.Event = field(default_factory=asyncio.Event)
     _done: asyncio.Event = field(default_factory=asyncio.Event)
+    _keepalive: asyncio.Event = field(default_factory=asyncio.Event)
     _task: asyncio.Task[None] | None = None
     _sent_request: bool = False
 
@@ -88,6 +91,9 @@ class SseStream:
         self._buffer += body.decode()
         while "\n\n" in self._buffer:
             block, self._buffer = self._buffer.split("\n\n", 1)
+            if block == ": keepalive":
+                self.keepalives.append(time.monotonic())
+                self._keepalive.set()
             event = _parse(block)
             if event is not None:
                 self.all_events.append(event)
@@ -112,6 +118,11 @@ class SseStream:
             got.append(event)
             if event.name == name:
                 return got
+
+    async def keepalive(self, within: float = 10) -> float:
+        """When the first keepalive (written after each session re-check) arrived."""
+        await asyncio.wait_for(self._keepalive.wait(), within)
+        return self.keepalives[0]
 
     async def ended(self, within: float = 10) -> bool:
         try:
