@@ -217,6 +217,47 @@ async def store_tokens(
         )
 
 
+async def install_tokens(
+    sessions: async_sessionmaker[AsyncSession],
+    box: SecretBox,
+    *,
+    tenant_id: uuid.UUID,
+    connection_id: uuid.UUID,
+    tokens: TokenSet,
+    expected_version: int,
+    with_tokens: Callable[[AsyncSession], Awaitable[None]],
+) -> int:
+    """An install's tokens (M17 step 6, plan §2.5): JOURNALED encrypted in their own transaction
+    first (the provider issued them; a crash from here on must never lose them:
+    ``reconcile_token_refreshes`` applies a journaled set at worker start), then applied in ONE
+    transaction with ``with_tokens`` (the connection's status and identity, the install's outcome,
+    the audit). Returns the new token_version."""
+    async with tenant_tx(sessions, tenant_id) as session:
+        sealed = await _seal_set(
+            session, box, tenant_id=tenant_id, connection_id=connection_id, tokens=tokens
+        )
+    journal_id = new_id()
+    async with tenant_tx(sessions, tenant_id) as journal:
+        await journal.execute(
+            text(
+                "INSERT INTO token_refresh_journal (id, tenant_id, connection_id, based_on_version,"
+                " encrypted_access_token, encrypted_refresh_token, token_expires_at, token_key_id,"
+                " token_key_version) VALUES (:id, :t, :c, :v, :a, :r, :e, :k, :kv)"
+            ),
+            {"id": journal_id, "t": tenant_id, "c": connection_id, "v": expected_version,
+             "a": sealed.access, "r": sealed.refresh, "e": sealed.expires_at, "k": sealed.key_id,
+             "kv": sealed.key_version},
+        )  # fmt: skip
+    await _before_apply_hook()
+    async with tenant_tx(sessions, tenant_id) as session:
+        version = await _apply(
+            session, connection_id=connection_id, sealed=sealed, expected_version=expected_version
+        )
+        await _resolve_journal(session, journal_id, "applied")
+        await with_tokens(session)
+    return version
+
+
 async def load_tokens(
     sessions: async_sessionmaker[AsyncSession],
     box: SecretBox,

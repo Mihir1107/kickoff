@@ -5,4 +5,23 @@
 #     reason: why the break is accepted
 #     frontend_commit: the feat/web-ui commit that absorbs it
 # An entry that matches no finding fails the check: remove it once its change has merged.
-[]
+- rule: api-removed-without-deprecation
+  operation: create_connection
+  reason: >-
+    ADR 0016 A7 / decision D10 (M17 step 6): the generic credential routes exist only where the
+    dummy connector does (local/test/ci); real sources connect through the install routes
+    (start_slack_install, start_teams_consent). They stay in local/test/ci builds. NOT absorbed
+    yet: the frontend at aeee68e still calls them from its live client (src/api/http.ts lines
+    114-115, createConnection and reauthConnection); it must move to the install routes before a
+    production build (recorded in docs/HANDOFF.md, frontend requirements).
+  frontend_commit: aeee68e
+- rule: api-path-removed-without-deprecation
+  operation: reauthorize
+  reason: >-
+    ADR 0016 A7 / decision D10 (M17 step 6): the generic credential routes exist only where the
+    dummy connector does (local/test/ci); real sources connect through the install routes
+    (start_slack_install, start_teams_consent). They stay in local/test/ci builds. NOT absorbed
+    yet: the frontend at aeee68e still calls them from its live client (src/api/http.ts lines
+    114-115, createConnection and reauthConnection); it must move to the install routes before a
+    production build (recorded in docs/HANDOFF.md, frontend requirements).
+  frontend_commit: aeee68e

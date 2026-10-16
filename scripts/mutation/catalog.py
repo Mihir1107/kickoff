@@ -97,6 +97,10 @@ Rounds (ADR 0015):
 - ``m17-pre6``: the fixes before M17 step 6: every write of a download or stream timed (a stalled
   client is cut and audited), nothing pooled held while bytes flow (S3 by ranges, no buffering
   middleware), the read permission re-checked on downloads, CI never cancels a main commit.
+- ``m17-installs``: the install flows (M17 step 6): the relay's destination and checks, the signed
+  single-use state (tenant, principal, nonce, expiry), the install cookie and session row, external
+  ids only from the providers' authenticated answers, the cross-tenant registry, re-authorization
+  to the same workspace, tokens journaled first, D10, the reserved relay subdomain.
 - ``m17-host-cookie``: the session cookie is host-only (``__Host-``, no ``Domain``) and a same-site
   request from a neighbouring subdomain is refused, both in real browsers (ADR 0016 §2).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
@@ -159,6 +163,9 @@ DLS = "apps/api/src/edisc_api/downloads.py"
 CRA = "tests/integration/api/test_content_reads_anchored.py"
 UDR = "tests/unit/api/test_download_routes.py"
 TSC = "tests/integration/api/test_stalled_clients.py"
+INR = "apps/api/src/edisc_api/routes/installs.py"
+INS = "apps/api/src/edisc_api/installs.py"
+TIN = "tests/integration/api/test_installs.py"
 TIG = "tests/integration/api/test_idp_groups.py"
 DC = "packages/connectors/dummy/src/edisc_connector_dummy/connector.py"
 ULG = "tests/unit/core/test_loopguard.py"
@@ -1229,16 +1236,16 @@ CATALOG: list[Mutation] = [
     m("sess_prior_not_rotated", "m17-sessions", AUR, "        if prior is not None:\n            rotated = (",
       "        if False:\n            rotated = (", SES, "revokes_the_session_the_browser_held"),
     m("sess_idle_expiry_unchecked", "m17-sessions", AUTH,
-      '" AND s.idle_expires_at > now() AND s.absolute_expires_at > now()"',
-      '" AND s.absolute_expires_at > now()"', SES, "expired_session_is_refused and idle"),
+      '" AND s.idle_expires_at > now() AND s.absolute_expires_at > now() AND"',
+      '" AND s.absolute_expires_at > now() AND"', SES, "expired_session_is_refused and idle"),
     # the query's absolute-expiry term is redundant by construction (idle <= absolute: the CHECK, and
     # the activity write's LEAST): breaking it alone is unobservable, so the CHECK is what is broken
     m("sess_idle_past_absolute_allowed", "m17-sessions", M36,
       "    CONSTRAINT ck_sessions_expiry CHECK (idle_expires_at <= absolute_expires_at\n        AND absolute_expires_at > created_at),",
       "    CONSTRAINT ck_sessions_expiry CHECK (absolute_expires_at > created_at),", DSG,
       "without_a_reason"),
-    m("sess_revocation_unchecked", "m17-sessions", AUTH, '" WHERE s.id_hash = :h AND s.revoked_at IS NULL"',
-      '" WHERE s.id_hash = :h"', SES, "logout_revokes"),
+    m("sess_revocation_unchecked", "m17-sessions", AUTH, '" WHERE s.revoked_at IS NULL"',
+      '" WHERE true"', SES, "logout_revokes"),
     m("sess_inactive_principal_accepted", "m17-sessions", AUTH, "            if row is None or not row.active:",
       "            if row is None:", SES, "inactive_principal_is_refused_even"),
     m("sess_activity_write_unthrottled", "m17-sessions", AUTH,
@@ -1601,10 +1608,10 @@ CATALOG: list[Mutation] = [
       'SSE_HEADERS = {"cache-control": "no-cache, no-store, no-transform", "x-accel-buffering": "no"}',
       'SSE_HEADERS = {"cache-control": "no-cache, no-store, no-transform"}', TSU, "production"),
     m("stream_compressed_and_buffered", "m17-stream-fixes", APPM,
-      "    install_safe_errors(app, register(app))  # last: its middleware wraps every other one\n",
+      "    install_safe_errors(app, register(app, settings))  # last: its middleware wraps every other one\n",
       "    app.add_middleware(__import__('starlette.middleware.gzip', fromlist=['GZipMiddleware'])"
       ".GZipMiddleware, minimum_size=0, exclude_content_types=())\n"
-      "    install_safe_errors(app, register(app))  # last: its middleware wraps every other one\n",
+      "    install_safe_errors(app, register(app, settings))  # last: its middleware wraps every other one\n",
       TSU, "production"),
     m("error_check_skips_bodies", "m17-stream-fixes", ECK,
       '            self.validate(documented["schema"], data, where)\n', "", UEC,
@@ -1692,6 +1699,72 @@ CATALOG: list[Mutation] = [
     m("ci_main_shares_a_group", "m17-pre6", ".github/workflows/ci.yml",
       "  group: ci-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}', github.sha) || '' }}\n",
       "  group: ci-${{ github.ref }}\n", "tests/unit/test_ci_workflow.py", ""),
+    m("stream_poll_read_committed", "m17-pre6", STR,
+      "            async with tenant_tx(self.sessions, self.tenant_id, repeatable_read=True) as s:\n"
+      "                row = (await s.execute(text(HEAD), {\"j\": self.job_id})).one()",
+      "            async with tenant_tx(self.sessions, self.tenant_id) as s:\n"
+      "                row = (await s.execute(text(HEAD), {\"j\": self.job_id})).one()",
+      TJS, "whatever_commits"),
+    m("tenant_tx_repeatable_read_ignored", "m17-pre6", "packages/db/src/edisc_db/session.py",
+      "        if repeatable_read:  # must be the transaction's first statement\n",
+      "        if False:  # must be the transaction's first statement\n", TJS, "whatever_commits"),
+    # ------------------------------------------------------------------ install flows (M17 step 6)
+    m("relay_destination_from_query", "m17-installs", INR,
+      '    target = (f"{res.settings.api_public_scheme}://{row.subdomain}.{res.settings.api_base_domain}"',
+      '    target = (f"{res.settings.api_public_scheme}://{request.query_params.get(\'tenant\', row.subdomain)}.{res.settings.api_base_domain}"',
+      TIN, "named_in_the_query"),
+    m("relay_mac_unchecked", "m17-installs", INR,
+      "        or not installs.mac_matches(res.keys, state, tenant_id=row.tenant_id,\n"
+      "                                    principal_id=row.principal_id, nonce=row.nonce)\n",
+      "        or False\n", TIN, "forged_mac or another_tenant"),
+    m("state_expiry_unchecked", "m17-installs", INS,
+      "    if int(expiry) <= (time.time() if now is None else now):\n", "    if False:\n", TIN,
+      "expired_state"),
+    m("state_mac_without_tenant", "m17-installs", INS,
+      '    return f"edisc-install/v1|{install_id}|{expiry}|{tenant_id}|{principal_id}|{nonce}"',
+      '    return f"edisc-install/v1|{install_id}|{expiry}|{principal_id}|{nonce}"', TIN,
+      "another_tenant"),
+    m("state_reusable", "m17-installs", INR,
+      '"UPDATE oauth_installs SET consumed_at = now() WHERE id = :i AND consumed_at IS NULL"',
+      '"UPDATE oauth_installs SET consumed_at = coalesce(consumed_at, now()) WHERE id = :i"', TIN,
+      "replayed_state"),
+    m("install_cookie_unchecked", "m17-installs", INR,
+      '    if not well_formed(handle) or token_hash(handle or "") != bytes(row.handle_hash):\n',
+      "    if False:\n", TIN, "needs_its_cookie"),
+    m("install_session_unchecked", "m17-installs", INR,
+      "        if actor is None or actor.principal_id != row.principal_id:\n",
+      "        if False:\n", TIN, "needs_its_cookie"),
+    m("install_permission_unchecked", "m17-installs", INR,
+      '            await authorize(s, actor, P.CONNECTION_MANAGE, Scope("client", row.client_id))\n',
+      "            pass\n", TIN, "lost_permission"),
+    m("microsoft_admin_unchecked", "m17-installs", INS,
+      "    if not isinstance(roles, list) or not ADMIN_ROLES & {r for r in roles if isinstance(r, str)}:\n",
+      "    if False:\n", TIN, "microsoft_cross_customer"),
+    m("microsoft_tid_from_query", "m17-installs", INR, "    return await install.complete(grant)\n",
+      "    if request.query_params.get('tenant'):\n"
+      "        import dataclasses as _dc\n"
+      "        grant = _dc.replace(grant, external_id=request.query_params['tenant'])\n"
+      "    return await install.complete(grant)\n", TIN, "microsoft_cross_customer"),
+    m("slack_team_from_query", "m17-installs", INR, "    return await install.complete(grant)\n",
+      "    if request.query_params.get('team'):\n"
+      "        import dataclasses as _dc\n"
+      "        grant = _dc.replace(grant, external_id=request.query_params['team'])\n"
+      "    return await install.complete(grant)\n", TIN, "slack_cross_customer"),
+    m("registry_not_consulted", "m17-installs", INR, "        holder = await self._bind(grant)\n",
+      "        holder = None\n", TIN, "cross_customer"),
+    m("reauth_workspace_unchecked", "m17-installs", INR,
+      "        if r.reauth and (conn.external_org_id, conn.enterprise_id) != (\n",
+      "        if False and (conn.external_org_id, conn.enterprise_id) != (\n", TIN,
+      "another_workspace"),
+    m("install_tokens_not_journaled", "m17-installs", "packages/db/src/edisc_db/connection_tokens.py",
+      "    async with tenant_tx(sessions, tenant_id) as journal:\n        await journal.execute(",
+      "    async with tenant_tx(sessions, tenant_id) as journal:\n      if False:\n        await journal.execute(",
+      TIN, "crash_after_the_journal"),
+    m("credential_routes_everywhere", "m17-installs", "apps/api/src/edisc_api/routes/__init__.py",
+      "    if dummy_permitted(settings.env):\n", "    if True:\n",
+      "tests/unit/api/test_credential_routes.py", ""),
+    m("relay_subdomain_onboardable", "m17-installs", "apps/api/src/edisc_api/admin.py",
+      "    if subdomain in reserved:\n", "    if False:\n", TIN, "never_a_tenant"),
     # ------------------------------------------------------------------ host-only session cookie
     Mutation("session_cookie_domain_wide", "m17-host-cookie", SESP, (
         ('SESSION_COOKIE = "__Host-edisc_session"', 'SESSION_COOKIE = "edisc_session"'),

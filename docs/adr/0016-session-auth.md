@@ -896,3 +896,91 @@ pointed at a test where it was equivalent: a package's zip chunks are smaller th
    without `cancel-in-progress`). `tests/unit/test_ci_workflow.py` evaluates both expressions.
 Round `m17-pre6`: 8 breaks, all caught (the S3 one for packages only after the test stalled the
 packages inside their object members, not at their first write).
+6. **CI run 38894640908 (shard 2) failed `test_stalled_clients...`: diagnosed as a TEST bug.** It
+   sampled the database pool's checked-out count at one instant while the 10 stalled job streams'
+   feed polled the database once a second (and their session checks ran): the count caught a poll
+   in flight. Every checkout during the stall window was traced to its task: only `JobFeed.run`,
+   `SessionWatch.check` and the stream's own re-check, all short transactions, none across a write.
+   The check now asserts what is claimed: every connection out when the stall is established is
+   back after three poll cycles (pool checkout/checkin events, per checkout); 3/3 under CPU
+   contention. The same diagnosis found the package half of the S3 check VACUOUS: the earlier
+   "caught" came from the racy database sample. A member read in one S3 read (<= 1 MiB) is read
+   whole, its connection returned, before it is written, so stalling a package anywhere but
+   INSIDE a member larger than one read proves nothing; the test now stalls packages there (the
+   offset from the package's own zip directory) and the S3 assertion itself catches the break.
+7. **CI run 38897021941 (shard 2) failed the replay test: a PRODUCT bug in step 5.** The feed's
+   poll read the chain head, then (READ COMMITTED: each statement sees later commits) the unit
+   counts after another unit had committed: a snapshot named "head 5" showing unit 6, so the
+   client got a `job` before unit 6's `units` (and a snapshot id that did not name its content).
+   The artifact's chain showed it: the job's settles came within 33 ms of its start, the next one
+   during a poll. The catch-up and the poll now read in ONE snapshot (`tenant_tx(...,
+   repeatable_read=True)`); a deterministic test commits a unit between the poll's head read and
+   its counts (`test_a_snapshot_is_the_state_at_its_head...`), broken twice in the catalog.
+
+## Implementation notes: M17 step 6, source install flows (2026-10-16)
+
+Built (plan §2.1-§2.5; A2, A3, A4, A7, A2.3): migration 0040 (`oauth_installs`, the cross-tenant
+`external_bindings` registry, `bind_external`, `oauth_install_route`), `edisc_api.installs`,
+`edisc_api.routes.installs`, `edisc_connector_slack.scopes`, `edisc_connector_teams.permissions`,
+`connection_tokens.install_tokens`, `edisc_api.admin move-binding`. Not built here: §2.6 (pause
+deadline, `check-connections`, finish-without-access: step 8). Choices:
+1. **State** exactly as A3: `v1.<kid>.<install id>.<expiry>.<mac>`, MAC under a key derived from
+   the API keyring (`Keyring.install_mac`, domain-separated from CSRF and sign-in), over the install
+   id, expiry, our tenant, the principal and the nonce. The PKCE verifier is DERIVED from the install
+   cookie's handle (as for sign-in, step-2 note), so `oauth_installs` holds no secret. 10 minutes,
+   consumed atomically at the tenant host (`UPDATE ... WHERE consumed_at IS NULL`) before anything
+   else; the guard trigger makes identity, consume and outcome final.
+2. **The relay** (`oauth.<base>`, reserved: onboarding refuses that subdomain) checks format, key
+   and expiry without a database read (tested: zero statements for an expired state), looks the
+   install up through `oauth_install_route` (unconsumed, unexpired), recomputes the MAC from the
+   ROW's tenant, principal and nonce, and answers 303 to the row's tenant host with the query
+   unchanged. It reads nothing else from the query. Every refusal: one byte-identical 400 page.
+   `Referrer-Policy: no-referrer` on both hops.
+3. **The tenant host** repeats every check: the MAC against THIS host's tenant (another tenant's
+   state finds no row under RLS), the consume, the Lax `__Host-edisc_install` cookie's handle, the
+   bound SESSION ROW (live, same principal; `auth.caller_of_session_row`) and `connection.manage`
+   on the client, then the provider's leg. Outcomes go back as the A1 bounce page to
+   `/clients/<c>/connections/<id>?install=ok` or `?install_error=` one of `denied`, `expired`,
+   `replayed`, `invalid`, `mismatch`, `already_bound`, `failed`, `refused`. Starting needs a
+   browser session (bearer: 400 `not_a_session`): the install is bound to the session row.
+4. **External ids only from authenticated answers.** Slack: team and enterprise from
+   `oauth.v2.access` (our secret, TLS, through `call_with_limits`, bucket `slack.oauth.v2.access`).
+   Microsoft: the `tid` of the ID token verified against Microsoft's keys, with the issuer
+   `https://login.microsoftonline.com/<tid>/v2.0` checked against that `tid` (multi-tenant), the
+   audience, nonce, and `wids` holding Global or Privileged Role Administrator; then a
+   client-credentials token for that `tid` (our `private_key_jwt` assertion), whose `roles` are the
+   granted permissions (missing ones: blind spots). That token's claims are read without verifying
+   its signature: it is Graph's token, received over TLS from Microsoft's token endpoint. No Graph
+   token is stored (client credentials on demand, ADR 0009).
+5. **One external id per tenant of ours:** `external_bindings` (owner-only; the app role has no
+   privilege on it) written only by `bind_external`, which binds to the CALLER's tenant
+   (`app.tenant_id`, never a parameter) and returns the holder. Team and enterprise bind in ONE
+   transaction (all or none). Held by another tenant: `already_bound`, audited in the requesting
+   tenant, an alert to its admins (`external_already_bound`) and an operations error line; the
+   other tenant is never named. A re-authorization returning another team/enterprise/tid:
+   `mismatch`, the old token kept. **Moves** (A2.3): `python -m edisc_api.admin move-binding`
+   (owner credentials, a reason; the source's connections on it must be revoked first; audited in
+   both tenants naming each other; alerts in both). A test proves no route of any environment
+   writes the registry and that `bind_external` is the only function `edisc_app` can execute on it.
+6. **Tokens:** registered with the redactor the moment the provider's body is parsed; journaled
+   encrypted in their own transaction (`token_refresh_journal`, as refreshes), then applied with
+   the connection's identity, status and the install's outcome in one transaction. A crash in
+   between is repaired by `reconcile_token_refreshes` at worker start (tested with the crash hook):
+   the token is applied; the connection stays `pending` until an install completes it.
+7. **D10 (A7):** `create_connection` and `reauthorize` are on `connections.credential_router`,
+   registered only where `dummy_permitted` (local/test/ci). Gone from the published contract: two
+   allow-list entries. **The frontend at `aeee68e` still calls both from its live client** (it must
+   move to the install routes before production); recorded in HANDOFF. Checked in a unit test and in
+   the production-install job (the production app's document, 404 on reauth, 405 on the list path).
+8. **To confirm against the real apps** (with the real-tenant work of step 3b): whether our Slack
+   app accepts PKCE (`EDISC_SLACK_PKCE`, off until confirmed: the client secret and the bound state
+   protect the code meanwhile); that Entra puts `wids` in the ID token of this flow (it may need
+   the optional claim configured on the app registration); the exact Graph app roles we request
+   (`edisc_connector_teams.permissions`).
+Tests: `tests/integration/api/test_installs.py` (19: both happy paths with tokens absent from logs,
+audit payloads and pages; open redirect; replayed, other-tenant, expired, forged and unknown
+states; cookie, session and permission re-checks; denial; the cross-customer attacks for Microsoft
+and Slack; re-authorization mismatch; the registry's privileges; no move route; the operator move;
+the reserved subdomain; the journal crash), `providers.py` (fake Slack and Microsoft on the
+production URLs), the RLS seed, `tests/unit/api/test_credential_routes.py`. Round `m17-installs`:
+16 breaks, all caught.

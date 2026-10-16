@@ -131,6 +131,16 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - Test IdP: `tests/integration/api/oidc.py` (mounted on the API fixture's HTTP client) and
   `sessions_flow.py` (sign-in helpers, a cookie jar that withholds Strict cookies cross-site).
 
+## Source installs (M17 step 6, ADR 0016 A2-A4, A7, step-6 notes)
+- Slack and Microsoft connect ONLY through `edisc_api.routes.installs` (start: a browser session
+  and `connection.manage`; the generic credential routes exist only in local/test/ci, D10). The
+  tenant comes only from the signed single-use state (`installs.sign_state`: MAC over install,
+  expiry, tenant, principal, nonce) and the row it names; the relay host (`oauth.<base>`) never
+  reads anything else from the query. External ids come ONLY from the providers' authenticated
+  answers (Slack's exchange, Microsoft's signed ID token `tid`), never the redirect, and bind
+  through `bind_external` (one tenant per external id; moves only by `edisc_api.admin
+  move-binding`). Install tokens: redactor first, journal first (`install_tokens`).
+
 ## Slack exports (M14, ADR 0014)
 - Upload: `POST /v1/clients/{c}/exports` → `PUT /v1/exports/{id}/parts/{n}` (Content-Digest sha-256) →
   `POST .../complete`. The `ExportIngestWorkflow` (queue `exports`, `edisc_worker.exports`) hashes the staged

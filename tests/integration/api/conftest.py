@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 import pytest
 from fastapi import FastAPI
+from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
@@ -43,6 +44,7 @@ from edisc_worker.workflows import CollectionJobWorkflow, CollectUnitWorkflow, E
 from . import error_check
 from .error_check import ErrorCodeCheck
 from .oidc import IDP_HOST, TEST_IDP
+from .providers import FAKE_MICROSOFT, FAKE_SLACK, MS_HOST, SLACK_HOST
 
 Sessions = async_sessionmaker[AsyncSession]
 AUDIENCE = "edisc-api"
@@ -81,6 +83,10 @@ def api_settings(settings: Settings, tmp_path_factory: pytest.TempPathFactory) -
             "activity_max_attempts": 4,
             "activity_heartbeat_timeout_seconds": 10,
             "local_kms_dir": Path(tmp_path_factory.mktemp("api-kms")),
+            # our provider apps for the install flows (tests/integration/api/providers.py)
+            "slack_client_id": "edisc-test-slack-app",
+            "slack_client_secret": SecretStr("test-slack-client-secret"),
+            "microsoft_client_id": "edisc-test-ms-app",
         }
     )
 
@@ -148,7 +154,18 @@ async def make_api(
     TEST_IDP.settings = api_settings
     TEST_IDP.reset()
     # the IdP's server-side endpoints (discovery, code exchange) answer through the test provider
-    http = httpx.AsyncClient(mounts={f"all://{IDP_HOST}": TEST_IDP.transport()})
+    FAKE_SLACK.client_id = api_settings.slack_client_id or ""
+    FAKE_SLACK.client_secret = (
+        api_settings.slack_client_secret.get_secret_value()
+        if api_settings.slack_client_secret
+        else ""
+    )
+    FAKE_MICROSOFT.client_id = api_settings.microsoft_client_id or ""
+    http = httpx.AsyncClient(mounts={
+        f"all://{IDP_HOST}": TEST_IDP.transport(),
+        f"all://{SLACK_HOST}": FAKE_SLACK.transport(),
+        f"all://{MS_HOST}": FAKE_MICROSOFT.transport(),
+    })  # fmt: skip
     redis = redis_client(api_settings)  # the production pool (bounded, blocking)
     resources = Resources(
         api_settings,

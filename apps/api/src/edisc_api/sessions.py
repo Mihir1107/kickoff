@@ -99,6 +99,22 @@ class Keyring:
             raise KeyError("login attempt key is no longer in the keyring")
         return _b64(hmac.new(self._sub(kid, "pkce"), handle.encode(), hashlib.sha256).digest())
 
+    def install_mac(self, kid: str, message: str) -> str:
+        """The MAC of an install's signed state (ADR 0016 A3), under its own derived key."""
+        if kid not in self.keys:
+            raise KeyError("install state key is no longer in the keyring")
+        return _b64(
+            hmac.new(self._sub(kid, "install-state"), message.encode(), hashlib.sha256).digest()
+        )
+
+    def install_verifier(self, kid: str, handle: str) -> str:
+        """An install's PKCE verifier, derived from its cookie handle (nothing secret is stored)."""
+        if kid not in self.keys:
+            raise KeyError("install key is no longer in the keyring")
+        return _b64(
+            hmac.new(self._sub(kid, "install-pkce"), handle.encode(), hashlib.sha256).digest()
+        )
+
 
 def pkce_challenge(verifier: str) -> str:
     return _b64(hashlib.sha256(verifier.encode()).digest())

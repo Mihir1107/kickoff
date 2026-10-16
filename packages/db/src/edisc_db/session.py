@@ -165,12 +165,20 @@ def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
 
 @asynccontextmanager
 async def tenant_tx(
-    sessions: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    *,
+    repeatable_read: bool = False,
 ) -> AsyncIterator[AsyncSession]:
-    """Transaction scoped to one tenant. Commits on success, rolls back on any exception."""
+    """Transaction scoped to one tenant. Commits on success, rolls back on any exception.
+    ``repeatable_read``: every statement sees ONE snapshot (Postgres's default, READ COMMITTED,
+    lets each statement see what committed after the previous one: a read of several related
+    statements is then not a state that ever existed)."""
     if not isinstance(tenant_id, uuid.UUID):
         raise TypeError("tenant_id must be a UUID")
     async with sessions() as session, session.begin():
+        if repeatable_read:  # must be the transaction's first statement
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
         await session.execute(
             text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
             {"tenant_id": str(tenant_id)},

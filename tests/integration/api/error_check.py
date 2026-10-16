@@ -22,7 +22,7 @@ from fastapi import FastAPI
 
 from edisc_api.error_codes import REGISTRY, VALIDATION_SCHEMA, complete
 
-BOUNCE = re.compile(r"auth_error=([a-z_]+)")
+BOUNCE = re.compile(r"(?:auth|install)_error=([a-z_]+)")
 METHODS = ("get", "put", "post", "delete", "patch", "head", "options")
 _SHARED: ErrorCodeCheck | None = None
 

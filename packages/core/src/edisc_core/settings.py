@@ -468,6 +468,28 @@ class Settings(BaseSettings):
     api_stream_per_principal: int = Field(
         default=10, ge=1, description="concurrent streams per principal per API process (then 429)"
     )
+    api_oauth_relay_subdomain: str = Field(
+        default="oauth",
+        pattern=r"^[a-z][a-z0-9-]{0,30}$",
+        description="the ONE host every provider redirects to ({this}.{api_base_domain}, ADR 0016"
+        " A3); never a tenant's subdomain (onboarding refuses it)",
+    )
+    slack_client_id: str | None = Field(
+        default=None, description="our distributed Slack app's client id (installs, M17 step 6)"
+    )
+    slack_client_secret: SecretStr | None = Field(
+        default=None, description="our Slack app's client secret (the oauth.v2.access exchange)"
+    )
+    slack_pkce: bool = Field(
+        default=False,
+        description="send PKCE S256 on Slack's authorize/exchange (ADR 0016 A3: to confirm against"
+        " our real Slack app; without it the client secret and the bound state protect the code)",
+    )
+    microsoft_client_id: str | None = Field(
+        default=None,
+        description="our multi-tenant Entra app's client id (Teams admin consent through OIDC;"
+        " client assertions by the platform keys, private_key_jwt)",
+    )
     api_public_scheme: Literal["https", "http"] = Field(
         default="https",
         description="scheme of the tenant origin (the Origin check); http only in local/test/ci",

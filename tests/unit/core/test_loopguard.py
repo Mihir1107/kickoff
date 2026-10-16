@@ -12,7 +12,9 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Coroutine
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -36,7 +38,25 @@ async def _blocking_coroutine(seconds: float) -> None:
     _spin(seconds)  # CPU-bound work on the loop: what the guard exists to catch
 
 
-async def test_a_blocked_loop_is_reported_with_the_coroutine_that_blocked_it() -> None:
+def _on_own_loop(body: Coroutine[Any, Any, None]) -> None:
+    """Tests that block a loop ON PURPOSE do it on a private loop, never on the session loop the
+    whole suite shares: the session's own guard (tests/conftest.py) watches that one, and under
+    CPU load its sample of a deliberate 300 ms block could land in select() just after it, with the
+    thread's CPU spent -- counted as a product block (a flaky failure of
+    test_a_test_coroutine_blocking_the_loop..., diagnosed 2026-10-16). The session loop is not
+    running during a sync test, so its guard sees it idle."""
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(body)
+    finally:
+        loop.close()
+
+
+def test_a_blocked_loop_is_reported_with_the_coroutine_that_blocked_it() -> None:
+    _on_own_loop(_test_a_blocked_loop_is_reported_with_the_coroutine_that_blocked_it())
+
+
+async def _test_a_blocked_loop_is_reported_with_the_coroutine_that_blocked_it() -> None:
     blocks: list[loopguard.Block] = []
     guard = _guard(blocks, as_product=True)
     guard.start()
@@ -55,7 +75,11 @@ async def test_a_blocked_loop_is_reported_with_the_coroutine_that_blocked_it() -
     assert ended[0].cpu_ms is not None and ended[0].cpu_ms >= 300 and ended[0].counts
 
 
-async def test_a_test_coroutine_blocking_the_loop_is_recorded_but_does_not_count() -> None:
+def test_a_test_coroutine_blocking_the_loop_is_recorded_but_does_not_count() -> None:
+    _on_own_loop(_test_a_test_coroutine_blocking_the_loop_is_recorded_but_does_not_count())
+
+
+async def _test_a_test_coroutine_blocking_the_loop_is_recorded_but_does_not_count() -> None:
     blocks: list[loopguard.Block] = []
     guard = _guard(blocks, as_product=False)
     guard.start()
@@ -159,7 +183,11 @@ def test_a_coroutine_driven_synchronously_is_the_work_of_its_sync_caller() -> No
     assert origin == "product" and "caller" in blamed and "reader" not in blamed
 
 
-async def test_garbage_collection_inside_a_stall_is_excused(
+def test_garbage_collection_inside_a_stall_is_excused(monkeypatch: pytest.MonkeyPatch) -> None:
+    _on_own_loop(_test_garbage_collection_inside_a_stall_is_excused(monkeypatch))
+
+
+async def _test_garbage_collection_inside_a_stall_is_excused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A collection holds the GIL, so the watchdog samples AFTER it, wherever the loop is then:
@@ -261,7 +289,11 @@ def test_a_new_connections_scram_handshake_is_library_time() -> None:
     assert loopguard.classify(frame(hmac.__file__, "new", None))[0] == "unattributed"  # type: ignore[arg-type]
 
 
-async def test_a_stall_without_cpu_on_the_loops_thread_is_recorded_but_does_not_count() -> None:
+def test_a_stall_without_cpu_on_the_loops_thread_is_recorded_but_does_not_count() -> None:
+    _on_own_loop(_test_a_stall_without_cpu_on_the_loops_thread_is_recorded_but_does_not_count())
+
+
+async def _test_a_stall_without_cpu_on_the_loops_thread_is_recorded_but_does_not_count() -> None:
     """The process was not running (here: the thread sleeps, as a descheduled one would): late, but
     no code of ours ran on the loop."""
     blocks: list[loopguard.Block] = []

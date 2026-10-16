@@ -409,7 +409,9 @@ version = "0.1.0"
 source = { editable = "apps/api" }
 dependencies = [
     { name = "edisc-connector-dummy" },
+    { name = "edisc-connector-slack" },
     { name = "edisc-connector-slack-export" },
+    { name = "edisc-connector-teams" },
     { name = "edisc-connectors-base" },
     { name = "edisc-core" },
     { name = "edisc-custody" },
@@ -426,7 +428,9 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "edisc-connector-dummy", editable = "packages/connectors/dummy" },
+    { name = "edisc-connector-slack", editable = "packages/connectors/slack" },
     { name = "edisc-connector-slack-export", editable = "packages/connectors/slack_export" },
+    { name = "edisc-connector-teams", editable = "packages/connectors/teams" },
     { name = "edisc-connectors-base", editable = "packages/connectors/base" },
     { name = "edisc-core", editable = "packages/core" },
     { name = "edisc-custody", editable = "packages/custody" },

@@ -669,3 +669,56 @@ async def test_a_client_gone_during_the_catch_up_leaves_no_subscriber_or_connect
         await asyncio.sleep(0.05)
     assert api.resources.streams.feeds == {}  # no subscriber left: the feed stopped
     assert pool.checkedout() == 0  # the transaction completed and returned its connection
+
+
+async def test_a_snapshot_is_the_state_at_its_head_whatever_commits_meanwhile(
+    api: Api, tenant: TenantCtx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Found by CI run 38897021941: the poll read the head, then a unit settled and committed,
+    then the counts (READ COMMITTED: each statement sees later commits) -- a snapshot named "head
+    A" showing unit B, sent before B's units event. The poll's reads are one snapshot now.
+    Deterministic: unit B is settled and committed right after the poll's change read took its
+    head, before the counts."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from edisc_api import stream as stream_module
+
+    api = tuned(api)
+    job = await new_job(api, tenant)
+    original, changes = AsyncSession.execute, stream_module.read_changes
+    state = {"armed": False, "inside": False}
+
+    async def read_changes(*args: Any, **kwargs: Any) -> Any:
+        state["inside"] = True
+        try:
+            return await changes(*args, **kwargs)
+        finally:
+            state["inside"] = False
+
+    async def execute(self: AsyncSession, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        result = await original(self, statement, *args, **kwargs)
+        if str(statement) == stream_module.HEAD and state["inside"] and state["armed"]:
+            state["armed"] = False  # once: the poll's change read has taken its head
+            await settle(api, tenant, job, job.units[1])  # another connection: committed
+        return result
+
+    monkeypatch.setattr(AsyncSession, "execute", execute)
+    monkeypatch.setattr(stream_module, "read_changes", read_changes)
+    async with stream(api, tenant, job) as sse:
+        await sse.next()  # the catch-up's snapshot
+        state["armed"] = True
+        await settle(api, tenant, job, job.units[0])
+        got = await sse.until("job")
+        while sum(len(e.data.get("units", [])) for e in sse.all_events) < 2:
+            await sse.next()
+    monkeypatch.undo()
+    seen = 0  # unit events received so far: every snapshot counts exactly those as done
+    for e in sse.all_events:
+        if e.name == "units":
+            seen += len(e.data["units"])
+        elif e.name == "job":
+            assert e.data["units_by_status"].get("done", 0) == seen, (e.id, e.data, seen)
+    assert [
+        u["unit_key"] for e in sse.all_events if e.name == "units" for u in e.data["units"]
+    ] == job.units[:2]
+    assert got[-1].name == "job"

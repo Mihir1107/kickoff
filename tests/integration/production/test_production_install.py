@@ -144,6 +144,45 @@ async def _api_comes_up(python: Path, tmp: Path) -> None:
     ]
 
 
+# ADR 0016 A7 (D10): in a production environment the generic credential routes do not exist.
+# Production refuses to START without real keys, so the check builds the app the production way
+# (create_app with production settings) inside the production install and asks it directly.
+NO_CREDENTIAL_ROUTES = """
+import asyncio, httpx
+from edisc_api.app import create_app
+from edisc_core.settings import Environment, Settings
+
+app = create_app(Settings.model_construct(env=Environment.PRODUCTION))
+doc = app.openapi()
+ops = {op.get("operationId") for item in doc["paths"].values() for op in item.values()
+       if isinstance(op, dict)}
+assert not {"create_connection", "reauthorize"} & ops, ops
+assert "/v1/connections/{connection_id}/reauth" not in doc["paths"]
+assert "post" not in doc["paths"]["/v1/clients/{client_id}/connections"]
+
+async def main():
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t.example") as c:
+        cid = "01a1446c-cc26-7275-97e4-a6b99454cdb4"
+        reauth = await c.post(f"/v1/connections/{cid}/reauth", json={})
+        create = await c.post(f"/v1/clients/{cid}/connections", json={})
+    # no such route; the list path keeps its GET, so POST there is "method not allowed"
+    assert (reauth.status_code, create.status_code) == (404, 405), (reauth.text, create.text)
+
+asyncio.run(main())
+print("no credential routes")
+"""
+
+
+async def _no_credential_routes(python: Path, tmp: Path) -> None:
+    proc = await asyncio.create_subprocess_exec(
+        str(python), "-c", NO_CREDENTIAL_ROUTES, cwd=tmp, env=_app_env(),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )  # fmt: skip
+    out, _ = await proc.communicate()
+    assert proc.returncode == 0 and b"no credential routes" in out, out.decode()[-4000:]
+
+
 async def _worker_comes_up(python: Path, tmp: Path, name: str, args: list[str]) -> None:
     proc = await asyncio.create_subprocess_exec(
         str(python), "-m", "edisc_worker", *args, cwd=tmp, env=_app_env(),
@@ -176,5 +215,6 @@ async def test_the_api_and_every_worker_type_start_from_a_production_install(
         _venv(tmp_path, "edisc-api"), _venv(tmp_path, "edisc-worker")
     )
     await _api_comes_up(api, tmp_path)
+    await _no_credential_routes(api, tmp_path)
     for name, args in WORKERS.items():
         await _worker_comes_up(worker, tmp_path, name, args)

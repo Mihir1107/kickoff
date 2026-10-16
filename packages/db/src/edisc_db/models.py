@@ -598,6 +598,60 @@ class LoginAttempt(Base):
     session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
 
 
+class OauthInstall(Base):
+    """``oauth_installs`` (migration 0040): one started source install; no secret is stored."""
+
+    __tablename__ = "oauth_installs"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),
+        ForeignKeyConstraint(["tenant_id", "client_id"], ["clients.tenant_id", "clients.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "connection_id"], ["connections.tenant_id", "connections.id"]
+        ),
+        ForeignKeyConstraint(["tenant_id", "session_id"], ["sessions.tenant_id", "sessions.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "principal_id"], ["principals.tenant_id", "principals.id"]
+        ),
+        Index("ix_oauth_installs_connection", "tenant_id", "connection_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    provider: Mapped[str] = mapped_column(Text)
+    client_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    connection_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    reauth: Mapped[bool] = mapped_column(Boolean)
+    session_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    principal_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    handle_hash: Mapped[bytes] = mapped_column(LargeBinary)
+    key_id: Mapped[str] = mapped_column(Text)
+    nonce: Mapped[str] = mapped_column(Text)
+    requested_scopes: Mapped[list[str]] = mapped_column(ARRAY(Text))
+    request_id: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    expires_at: Mapped[datetime] = mapped_column(TZ)
+    consumed_at: Mapped[datetime | None] = mapped_column(TZ)
+    outcome: Mapped[str | None] = mapped_column(Text)
+    outcome_detail: Mapped[str | None] = mapped_column(Text)
+    external_id: Mapped[str | None] = mapped_column(Text(collation="C"))
+
+
+class ExternalBinding(Base):
+    """``external_bindings`` (migration 0040): the cross-tenant registry of external ids; the app
+    role has no privilege on it (``bind_external`` only)."""
+
+    __tablename__ = "external_bindings"
+    __table_args__ = (ForeignKeyConstraint(["bound_tenant_id"], ["tenants.id"]),)
+
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    external_id: Mapped[str] = mapped_column(Text(collation="C"), primary_key=True)
+    bound_tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    connection_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    bound_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    bound_by: Mapped[str] = mapped_column(Text)
+
+
 class Principal(Base):
     __tablename__ = "principals"
     __table_args__ = (

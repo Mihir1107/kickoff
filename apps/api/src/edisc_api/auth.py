@@ -323,14 +323,7 @@ class Authenticator:
         async with tenant_tx(self.sessions, tenant_id) as s:
             row = (
                 await s.execute(
-                    text(
-                        "SELECT s.id, s.authenticated_at, s.idp_groups, p.id AS principal_id, p.kind,"
-                        " p.issuer, p.subject, p.active FROM sessions s"
-                        " JOIN principals p ON p.id = s.principal_id"
-                        " WHERE s.id_hash = :h AND s.revoked_at IS NULL"
-                        " AND s.idle_expires_at > now() AND s.absolute_expires_at > now()"
-                    ),
-                    {"h": token_hash(session_id)},
+                    text(LIVE_SESSION + " s.id_hash = :h"), {"h": token_hash(session_id)}
                 )
             ).one_or_none()
             if row is None or not row.active:
@@ -344,18 +337,43 @@ class Authenticator:
                     ),
                     {"i": row.id, "idle": self.settings.api_session_idle_seconds},
                 )
-            result = await s.execute(
-                text(
-                    "SELECT id FROM groups WHERE external_id = ANY(:ext)"
-                    " UNION SELECT group_id FROM group_members WHERE principal_id = :p AND removed_at IS NULL"
-                ),
-                {"ext": list(row.idp_groups), "p": row.principal_id},
-            )
-            group_ids: frozenset[uuid.UUID] = frozenset(result.scalars())
-        return Caller(
-            tenant_id, row.principal_id, row.kind, row.issuer, row.subject, group_ids,
-            row.authenticated_at, row.id,
-        )  # fmt: skip
+            return await _session_caller(s, tenant_id, row)
+
+
+LIVE_SESSION = (
+    "SELECT s.id, s.authenticated_at, s.idp_groups, p.id AS principal_id, p.kind,"
+    " p.issuer, p.subject, p.active FROM sessions s"
+    " JOIN principals p ON p.id = s.principal_id"
+    " WHERE s.revoked_at IS NULL"
+    " AND s.idle_expires_at > now() AND s.absolute_expires_at > now() AND"
+)
+
+
+async def _session_caller(s: AsyncSession, tenant_id: uuid.UUID, row: Any) -> Caller:
+    result = await s.execute(
+        text(
+            "SELECT id FROM groups WHERE external_id = ANY(:ext)"
+            " UNION SELECT group_id FROM group_members WHERE principal_id = :p AND removed_at IS NULL"
+        ),
+        {"ext": list(row.idp_groups), "p": row.principal_id},
+    )
+    group_ids: frozenset[uuid.UUID] = frozenset(result.scalars())
+    return Caller(
+        tenant_id, row.principal_id, row.kind, row.issuer, row.subject, group_ids,
+        row.authenticated_at, row.id,
+    )  # fmt: skip
+
+
+async def caller_of_session_row(
+    s: AsyncSession, tenant_id: uuid.UUID, session_row_id: uuid.UUID
+) -> Caller | None:
+    """The caller a session ROW stands for, if it is still live and its principal active (the
+    install callback: the provider's redirect carries no session cookie, ADR 0016 A2). Inside the
+    caller's tenant transaction; never touches the session's activity."""
+    row = (await s.execute(text(LIVE_SESSION + " s.id = :i"), {"i": session_row_id})).one_or_none()
+    if row is None or not row.active:
+        return None
+    return await _session_caller(s, tenant_id, row)
 
 
 def jwks_document(settings: Settings) -> dict[str, Any]:

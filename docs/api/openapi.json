@@ -222,38 +222,6 @@
         "title": "ClientOut",
         "type": "object"
       },
-      "ConnectionIn": {
-        "additionalProperties": false,
-        "properties": {
-          "config": {
-            "additionalProperties": true,
-            "title": "Config",
-            "type": "object"
-          },
-          "credentials": {
-            "$ref": "#/components/schemas/Credentials"
-          },
-          "external_org_id": {
-            "maxLength": 200,
-            "minLength": 1,
-            "title": "External Org Id",
-            "type": "string"
-          },
-          "source": {
-            "maxLength": 50,
-            "minLength": 1,
-            "title": "Source",
-            "type": "string"
-          }
-        },
-        "required": [
-          "source",
-          "external_org_id",
-          "credentials"
-        ],
-        "title": "ConnectionIn",
-        "type": "object"
-      },
       "ConnectionOut": {
         "additionalProperties": false,
         "properties": {
@@ -320,48 +288,6 @@
           "updated_at"
         ],
         "title": "ConnectionOut",
-        "type": "object"
-      },
-      "Credentials": {
-        "additionalProperties": false,
-        "properties": {
-          "access_token": {
-            "format": "password",
-            "minLength": 1,
-            "title": "Access Token",
-            "type": "string",
-            "writeOnly": true
-          },
-          "expires_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Expires At"
-          },
-          "refresh_token": {
-            "anyOf": [
-              {
-                "format": "password",
-                "type": "string",
-                "writeOnly": true
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Refresh Token"
-          }
-        },
-        "required": [
-          "access_token"
-        ],
-        "title": "Credentials",
         "type": "object"
       },
       "CsrfOut": {
@@ -928,6 +854,45 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "InstallIn": {
+        "additionalProperties": false,
+        "properties": {
+          "connection_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connection Id"
+          }
+        },
+        "title": "InstallIn",
+        "type": "object"
+      },
+      "InstallOut": {
+        "additionalProperties": false,
+        "properties": {
+          "authorize_url": {
+            "title": "Authorize Url",
+            "type": "string"
+          },
+          "connection_id": {
+            "format": "uuid",
+            "title": "Connection Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorize_url",
+          "connection_id"
+        ],
+        "title": "InstallOut",
         "type": "object"
       },
       "JobEvent": {
@@ -2241,19 +2206,6 @@
           "created_at"
         ],
         "title": "PrincipalOut",
-        "type": "object"
-      },
-      "ReauthIn": {
-        "additionalProperties": false,
-        "properties": {
-          "credentials": {
-            "$ref": "#/components/schemas/Credentials"
-          }
-        },
-        "required": [
-          "credentials"
-        ],
-        "title": "ReauthIn",
         "type": "object"
       },
       "ReconciliationOut": {
@@ -5159,9 +5111,12 @@
           "validation_error"
         ],
         "x-permission": "connection.read"
-      },
+      }
+    },
+    "/v1/clients/{client_id}/connections/slack/install": {
       "post": {
-        "operationId": "create_connection",
+        "description": "Start installing our Slack app for a client (or re-authorize ``connection_id``).",
+        "operationId": "start_slack_install",
         "parameters": [
           {
             "in": "path",
@@ -5178,18 +5133,25 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ConnectionIn"
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/InstallIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "201": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ConnectionOut"
+                  "$ref": "#/components/schemas/InstallOut"
                 }
               }
             },
@@ -5203,7 +5165,7 @@
                 }
               }
             },
-            "description": "error: ambiguous_credentials, malformed_body"
+            "description": "error: ambiguous_credentials, malformed_body, not_a_session"
           },
           "401": {
             "content": {
@@ -5235,15 +5197,25 @@
             },
             "description": "error: not_found"
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UnprocessableOut"
+                  "$ref": "#/components/schemas/ValidationErrorOut"
                 }
               }
             },
-            "description": "error: unprocessable, validation_error"
+            "description": "error: validation_error"
           },
           "429": {
             "content": {
@@ -5273,23 +5245,181 @@
                 }
               }
             },
-            "description": "error: db_pool_exhausted, service_busy"
+            "description": "error: db_pool_exhausted, install_unavailable, service_busy"
           }
         },
-        "summary": "Create Connection",
+        "summary": "Start Slack Install",
         "x-error-codes": [
           "ambiguous_credentials",
+          "conflict",
           "cross_site",
           "csrf",
           "db_pool_exhausted",
           "forbidden",
+          "install_unavailable",
           "internal_error",
           "malformed_body",
+          "not_a_session",
           "not_found",
           "service_busy",
           "too_many_requests",
           "unauthorized",
-          "unprocessable",
+          "validation_error"
+        ],
+        "x-permission": "connection.manage"
+      }
+    },
+    "/v1/clients/{client_id}/connections/teams/consent": {
+      "post": {
+        "description": "Start Microsoft admin consent (OIDC) for a client (or re-authorize ``connection_id``).",
+        "operationId": "start_teams_consent",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/InstallIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: ambiguous_credentials, malformed_body, not_a_session"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: cross_site, csrf, forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorOut"
+                }
+              }
+            },
+            "description": "error: validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: too_many_requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: db_pool_exhausted, install_unavailable, service_busy"
+          }
+        },
+        "summary": "Start Teams Consent",
+        "x-error-codes": [
+          "ambiguous_credentials",
+          "conflict",
+          "cross_site",
+          "csrf",
+          "db_pool_exhausted",
+          "forbidden",
+          "install_unavailable",
+          "internal_error",
+          "malformed_body",
+          "not_a_session",
+          "not_found",
+          "service_busy",
+          "too_many_requests",
+          "unauthorized",
           "validation_error"
         ],
         "x-permission": "connection.manage"
@@ -6436,141 +6566,6 @@
           "db_pool_exhausted",
           "forbidden",
           "internal_error",
-          "not_found",
-          "service_busy",
-          "too_many_requests",
-          "unauthorized",
-          "validation_error"
-        ],
-        "x-permission": "connection.manage"
-      }
-    },
-    "/v1/connections/{connection_id}/reauth": {
-      "post": {
-        "operationId": "reauthorize",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "connection_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "title": "Connection Id",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ReauthIn"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConnectionOut"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorOut"
-                }
-              }
-            },
-            "description": "error: ambiguous_credentials, malformed_body"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorOut"
-                }
-              }
-            },
-            "description": "error: unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorOut"
-                }
-              }
-            },
-            "description": "error: cross_site, csrf, forbidden"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorOut"
-                }
-              }
-            },
-            "description": "error: not_found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ValidationErrorOut"
-                }
-              }
-            },
-            "description": "error: validation_error"
-          },
-          "429": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorOut"
-                }
-              }
-            },
-            "description": "error: too_many_requests"
-          },
-          "500": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorOut"
-                }
-              }
-            },
-            "description": "error: internal_error"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorOut"
-                }
-              }
-            },
-            "description": "error: db_pool_exhausted, service_busy"
-          }
-        },
-        "summary": "Reauthorize",
-        "x-error-codes": [
-          "ambiguous_credentials",
-          "cross_site",
-          "csrf",
-          "db_pool_exhausted",
-          "forbidden",
-          "internal_error",
-          "malformed_body",
           "not_found",
           "service_busy",
           "too_many_requests",
@@ -12218,6 +12213,95 @@
           "validation_error"
         ],
         "x-permission": "authenticated"
+      }
+    },
+    "/v1/oauth/{provider}/callback": {
+      "get": {
+        "description": "The provider's redirect: relayed on the relay host, completed on the tenant host.",
+        "operationId": "oauth_callback",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "title": "Provider",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: invalid"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: not_found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorOut"
+                }
+              }
+            },
+            "description": "error: validation_error"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: db_pool_exhausted, service_busy"
+          }
+        },
+        "summary": "Oauth Callback",
+        "x-error-codes": [
+          "db_pool_exhausted",
+          "internal_error",
+          "invalid",
+          "not_found",
+          "service_busy",
+          "validation_error"
+        ],
+        "x-permission": "public"
       }
     },
     "/v1/principals": {

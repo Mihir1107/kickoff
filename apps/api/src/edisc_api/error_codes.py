@@ -87,6 +87,9 @@ class E:
     )
     # browser sessions
     NOT_A_SESSION = Code("not_a_session", 400, "a route for browser sessions called without one")
+    INSTALL_UNAVAILABLE = Code(
+        "install_unavailable", 503, "the provider's app is not configured on this deployment"
+    )
     INVALID_RETURN_TO = Code("invalid_return_to", 400, "return_to is not a same-origin path")
     IDP_UNAVAILABLE = Code("idp_unavailable", 502, "the identity provider could not be used")
     # the sign-in bounce page (/?auth_error=<code>; ADR 0016 §1 and its notes)

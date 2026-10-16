@@ -37,6 +37,9 @@ from edisc_db.session import tenant_tx
 from edisc_worker.pipeline import Pipeline
 
 router = APIRouter(prefix="/v1")
+# the generic credential routes: registered only where the dummy connector is permitted
+# (local/test/ci; ADR 0016 A7, D10). Real sources connect through installs (routes.installs).
+credential_router = APIRouter(prefix="/v1")
 
 
 class Strict(BaseModel):
@@ -114,7 +117,7 @@ async def _out(s: AsyncSession, connection_id: uuid.UUID) -> ConnectionOut:
     return ConnectionOut(**row._mapping)
 
 
-@router.post(
+@credential_router.post(
     "/clients/{client_id}/connections", status_code=201, response_model=ConnectionOut,
     openapi_extra=perm(P.CONNECTION_MANAGE, E.FORBIDDEN, E.NOT_FOUND, E.UNPROCESSABLE),
 )  # fmt: skip
@@ -169,7 +172,7 @@ async def create_connection(
     return out
 
 
-@router.post(
+@credential_router.post(
     "/connections/{connection_id}/reauth", response_model=ConnectionOut,
     openapi_extra=perm(P.CONNECTION_MANAGE, E.FORBIDDEN, E.NOT_FOUND),
 )  # fmt: skip

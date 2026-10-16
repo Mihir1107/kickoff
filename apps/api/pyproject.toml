@@ -5,7 +5,9 @@ description = "FastAPI service: tenants, matters, connections, jobs, reports."
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "edisc-connector-dummy",
+    "edisc-connector-slack",
     "edisc-connector-slack-export",
+    "edisc-connector-teams",
     "edisc-connectors-base",
     "edisc-core",
     "edisc-custody",
@@ -28,6 +30,8 @@ edisc-evidence = { workspace = true }
 edisc-connectors-base = { workspace = true }
 edisc-connector-dummy = { workspace = true }
 edisc-connector-slack-export = { workspace = true }
+edisc-connector-slack = { workspace = true }
+edisc-connector-teams = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

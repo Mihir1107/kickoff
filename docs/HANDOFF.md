@@ -1,4 +1,4 @@
-# Handoff (2026-10-16: the step-5 fixes (bounded replay + reset, 422 bodies as sent, real-uvicorn test, the session watch's two halves) and M17 step 5b (downloads cut when the session ends) built; next: step 6, real-tenant confirmation of 3b in parallel)
+# Handoff (2026-10-16: the fixes before step 6 (stalled readers cut, nothing pooled held, permission loss cuts downloads, CI per main commit) and M17 step 6 (source installs) built; next: step 8, real-tenant confirmation of 3b and 6 in parallel)
 
 This file alone is enough to continue. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisions §1-§18, notes
@@ -7,18 +7,66 @@ design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisi
 `docs/runs/2026-10-12-m16-complete.md`. Expert guide: `docs/VERIFYING.md`. Demo: `docs/DEMO.md`.
 **M17 plan: `docs/plans/m17.md`** (every decision taken: its §12; design changes in ADR 0016
 Amendments 1 and 2; build notes for steps 2, 3 and 3b at the end of ADR 0016). Steps 0, 2, 3 and 3b
-4, 5 (SSE) and 5b (download cut-off) are built (3b approved; its confirmation on real Entra and
-Okta tenants runs in parallel, the user is setting the tenants up); step 6 is next; step 7 is on
-hold (legal review). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
+4, 5 (SSE), 5b (download cut-off) and 6 (install flows) are built (3b approved; its confirmation
+on real Entra and Okta tenants runs in parallel, the user is setting the tenants up; step 6 has its
+own items to confirm on the real apps); step 8 is next; step 7 is on hold (legal review). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
 
 ## Current state
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`.
-Migrations at head: **0039** (login outcomes `groups_overage`, `groups_missing`). Renderer **1.3.2**, dummy connector **0.5.0**, normalizer
+Migrations at head: **0040** (`oauth_installs`, `external_bindings`, M17 step 6). Renderer **1.3.2**, dummy connector **0.5.0**, normalizer
 **0.3.0**, report renderer **1.5.0**, preview renderer **1.0.0**. CI: run 38716016425 green on
 `5f0774e` (pool exhaustion, every job); run 38722400091 green on `4c0d513` (step 3b, every job;
 the unit job prints the real-IdP skips).
 Run 38577569420 green on `43f41b4` (step 3); run 38536427956's failure on `4a8c05f` is diagnosed
 and fixed (below).
+
+## Done: the fixes before step 6, then M17 step 6 (2026-10-16, second session)
+**CI:** run 38894640908 on `3665ca1` (the fixes): every job green but integration shard 2, which
+failed `test_stalled_clients` -- DIAGNOSED as a test bug (below), fixed in `c6ef043`. Run
+38897021941 on `c6ef043`: green but shard 2, which failed the step-5 replay test -- DIAGNOSED as a
+PRODUCT bug (a snapshot read across READ COMMITTED statements, item 7 below), fixed with step 6.
+
+**Fixes before step 6 (commit `3665ca1`; ADR 0016 "Implementation notes: the fixes before step 6";
+round `m17-pre6` 8/8):**
+1. **Stalled readers:** every write of a content download and of the job stream is timed
+   (`EDISC_DOWNLOAD_STALL_SECONDS`, 60 s: TCP's own retransmission backoff gives up on a silent
+   peer after about a minute); a stall cuts, audited `download_aborted` reason `stalled`.
+2. **Found: the request-context middleware was a `BaseHTTPMiddleware`**, which buffers streamed
+   bodies in its own task: a cut never reached the server (a stalled download would never have
+   been closed) and `bytes_sent` counted an undelivered write. Now plain ASGI; a unit test refuses
+   `BaseHTTPMiddleware`.
+3. **Found: a stalled download held a pooled S3 connection** (`EvidenceWriter.open` and package
+   object members kept a GetObject body open across writes; 50 stalled clients = the S3 pool).
+   Now `worm.read_ranges` (each range read whole, connection returned before the yield). Tested:
+   40 stalled natives + 10 render packages stalled inside a >1 MiB member + 10 stalled streams:
+   no database connection held across the stall, none in Redis, none lent by S3; another client
+   downloads and reads normally.
+4. **Permission loss cuts downloads** (`permission_lost`, every content route; `still_permitted`).
+5. **CI:** cancel-in-progress only off main; every main commit has its own concurrency group.
+6. **CI shard failure diagnosed (test bug):** the database check sampled the pool at one instant
+   while the stalled streams' feeds polled; every checkout in the stall was traced (feed polls,
+   session checks: short, none across a write). Now: whatever is out when the stall begins must be
+   back after three poll cycles. The same work showed the package half of the S3 check had been
+   vacuous (members <= 1 MiB are read whole before they are written); packages now stall inside a
+   >1 MiB member and the S3 assertion catches that break itself.
+7. **CI shard failure diagnosed (product bug in step 5):** the feed's poll read the head, then
+   the counts in later READ COMMITTED statements: a unit committing between them produced a
+   snapshot named "head A" that showed unit B (sent before B's `units`). The catch-up and the poll
+   now run REPEATABLE READ (`tenant_tx(..., repeatable_read=True)`); a deterministic test commits a
+   unit between the two reads.
+
+**M17 step 6, source installs (ADR 0016 "Implementation notes: M17 step 6"; round `m17-installs`
+16/16):** migration 0040; `POST /v1/clients/{c}/connections/slack/install` and `.../teams/consent`
+(a browser session + `connection.manage`; `{authorize_url, connection_id}` + the Lax
+`__Host-edisc_install` cookie); `GET /v1/oauth/{provider}/callback` (relay host `oauth.<base>`:
+state checked without a read, row looked up, MAC recomputed, 303 to the row's tenant host; tenant
+host: every check again + consume + cookie + session row + permission, then Slack's exchange or
+Microsoft's OIDC + client credentials, `bind_external`, tokens journaled first). Tests (19) cover
+open redirect, replayed / other-tenant / expired / forged states, the cross-customer attacks for
+both providers, tokens never in logs, audit payloads or pages. D10: the generic credential routes
+exist only in local/test/ci (two allow-list entries). Operator CLI `python -m edisc_api.admin
+move-binding` (A2.3). **To confirm on the real apps:** Slack PKCE (`EDISC_SLACK_PKCE`, off), Entra
+`wids` in the ID token, the Graph app roles.
 
 ## Done: the step-5 fixes, then M17 step 5b (2026-10-16)
 **CI:** run 38889003488 green on `4068bca` (5b, which contains the fixes), every job. Run
@@ -252,8 +300,16 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
   browser resends `Last-Event-ID` itself; nothing is missed or repeated. **`reset`** (since
   2026-10-16: too many or too old units to replay): reload the job and `/units` from the list
   endpoints, keep the stream open (the snapshot and live events follow).
-- **Downloads (5b):** a download can be cut when the session ends: the connection closes short of
-  its `Content-Length`; treat it as failed (never save a partial file), then re-authenticate.
+- **Downloads (5b):** a download can be cut when the session ends, the permission is lost or the
+  client stalls 60 s: the connection closes short of its `Content-Length`; treat it as failed
+  (never save a partial file), then re-authenticate.
+- **Installs (step 6), REQUIRED before production:** the live client (`src/api/http.ts`
+  `createConnection` / `reauthConnection`) calls routes that no longer exist outside
+  local/test/ci. Use `POST /v1/clients/{c}/connections/slack/install` or `.../teams/consent`
+  (body `{}` or `{"connection_id"}` to re-authorize; same-origin with `X-CSRF-Token`), then navigate
+  the browser to `authorize_url` (only `https:` on `slack.com` / `login.microsoftonline.com`). The
+  user comes back to `/clients/<c>/connections/<id>?install=ok` or `?install_error=<code>`
+  (`denied`, `expired`, `replayed`, `invalid`, `mismatch`, `already_bound`, `failed`, `refused`).
 - **422 bodies:** `ValidationErrorOut` / `UnprocessableOut` in the document (regenerate types). 429 `too_many_streams`
   above 10 open streams per user. Fallback: poll `GET /v1/jobs/{id}` and `/units`.
 - **Error codes:** every operation's `x-error-codes` in the document; `service_busy` (503) and
@@ -332,8 +388,7 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
    developer tenants; `make test-real-idp`; record every answer in ADR 0016 "To confirm on real
    tenants"; Entra's `auth_time` optional claim and Okta's omitted groups claim are the likeliest
    findings).
-2. Step 6 (install flows, migration 0040, the relay, the operator-only move
-CLI with its no-route test), step 8 (directory snapshots, `check-connections`, the pause deadline
+2. Step 8 (directory snapshots, `check-connections`, the pause deadline
 24 h..90 d). Step 7 waits for legal review.
 
 ## Done: the fixes before step 7 (2026-10-12; ADR 0018 §30; mutation round `m16-pre7`, 15/15)

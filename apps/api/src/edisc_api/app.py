@@ -294,7 +294,7 @@ def create_app(settings: Settings, resources: Resources | None = None) -> FastAP
 
     from edisc_api.routes import register
 
-    install_safe_errors(app, register(app))  # last: its middleware wraps every other one
+    install_safe_errors(app, register(app, settings))  # last: its middleware wraps every other one
     return app
 
 

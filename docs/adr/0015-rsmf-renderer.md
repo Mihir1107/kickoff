@@ -1309,3 +1309,13 @@ what was done and why.
     in a thread, in `make_api` (`ErrorCodeCheck.shared`); after it, report mode shows no block from
     it. Nothing was loosened. Seen in the same report (older, test-origin, not counted as failures
     there): the dev IdP key's first parse and the dummy dataset's file bytes in a test body.
+17. **The loop guard's own tests blocked the session loop (2026-10-16, diagnosed, test bug).**
+    `test_a_test_coroutine_blocking_the_loop_is_recorded_but_does_not_count` failed once in a full
+    unit run (and once more in five runs under 4-core contention): the session guard
+    (`tests/conftest.py`) sampled the shared session loop just after the test's deliberate 300 ms
+    block, found it waiting in `select()` with 299 ms of the thread's CPU spent, and counted it (the
+    §24.13 "idle but busy" rule, correct for product code). Four tests in
+    `tests/unit/core/test_loopguard.py` blocked the loop the whole suite shares ON PURPOSE; they now
+    run their bodies on a private loop (`_on_own_loop`; the session loop is not running during a
+    sync test). Nothing in the guard changed; its five mutations in this file are still caught; a
+    full unit run under 4-core contention passes.

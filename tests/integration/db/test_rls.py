@@ -30,6 +30,7 @@ COPY_OVERRIDES = {
     "render_natives": "'ord', 99",
     "sessions": "'id', gen_random_uuid(), 'id_hash', sha256(gen_random_uuid()::text::bytea)",
     "login_attempts": "'id', gen_random_uuid(), 'state_hash', sha256(gen_random_uuid()::text::bytea)",
+    "oauth_installs": "'id', gen_random_uuid()",
 }
 UPDATABLE = {
     "matters": "name",

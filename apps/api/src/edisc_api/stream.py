@@ -128,8 +128,9 @@ async def read_changes(
     s: AsyncSession, job_id: uuid.UUID, after: int, replay: Replay | None = None
 ) -> tuple[list[Sent], Sent]:
     """Unit events in ``(after, head]`` (chain order, at most MAX_UNITS per event), then the
-    snapshot at ``head``. Reading the head FIRST bounds the unit events: every later one has a
-    greater sequence number than the snapshot's id. With ``replay`` (a subscriber's catch-up),
+    snapshot at ``head``. Runs in a REPEATABLE READ transaction (``tenant_tx(...,
+    repeatable_read=True)``): every statement sees the database as it was at the head, so the unit
+    rows and counts are those of the head, and a snapshot's id names exactly its content. With ``replay`` (a subscriber's catch-up),
     more than ``max_events`` unit events, or (after a ``Last-Event-ID``) an oldest one older than
     ``max_age_seconds``, or a position past the head, gives ONE ``reset`` instead of the units."""
     row = (await s.execute(text(HEAD), {"j": job_id})).one()
@@ -235,7 +236,8 @@ class JobFeed:
         async with self.lock:
             sub = self.subscribe(size)
             try:
-                async with tenant_tx(self.sessions, self.tenant_id) as s:
+                # one snapshot of the database: the head bounds everything read with it
+                async with tenant_tx(self.sessions, self.tenant_id, repeatable_read=True) as s:
                     events, snapshot = await read_changes(s, self.job_id, after, replay)
             except BaseException:  # never leave a subscriber that no writer will drain
                 self.subscribers.discard(sub)
@@ -249,7 +251,9 @@ class JobFeed:
     async def poll_once(self) -> None:
         self.polls += 1
         async with self.lock:
-            async with tenant_tx(self.sessions, self.tenant_id) as s:
+            # one snapshot: the counts never include a unit settled after the head was read
+            # (found by CI run 38897021941: a "head 5" snapshot showing unit 6, sent before it)
+            async with tenant_tx(self.sessions, self.tenant_id, repeatable_read=True) as s:
                 row = (await s.execute(text(HEAD), {"j": self.job_id})).one()
                 state = (row.status, bool(row.sealed), int(row.head or 0))
                 if state == self.last or self.after is None:

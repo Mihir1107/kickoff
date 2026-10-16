@@ -220,6 +220,19 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
             secrets.token_bytes(32),
             session,
         )
+        # source installs (migration 0040)
+        await conn.execute(
+            "INSERT INTO oauth_installs (id, tenant_id, provider, client_id, connection_id, reauth,"
+            " session_id, principal_id, handle_hash, key_id, nonce, requested_scopes, expires_at)"
+            " VALUES ($1, $2, 'slack', (SELECT id FROM clients WHERE is_default), $3, false, $4,"
+            " $5, $6, 'dev', 'n', '{}', now() + interval '10 minutes')",
+            new_id(),
+            t,
+            ids["conn"],
+            session,
+            principal,
+            secrets.token_bytes(32),
+        )
         await conn.execute(
             "INSERT INTO groups (id, tenant_id, name) VALUES ($1, $2, 'G')", group, t
         )
@@ -418,5 +431,6 @@ TENANT_TABLES = [
     "report_files",
     "sessions",
     "login_attempts",
+    "oauth_installs",
 ]
 ALL_TABLES = ["tenants", *TENANT_TABLES]
