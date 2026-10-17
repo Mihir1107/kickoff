@@ -215,6 +215,12 @@ class Settings(BaseSettings):
         ge=1,
         description="Seconds-level cap for EPHEMERAL TEST stacks only (env test/ci); refused anywhere else.",
     )
+    reauth_deadline_override_seconds: int | None = Field(
+        default=None,
+        ge=2,
+        description="A paused job's re-authorization deadline in SECONDS instead of the tenant's"
+        " hours (ADR 0016 A6): EPHEMERAL TEST stacks only (env test/ci); refused anywhere else.",
+    )
 
     custody_anchor_claim_timeout_seconds: float = Field(
         default=60,
@@ -552,6 +558,10 @@ class Settings(BaseSettings):
         if self.evidence_retention_override_seconds is not None and not self.env.is_ephemeral_test:
             raise ValueError(
                 "EDISC_EVIDENCE_RETENTION_OVERRIDE_SECONDS is only permitted when EDISC_ENV is test or ci"
+            )
+        if self.reauth_deadline_override_seconds is not None and not self.env.is_ephemeral_test:
+            raise ValueError(
+                "EDISC_REAUTH_DEADLINE_OVERRIDE_SECONDS is only permitted when EDISC_ENV is test or ci"
             )
         return self
 

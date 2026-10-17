@@ -169,6 +169,11 @@ class DummyConnector:
         return await call_with_limits(self._limiter, self._bucket(conn, method), do)
 
     # ------------------------------------------------------------------ protocol
+    async def check_credentials(self, conn: Connection) -> None:
+        """``auth.test``: one limited request that only checks the credentials."""
+        ds, _ = self.dataset(conn)
+        await self._request(conn, ds, "auth_test", "auth.test", lambda: None)
+
     async def validate_connection(self, conn: Connection) -> ConnectionInfo:
         ds, _ = self.dataset(conn)
         counts = ds.spec.count_mode is CountMode.TRUE

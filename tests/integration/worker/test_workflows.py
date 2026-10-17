@@ -225,7 +225,7 @@ async def test_revoked_credentials_pause_every_job_on_the_connection_until_reaut
         async with tenant_tx(harness.sessions, t.tenant_id) as s:
             alerts = (
                 await s.execute(
-                    text("SELECT kind, connection_id FROM alerts WHERE connection_id = :c"),
+                    text("SELECT kind, job_id FROM alerts WHERE connection_id = :c ORDER BY kind"),
                     {"c": t.connection_id},
                 )
             ).all()
@@ -246,7 +246,9 @@ async def test_revoked_credentials_pause_every_job_on_the_connection_until_reaut
                     text("SELECT status FROM connections WHERE id = :c"), {"c": t.connection_id}
                 )
             ).scalar_one()
-        assert [a.kind for a in alerts] == ["reauth_required"]  # one alert per connection
+        # one alert for the connection, one per paused job naming it (ADR 0016 A6)
+        assert [a.kind for a in alerts if a.job_id is None] == ["reauth_required"]
+        assert sorted(a.job_id for a in alerts if a.kind == "job_paused") == sorted([first, second])
         assert set(pauses) == {first, second}
         assert conn_status == "reauth_required"
         await asyncio.sleep(1.0)  # paused: nothing runs, nothing is retried in a loop

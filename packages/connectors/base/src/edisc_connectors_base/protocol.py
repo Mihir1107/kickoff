@@ -37,6 +37,13 @@ class Connector(Protocol):
         """Plan tier, granted scopes, known blind spots, whether the source can report counts."""
         ...
 
+    async def check_credentials(self, conn: Connection) -> None:
+        """The source's cheapest AUTHENTICATED call (Slack ``auth.test``; Microsoft a
+        client-credentials token), through the rate limiter: raises ``AuthenticationError`` when
+        the credentials are refused (``check-connections``, M17 step 8). Credential-less sources
+        return at once."""
+        ...
+
     def enumerate(self, conn: Connection, scope: CollectionScope) -> AsyncIterator[WorkUnit]:
         """Units of work = (conversation_id, UTC day) inside the scope."""
         ...

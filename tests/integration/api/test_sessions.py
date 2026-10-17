@@ -777,6 +777,7 @@ async def _sensitive_requests(api: Api, t: TenantCtx) -> list[tuple[str, str, An
         )  # fmt: skip
     _, subject = await add_principal(api, t)
     return [
+        ("POST", f"/v1/jobs/{new_job}/finish-without-access", {"reason": "r"}),
         ("POST", f"/v1/matters/{matter}/close", None),
         ("POST", f"/v1/clients/{client}/close", None),
         ("POST", f"/v1/matters/{closed_matter}/reopen", None),

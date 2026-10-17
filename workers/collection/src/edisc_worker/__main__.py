@@ -103,7 +103,12 @@ async def activities_for(
             yield (
                 Activities(sessions, s3, settings, connectors, client),
                 MaintenanceActivities(
-                    session_factory(sweeper), sessions, s3, settings, temporal=client
+                    session_factory(sweeper),
+                    sessions,
+                    s3,
+                    settings,
+                    temporal=client,
+                    connectors=dict(connectors),
                 ),
             )
     finally:

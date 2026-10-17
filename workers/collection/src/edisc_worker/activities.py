@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import wraps
 from typing import Any
@@ -27,7 +30,8 @@ from types_aiobotocore_s3 import S3Client
 
 from edisc_connector_dummy.guard import ensure_dummy_permitted
 from edisc_connectors_base.protocol import Connector
-from edisc_connectors_base.types import Connection
+from edisc_connectors_base.types import AuthenticationError, Connection
+from edisc_core.canonical import canonical_json
 from edisc_core.settings import Settings
 from edisc_db.session import tenant_tx
 from edisc_worker.contracts import (
@@ -45,6 +49,18 @@ from edisc_worker.contracts import (
 )
 from edisc_worker.errors import classify, to_application_error
 from edisc_worker.pipeline import CrashHooks, Pipeline
+
+# The credentials an activity loaded (`_context`): a refusal carries their stamp across Temporal
+# (in the error text), so a pause is made only for the credentials still in force (M17 step 8)
+_CREDENTIALS: ContextVar[str | None] = ContextVar("edisc_credentials_stamp", default=None)
+_STAMP_IN_TEXT = re.compile(r"\[credentials ([0-9a-f]{16})\]")
+
+
+def credentials_stamp(token_version: int, config: Mapping[str, Any]) -> str:
+    """What a re-authorization changes: the stored token's version, or (credential-less sources and
+    the dummy) the connection's configuration."""
+    doc = {"token_version": int(token_version), "config": dict(config)}
+    return hashlib.sha256(canonical_json(doc)).hexdigest()[:16]
 
 
 def _classified[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
@@ -64,7 +80,13 @@ def _classified[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[
                 cls is ErrorClass.UNCLASSIFIED
                 and activity.info().attempt >= owner.settings.unclassified_max_attempts
             )
-            raise to_application_error(exc, error_class=cls, final=exhausted) from exc
+            stamp = _CREDENTIALS.get()
+            suffix = (
+                f" [credentials {stamp}]" if isinstance(exc, AuthenticationError) and stamp else ""
+            )
+            raise to_application_error(
+                exc, error_class=cls, final=exhausted, suffix=suffix
+            ) from exc
 
     return wrapper
 
@@ -117,7 +139,8 @@ class Activities:
             row = (
                 await s.execute(
                     text(
-                        "SELECT c.id, c.source, c.external_org_id, c.config FROM collection_jobs j"
+                        "SELECT c.id, c.source, c.external_org_id, c.config, c.token_version"
+                        " FROM collection_jobs j"
                         " JOIN connections c ON c.tenant_id = j.tenant_id AND c.id = j.connection_id WHERE j.id = :j"
                     ),
                     {"j": job_id},
@@ -125,6 +148,7 @@ class Activities:
             ).one()
         connector = self.connectors[row.source]
         conn = Connection(tenant_id, row.id, row.source, row.external_org_id, dict(row.config))
+        _CREDENTIALS.set(credentials_stamp(row.token_version, conn.config))
         return Pipeline(self.sessions, self.s3, self.settings, connector, self.hooks), conn
 
     def _pipeline(self) -> Pipeline:
@@ -197,8 +221,15 @@ class Activities:
     @_classified
     @_ticking
     async def pause_for_reauth(self, req: PauseRequest) -> int:
+        """Pause for the credentials still in force only. A refusal of credentials the connection
+        no longer holds (re-authorized after the failing activity loaded them) pauses nothing: the
+        unit runs again with the current ones, and if THEY are refused, that refusal pauses."""
         tenant, job = self._ids(req.job)
         _, conn = await self._context(tenant, job)
+        refused = _STAMP_IN_TEXT.search(req.reason)
+        if refused is not None and refused.group(1) != _CREDENTIALS.get():
+            activity.logger.info("a refusal of replaced credentials pauses nothing")
+            return 0
         paused = await self._pipeline().pause_connection(
             tenant_id=tenant, connection_id=conn.connection_id, reason=req.reason
         )

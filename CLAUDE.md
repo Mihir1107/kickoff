@@ -150,6 +150,24 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   holds only sealed blobs (a CHECK) and is DELETED with its apply; a journaled install is finished
   by the worker's reconciler (`edisc_worker.install_recovery`), exactly once.
 
+## Access lost (M17 step 8, ADR 0016 A6 + step-8 notes)
+- A pause for re-authorization records its reason CLASS (`AuthenticationError.reason_class`:
+  `credentials_revoked` / `credentials_expired` / `consent_withdrawn` /
+  `platform_credential_expired`; the class rides in the error text, so workflows are unchanged),
+  a deadline fixed at the pause (tenant `reauth_deadline_hours`, 24 h..90 days, default 168) and a
+  warning time; one alert per job, one warning alert. It ends ONLY by re-authorization (resume),
+  the deadline, or `POST /v1/jobs/{id}/finish-without-access` (`job.resume`, a reason, recent
+  sign-in). The last two go through `edisc_worker.access_lost`: decide (one transaction,
+  `job_pause_ended` in the chain), then close each unsettled unit `access_lost` in its OWN
+  transaction with its `unit_reconciled` event, and only then `stop_reason = 'access_lost'`.
+  Never finalize with a unit unsettled; a job with no work unit never finalizes clean. A refusal
+  pauses only the credentials still in force: activities stamp the credentials they loaded
+  (`activities.credentials_stamp`), the stamp rides in the error text, `pause_for_reauth` compares.
+- `check-connections` (every 6 h): `Connector.check_credentials` through the limiter for every
+  active connection with tokens; a source without a connector in the worker is `unchecked`, never
+  fine. A new connector implements `check_credentials`.
+- Test stacks shorten the deadline with `EDISC_REAUTH_DEADLINE_OVERRIDE_SECONDS` (test/ci only).
+
 ## Slack exports (M14, ADR 0014)
 - Upload: `POST /v1/clients/{c}/exports` → `PUT /v1/exports/{id}/parts/{n}` (Content-Digest sha-256) →
   `POST .../complete`. The `ExportIngestWorkflow` (queue `exports`, `edisc_worker.exports`) hashes the staged

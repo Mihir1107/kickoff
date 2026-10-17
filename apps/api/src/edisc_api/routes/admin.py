@@ -66,6 +66,17 @@ class MemberIn(Strict):
     principal_id: uuid.UUID
 
 
+class TenantSettingsOut(Strict):
+    reauth_deadline_hours: int
+
+
+class ReauthDeadlineIn(Strict):
+    """ADR 0016 A6, A2.2: 24 hours .. 90 days; outside is refused (422), never clamped."""
+
+    hours: int = Field(ge=24, le=2160)
+    reason: str = Field(min_length=1, max_length=500)
+
+
 class AssignmentIn(Strict):
     principal_id: uuid.UUID | None = None
     group_id: uuid.UUID | None = None
@@ -510,3 +521,48 @@ async def list_assignments(
             )
         ).all()
     return page_of([AssignmentOut(**r._mapping) for r in rows], limit, lambda a: a.id)
+
+
+# ------------------------------------------------------------------ tenant settings (M17 step 8)
+@router.get(
+    "/tenant/settings",
+    response_model=TenantSettingsOut,
+    openapi_extra=perm(P.TENANT_ADMIN, E.FORBIDDEN, E.NOT_FOUND),
+)
+async def get_tenant_settings(caller: CallerDep, res: ResourcesDep) -> TenantSettingsOut:
+    async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        await authorize(s, caller, P.TENANT_ADMIN, TENANT)
+        hours: int = (await s.execute(text(
+            "SELECT reauth_deadline_hours FROM tenants WHERE id = :t"), {"t": caller.tenant_id}
+        )).scalar_one()  # fmt: skip
+    return TenantSettingsOut(reauth_deadline_hours=hours)
+
+
+@router.put(
+    "/tenant/settings/reauth-deadline",
+    response_model=TenantSettingsOut,
+    openapi_extra=perm(P.TENANT_ADMIN, E.FORBIDDEN, E.NOT_FOUND),
+)
+async def set_reauth_deadline(
+    body: ReauthDeadlineIn, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
+) -> TenantSettingsOut:
+    """How long a job paused for re-authorization waits before it finishes without access (ADR
+    0016 A6). Applies to pauses that start afterwards: a pause's deadline is fixed when it starts."""
+    async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        await authorize(s, caller, P.TENANT_ADMIN, TENANT)
+        old: int = (await s.execute(text(
+            "SELECT reauth_deadline_hours FROM tenants WHERE id = :t FOR NO KEY UPDATE"),
+            {"t": caller.tenant_id})).scalar_one()  # fmt: skip
+        await s.execute(
+            text("UPDATE tenants SET reauth_deadline_hours = :h WHERE id = :t"),
+            {"h": body.hours, "t": caller.tenant_id},
+        )
+        await audit.record(
+            s, tenant_id=caller.tenant_id, actor=caller.actor,
+            event_type="tenant_setting_changed",
+            payload={"setting": "reauth_deadline_hours", "old": old, "new": body.hours,
+                     "reason": body.reason},
+            request_id=rid,
+        )  # fmt: skip
+    await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
+    return TenantSettingsOut(reauth_deadline_hours=body.hours)

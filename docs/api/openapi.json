@@ -777,6 +777,22 @@
         "title": "ExportOut",
         "type": "object"
       },
+      "FinishWithoutAccessIn": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "FinishWithoutAccessIn",
+        "type": "object"
+      },
       "GroupIn": {
         "additionalProperties": false,
         "properties": {
@@ -2208,6 +2224,30 @@
         "title": "PrincipalOut",
         "type": "object"
       },
+      "ReauthDeadlineIn": {
+        "additionalProperties": false,
+        "description": "ADR 0016 A6, A2.2: 24 hours .. 90 days; outside is refused (422), never clamped.",
+        "properties": {
+          "hours": {
+            "maximum": 2160.0,
+            "minimum": 24.0,
+            "title": "Hours",
+            "type": "integer"
+          },
+          "reason": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "hours",
+          "reason"
+        ],
+        "title": "ReauthDeadlineIn",
+        "type": "object"
+      },
       "ReconciliationOut": {
         "additionalProperties": false,
         "properties": {
@@ -3457,6 +3497,20 @@
           "revoked"
         ],
         "title": "SessionsRevokedOut",
+        "type": "object"
+      },
+      "TenantSettingsOut": {
+        "additionalProperties": false,
+        "properties": {
+          "reauth_deadline_hours": {
+            "title": "Reauth Deadline Hours",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "reauth_deadline_hours"
+        ],
+        "title": "TenantSettingsOut",
         "type": "object"
       },
       "ThreadParentPolicy": {
@@ -8704,6 +8758,154 @@
           "validation_error"
         ],
         "x-permission": "custody.read"
+      }
+    },
+    "/v1/jobs/{job_id}/finish-without-access": {
+      "post": {
+        "description": "ADR 0016 A6: a job paused for re-authorization finishes WITHOUT waiting for its deadline:\nevery unit not yet reconciled closes ``access_lost`` with the pause's reason class (each in\nthe job's chain), then the job finalizes (``completed_with_gaps``). Decided here (the pause's\nend and ``job_pause_ended`` in the chain, the audit with ``authenticated_at``, one\ntransaction); carried out by the maintenance worker, started at once (and by its schedule\nafter any interruption). The answer is the job as it is now: still paused, decided.",
+        "operationId": "finish_without_access",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FinishWithoutAccessIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: ambiguous_credentials, malformed_body"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: reauth_required, unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: cross_site, csrf, forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorOut"
+                }
+              }
+            },
+            "description": "error: validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: too_many_requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: db_pool_exhausted, service_busy"
+          }
+        },
+        "summary": "Finish Without Access",
+        "x-error-codes": [
+          "ambiguous_credentials",
+          "conflict",
+          "cross_site",
+          "csrf",
+          "db_pool_exhausted",
+          "forbidden",
+          "internal_error",
+          "malformed_body",
+          "not_found",
+          "reauth_required",
+          "service_busy",
+          "too_many_requests",
+          "unauthorized",
+          "validation_error"
+        ],
+        "x-permission": "job.resume"
       }
     },
     "/v1/jobs/{job_id}/package": {
@@ -14874,6 +15076,230 @@
           "validation_error"
         ],
         "x-permission": "authenticated"
+      }
+    },
+    "/v1/tenant/settings": {
+      "get": {
+        "operationId": "get_tenant_settings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantSettingsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: ambiguous_credentials"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: cross_site, forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: not_found"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: too_many_requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: db_pool_exhausted, service_busy"
+          }
+        },
+        "summary": "Get Tenant Settings",
+        "x-error-codes": [
+          "ambiguous_credentials",
+          "cross_site",
+          "db_pool_exhausted",
+          "forbidden",
+          "internal_error",
+          "not_found",
+          "service_busy",
+          "too_many_requests",
+          "unauthorized"
+        ],
+        "x-permission": "tenant.admin"
+      }
+    },
+    "/v1/tenant/settings/reauth-deadline": {
+      "put": {
+        "description": "How long a job paused for re-authorization waits before it finishes without access (ADR\n0016 A6). Applies to pauses that start afterwards: a pause's deadline is fixed when it starts.",
+        "operationId": "set_reauth_deadline",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReauthDeadlineIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantSettingsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: ambiguous_credentials, malformed_body"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: cross_site, csrf, forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: not_found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorOut"
+                }
+              }
+            },
+            "description": "error: validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: too_many_requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: db_pool_exhausted, service_busy"
+          }
+        },
+        "summary": "Set Reauth Deadline",
+        "x-error-codes": [
+          "ambiguous_credentials",
+          "cross_site",
+          "csrf",
+          "db_pool_exhausted",
+          "forbidden",
+          "internal_error",
+          "malformed_body",
+          "not_found",
+          "service_busy",
+          "too_many_requests",
+          "unauthorized",
+          "validation_error"
+        ],
+        "x-permission": "tenant.admin"
       }
     }
   }

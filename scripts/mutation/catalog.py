@@ -107,6 +107,13 @@ Rounds (ADR 0015):
   client-credentials token for the tid, our app, granted roles) whether or not ``wids`` is present;
   the token journal deletes an entry with its apply, holds only sealed blobs, and finishes a
   journaled install exactly once.
+- ``m17-access-lost``: M17 step 8 (ADR 0016 A6): a pause's deadline from the tenant setting and
+  its warning time, the warning once, the deadline honoured, every unsettled unit closed
+  ``access_lost`` with its reason class in the chain, the stop only after the last unit, a job
+  that never enumerated never clean, a decided pause never resumed, alerts resolved, the audited
+  finish-without-access action (paused jobs only, recent sign-in), the setting's bounds,
+  check-connections (revocations acted on, unchecked sources never reported fine), reason classes,
+  a refusal of replaced credentials never pausing a resumed job.
 - ``m17-host-cookie``: the session cookie is host-only (``__Host-``, no ``Domain``) and a same-site
   request from a neighbouring subdomain is refused, both in real browsers (ADR 0016 §2).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
@@ -1894,4 +1901,73 @@ CATALOG: list[Mutation] = [
       "packages/db/src/edisc_db/connection_tokens.py",
       "                await _close_journal(session, entry.id, state)\n", "", TIN,
       "repaired_exactly_once"),
+    # ------------------------------------------------------------------ m17-access-lost
+    m("deadline_ignored", "m17-access-lost", "workers/collection/src/edisc_worker/access_lost.py",
+      "            if p.ended_how is None and p.due:\n", "            if False:\n", "tests/integration/worker/test_access_lost.py",
+      "past_its_deadline"),
+    m("warning_repeated", "m17-access-lost", "workers/collection/src/edisc_worker/access_lost.py",
+      "            elif p.ended_how is None and p.warn_due and p.warned_at is None:\n",
+      "            elif p.ended_how is None and p.warn_due:\n", "tests/integration/worker/test_access_lost.py", "past_its_deadline"),
+    m("units_left_unsettled", "m17-access-lost", "workers/collection/src/edisc_worker/access_lost.py",
+      "            closed += await _close_unit(pipeline, tenant_id, job_id, key, cls)\n",
+      "            closed += 0\n            break\n", "tests/integration/worker/test_access_lost.py", "past_its_deadline"),
+    m("reason_not_in_chain", "m17-access-lost", "workers/collection/src/edisc_worker/access_lost.py",
+      '        closed = SimpleNamespace(**{**row._mapping, "access_lost_reason": cls})\n',
+      "        closed = row\n", "tests/integration/worker/test_access_lost.py", "past_its_deadline"),
+    m("stop_before_the_units", "m17-access-lost", "workers/collection/src/edisc_worker/access_lost.py",
+      '    payload = {\n        "pause_id": str(pause.id), "ended_how": how,',
+      '    await s.execute(text("UPDATE collection_jobs SET stop_reason = \'access_lost\' WHERE id = :j"),'
+      ' {"j": job_id})\n    payload = {\n        "pause_id": str(pause.id), "ended_how": how,',
+      "tests/integration/worker/test_access_lost.py", "crash_while_closing"),
+    m("never_enumerated_clean", "m17-access-lost", "workers/collection/src/edisc_worker/pipeline.py",
+      "                elif not enumerated:\n", "                elif False:\n", "tests/integration/worker/test_access_lost.py",
+      "before_enumeration"),
+    m("decided_pause_resumed", "m17-access-lost", "workers/collection/src/edisc_worker/pipeline.py",
+      '                    " AND status = \'paused_awaiting_reauth\' AND NOT EXISTS (SELECT 1 FROM job_pauses p"\n'
+      '                    " WHERE p.job_id = j.id AND p.resumed_at IS NULL AND p.ended_how IS NOT NULL)"\n',
+      '                    " AND status = \'paused_awaiting_reauth\'"\n', "tests/integration/api/test_access_lost.py", "closes_the_units"),
+    m("alerts_kept_on_resume", "m17-access-lost", "workers/collection/src/edisc_worker/pipeline.py",
+      '                "UPDATE alerts SET resolved_at = now() WHERE job_id = :j"\n'
+      '                " AND kind IN (\'job_paused\', \'reauth_deadline_near\') AND resolved_at IS NULL"\n',
+      '                "SELECT :j"\n', "tests/integration/worker/test_access_lost.py", "zero_gaps"),
+    m("alerts_kept_on_close", "m17-access-lost", "workers/collection/src/edisc_worker/access_lost.py", "        await resolve_job_alerts(s, job_id)\n",
+      "", "tests/integration/worker/test_access_lost.py", "past_its_deadline"),
+    m("deadline_not_from_tenant", "m17-access-lost", "workers/collection/src/edisc_worker/pipeline.py",
+      "            seconds = self._deadline_seconds(hours)\n",
+      "            seconds = self._deadline_seconds(168)\n", "tests/integration/api/test_access_lost.py", "takes_its_deadline"),
+    m("warning_not_halved", "m17-access-lost", "workers/collection/src/edisc_worker/pipeline.py",
+      "            warn_before = 86400 if seconds >= 2 * 86400 else seconds / 2\n",
+      "            warn_before = 86400\n", "tests/integration/api/test_access_lost.py", "takes_its_deadline"),
+    m("finish_any_status", "m17-access-lost", "workers/collection/src/edisc_worker/access_lost.py",
+      '    if pause is None or pause.status != "paused_awaiting_reauth":\n',
+      "    if pause is None:\n", "tests/integration/api/test_access_lost.py", "needs_a_paused_job"),
+    m("finish_unaudited", "m17-access-lost", "apps/api/src/edisc_api/routes/jobs.py",
+      '            event_type="job_finished_without_access",\n',
+      '            event_type="job_note",\n', "tests/integration/api/test_access_lost.py", "audited_recorded"),
+    m("finish_without_recent_sign_in", "m17-access-lost", "apps/api/src/edisc_api/routes/jobs.py",
+      "        authenticated_at = require_recent_sign_in(caller, res.settings)\n"
+      "        try:\n            ended = await access_lost.decide(",
+      "        authenticated_at = None\n        try:\n            ended = await access_lost.decide(",
+      "tests/integration/api/test_sessions.py", "recent_sign_in"),
+    m("deadline_unbounded", "m17-access-lost", "apps/api/src/edisc_api/routes/admin.py",
+      "    hours: int = Field(ge=24, le=2160)\n", "    hours: int = Field(ge=1, le=100000)\n", "tests/integration/api/test_access_lost.py",
+      "bounded_24_hours"),
+    m("revocation_not_acted_on", "m17-access-lost", "workers/collection/src/edisc_worker/access_lost.py",
+      "            await pipeline.pause_connection(\n"
+      "                tenant_id=r.tenant_id, connection_id=r.connection_id, reason=str(exc)\n"
+      "            )\n            out.revoked += 1\n",
+      "            out.revoked += 1\n", "tests/integration/worker/test_access_lost.py", "check_connections"),
+    m("unchecked_reported_fine", "m17-access-lost", "workers/collection/src/edisc_worker/access_lost.py",
+      "            out.unchecked[r.source] = out.unchecked.get(r.source, 0) + 1\n",
+      "            out.ok += 1\n", "tests/integration/worker/test_access_lost.py", "check_connections"),
+    m("expiry_read_as_revocation", "m17-access-lost",
+      "packages/connectors/base/src/edisc_connectors_base/types.py",
+      '_EXPIRED = ("token_expired", "expired_token", "aadsts700082", "aadsts70008")\n',
+      "_EXPIRED: tuple[str, ...] = ()\n", "tests/unit/connectors/test_auth_reason.py", ""),
+    m("stale_refusal_pauses", "m17-access-lost", "workers/collection/src/edisc_worker/activities.py",
+      "        if refused is not None and refused.group(1) != _CREDENTIALS.get():\n",
+      "        if False:\n", "tests/integration/worker/test_access_lost.py", "replaced_credentials"),
+    m("refusal_not_stamped", "m17-access-lost", "workers/collection/src/edisc_worker/activities.py",
+      "        _CREDENTIALS.set(credentials_stamp(row.token_version, conn.config))\n", "",
+      "tests/integration/worker/test_access_lost.py", "replaced_credentials"),
 ]  # fmt: skip

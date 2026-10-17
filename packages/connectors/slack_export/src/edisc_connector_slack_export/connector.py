@@ -184,6 +184,10 @@ class SlackExportConnector:
             return list((await s.execute(text(sql), params)).all())
 
     # ------------------------------------------------------------------ protocol
+    async def check_credentials(self, conn: Connection) -> None:
+        """An export is uploaded, not fetched: there are no credentials to check."""
+        return None
+
     async def validate_connection(self, conn: Connection) -> ConnectionInfo:
         export = await self._export(conn)
         spots = tuple(export.findings.get("blind_spots") or BLIND_SPOTS_ALL)

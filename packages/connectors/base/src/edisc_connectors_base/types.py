@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -162,13 +163,54 @@ class UncollectableUnitError(Exception):
         self.unit_key, self.reason = unit_key, reason
 
 
+# Why credentials stopped working (ADR 0016 A6): the pause, its alerts and every unit closed
+# access_lost carry the class; `platform_credential_expired` is OUR certificate or key (an
+# operations problem, never the customer's)
+AUTH_REASON_CLASSES = (
+    "credentials_revoked", "credentials_expired", "consent_withdrawn", "platform_credential_expired",
+)  # fmt: skip
+_EXPIRED = ("token_expired", "expired_token", "aadsts700082", "aadsts70008")
+_CONSENT = (
+    "consent_required",
+    "aadsts65001",
+    "aadsts650051",
+    "aadsts700016",
+    "unauthorized_client",
+)
+_PLATFORM = ("invalid_client", "aadsts700027", "aadsts7000222", "aadsts7000215", "aadsts7000274")
+_CLASS_IN_TEXT = re.compile(r"\((" + "|".join(AUTH_REASON_CLASSES) + r")\)")
+
+
+def auth_reason_class(reason: str) -> str:
+    """The class of a provider's refusal code (Slack ``invalid_auth``, ``token_revoked``,
+    ``account_inactive``, ``token_expired``; Entra ``AADSTS...`` / OAuth ``error`` codes).
+    Anything not known to mean expiry, withdrawn consent or our own credential is a revocation."""
+    r = reason.lower()
+    for codes, cls in ((_PLATFORM, "platform_credential_expired"),
+                       (_CONSENT, "consent_withdrawn"), (_EXPIRED, "credentials_expired")):  # fmt: skip
+        if any(code in r for code in codes):
+            return cls
+    return "credentials_revoked"
+
+
+def reason_class_in(text: str) -> str:
+    """The class an ``AuthenticationError``'s text carries (it crosses Temporal as text); a text
+    without one (an older worker's) is classified from the text itself."""
+    found = _CLASS_IN_TEXT.search(text)
+    return found.group(1) if found else auth_reason_class(text)
+
+
 class AuthenticationError(Exception):
     """The source rejected our credentials (revoked/invalid token, ``invalid_auth``, ``token_revoked``,
-    ``invalid_grant``). Never retried: every running job on the connection pauses for re-authorization."""
+    ``invalid_grant``). Never retried: every running job on the connection pauses for re-authorization.
+    The text carries the reason class (``AUTH_REASON_CLASSES``) in parentheses."""
 
-    def __init__(self, reason: str) -> None:
-        super().__init__(f"source rejected credentials: {reason}")
-        self.reason = reason
+    def __init__(self, reason: str, reason_class: str | None = None) -> None:
+        cls = reason_class or auth_reason_class(reason)
+        if cls not in AUTH_REASON_CLASSES:
+            raise ValueError(f"unknown reason class {cls!r}")
+        super().__init__(f"source rejected credentials ({cls}): {reason}")
+        self.reason, self.reason_class = reason, cls
 
 
 class InvalidCursorError(ValueError):

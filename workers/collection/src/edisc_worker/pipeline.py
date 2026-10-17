@@ -46,8 +46,10 @@ from edisc_connectors_base.types import (
     ThreadParentPolicy,
     UncollectableUnitError,
     WorkUnit,
+    reason_class_in,
 )
 from edisc_core.ids import new_id
+from edisc_core.logs import get_logger
 from edisc_core.lone_surrogates import recorded_text, replacement
 from edisc_core.schemas import ItemType, JobStatus, ReconStatus, ScopeType
 from edisc_core.settings import Settings
@@ -107,6 +109,7 @@ _EARLIER_CLEAN_ITEMS = (
     " AND wu.file_gaps = 0))"
 )
 ACTOR = "collection-worker"
+log = get_logger(__name__)
 # `job_started.unit_event_format`: 2 = every unit event carries the unit's database-only facts (kind,
 # conversation, scopes, access-lost reason, gap reasons) and units left unsettled at the end are
 # recorded (`units_unsettled`), so the report's unit rows come from the chain alone (ADR 0018 §28)
@@ -1492,18 +1495,38 @@ class Pipeline:
         )
         return True
 
+    def _deadline_seconds(self, hours: int) -> int:
+        override = self.settings.reauth_deadline_override_seconds
+        return override if override is not None else hours * 3600
+
     async def pause_connection(
         self, *, tenant_id: uuid.UUID, connection_id: uuid.UUID, reason: str
     ) -> list[uuid.UUID]:
-        """Revoked/invalid credentials pause EVERY running job on the connection, with one alert."""
+        """Revoked/invalid credentials pause EVERY running job on the connection (ADR 0012 §3, ADR
+        0016 A6): the connection turns ``reauth_required`` (one alert for it), and each job's pause
+        records the reason CLASS, its deadline (the tenant's ``reauth_deadline_hours`` from now,
+        fixed at the pause) and when to warn (24 h before it, or at half of it under 48 h), with
+        one alert per job naming its deadline."""
+        cls = reason_class_in(reason)
         paused: list[uuid.UUID] = []
         async with tenant_tx(self.sessions, tenant_id) as s:
-            await s.execute(
-                text(
-                    "UPDATE connections SET status = 'reauth_required', updated_at = now() WHERE id = :c"
-                ),
-                {"c": connection_id},
-            )
+            changed = (
+                await s.execute(
+                    text(
+                        "UPDATE connections SET status = 'reauth_required', updated_at = now()"
+                        " WHERE id = :c AND status <> 'reauth_required' RETURNING id"
+                    ),
+                    {"c": connection_id},
+                )
+            ).first()
+            hours: int = (
+                await s.execute(
+                    text("SELECT reauth_deadline_hours FROM tenants WHERE id = :t"),
+                    {"t": tenant_id},
+                )
+            ).scalar_one()
+            seconds = self._deadline_seconds(hours)
+            warn_before = 86400 if seconds >= 2 * 86400 else seconds / 2
             jobs: Sequence[uuid.UUID] = (
                 (
                     await s.execute(
@@ -1518,12 +1541,19 @@ class Pipeline:
                 .all()
             )
             for job in jobs:
-                await s.execute(
-                    text(
-                        "INSERT INTO job_pauses (id, tenant_id, job_id, connection_id, reason) VALUES (:i, :t, :j, :c, :r)"
-                    ),
-                    {"i": new_id(), "t": tenant_id, "j": job, "c": connection_id, "r": reason},
-                )
+                pause = (
+                    await s.execute(
+                        text(
+                            "INSERT INTO job_pauses (id, tenant_id, job_id, connection_id, reason,"
+                            " reason_class, deadline_at, warn_at) VALUES (:i, :t, :j, :c, :r, :cls,"
+                            " now() + make_interval(secs => :sec),"
+                            " now() + make_interval(secs => :sec - :before))"
+                            " RETURNING deadline_at"
+                        ),
+                        {"i": new_id(), "t": tenant_id, "j": job, "c": connection_id, "r": reason,
+                         "cls": cls, "sec": seconds, "before": warn_before},
+                    )
+                ).one()  # fmt: skip
                 await append(
                     s,
                     tenant_id=tenant_id,
@@ -1531,11 +1561,22 @@ class Pipeline:
                     job_id=job,
                     event_type="job_paused",
                     actor=ACTOR,
-                    payload={"reason": reason, "connection_id": str(connection_id)},
+                    payload={"reason": reason, "connection_id": str(connection_id),
+                             "reason_class": cls, "deadline_at": pause.deadline_at.isoformat()},
                     anchor_every=self.anchor_every,
-                )
+                )  # fmt: skip
+                await s.execute(
+                    text(
+                        "INSERT INTO alerts (id, tenant_id, kind, connection_id, job_id, message)"
+                        " VALUES (:i, :t, 'job_paused', :c, :j, :m)"
+                    ),
+                    {"i": new_id(), "t": tenant_id, "c": connection_id, "j": job,
+                     "m": f"Job {job} paused: its connection needs re-authorization ({cls}). Unless"
+                          f" it is re-authorized, the job finishes without access at"
+                          f" {pause.deadline_at.isoformat()}."},
+                )  # fmt: skip
                 paused.append(job)
-            if jobs:
+            if jobs or changed is not None:
                 await s.execute(
                     text(
                         "INSERT INTO alerts (id, tenant_id, kind, connection_id, message) VALUES (:i, :t, 'reauth_required', :c, :m)"
@@ -1544,9 +1585,11 @@ class Pipeline:
                         "i": new_id(),
                         "t": tenant_id,
                         "c": connection_id,
-                        "m": f"Connection needs re-authorization ({reason}); {len(jobs)} job(s) paused.",
+                        "m": f"Connection needs re-authorization ({cls}); {len(jobs)} job(s) paused.",
                     },
                 )
+        if cls == "platform_credential_expired":  # OUR credential: operations, not the customer
+            log.error("platform credential refused by the source", connection_id=str(connection_id))
         for job in paused:
             await anchor_if_due(
                 self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=job
@@ -1616,10 +1659,15 @@ class Pipeline:
                     )
                 ).scalar_one()
                 counted = [u for u in units if u.kind == "conversation_day"]
+                enumerated = bool(
+                    units
+                )  # enumeration writes every unit (and the directory) at once
                 if job.stop_reason == "cancel":
                     status = JobStatus.CANCELLED
                 elif job.stop_reason == "job_failure":
                     status = JobStatus.FAILED
+                elif not enumerated:
+                    status = JobStatus.FAILED  # it never learned what to collect: never clean
                 elif any(u.status not in ("done", "failed") for u in counted):
                     status = JobStatus.FAILED  # finalize without every unit settled: never clean
                 elif any(u.status == "failed" for u in counted):
@@ -1643,6 +1691,7 @@ class Pipeline:
                         float(paused) * 1000
                     ),  # integer: custody payloads never carry floats
                     "stop_reason": job.stop_reason,
+                    **({} if enumerated else {"units_enumerated": False}),
                 }
                 # units no reconciliation or failure event settled (a cancelled or failed job):
                 # recorded too, so every unit the report states is in the chain (ADR 0018 §28)
@@ -1814,8 +1863,10 @@ async def resume_paused_jobs(
         (
             await s.execute(
                 text(
-                    "UPDATE collection_jobs SET status = 'running' WHERE connection_id = :c"
-                    " AND status = 'paused_awaiting_reauth' RETURNING id"
+                    "UPDATE collection_jobs j SET status = 'running' WHERE connection_id = :c"
+                    " AND status = 'paused_awaiting_reauth' AND NOT EXISTS (SELECT 1 FROM job_pauses p"
+                    " WHERE p.job_id = j.id AND p.resumed_at IS NULL AND p.ended_how IS NOT NULL)"
+                    " RETURNING id"
                 ),
                 {"c": connection_id},
             )
@@ -1826,7 +1877,15 @@ async def resume_paused_jobs(
     for job in jobs:
         await s.execute(
             text(
-                "UPDATE job_pauses SET resumed_at = now() WHERE job_id = :j AND resumed_at IS NULL"
+                "UPDATE job_pauses SET resumed_at = now(), ended_how = 'reauthorized', ended_by = :a"
+                " WHERE job_id = :j AND resumed_at IS NULL AND ended_how IS NULL"
+            ),
+            {"j": job, "a": actor},
+        )
+        await s.execute(
+            text(
+                "UPDATE alerts SET resolved_at = now() WHERE job_id = :j"
+                " AND kind IN ('job_paused', 'reauth_deadline_near') AND resolved_at IS NULL"
             ),
             {"j": job},
         )

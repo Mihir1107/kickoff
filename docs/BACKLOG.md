@@ -169,3 +169,8 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
   §29) once the render's whole-job reconciliation is fed per day.
 - Re-measure the preview's forced anchor per page view on the cloud VM with production S3 latencies
   (docs/runs/2026-10-12-preview-audit-burst.md; group commit is the fallback of ADR 0018 §10).
+- **[hard requirement of the Phase 3 live Slack and Teams connectors]** Implement
+  `Connector.check_credentials` (M17 step 8, ADR 0016 step-8 note 8): Slack `auth.test` with the
+  stored bot token, Microsoft a client-credentials token for the bound `tid` with the platform
+  signer (`edisc_api.client_auth.ClientSigner` must then be reachable from workers, or the signer
+  moves to a shared package). Until then `check-connections` counts their connections `unchecked`.

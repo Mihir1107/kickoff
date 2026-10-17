@@ -7,6 +7,7 @@ Every job action is a custody event in the job's stream naming the acting princi
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import uuid
 from collections.abc import AsyncIterator
@@ -25,7 +26,7 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from edisc_api import audit
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep, caller
-from edisc_api.auth import Caller
+from edisc_api.auth import Caller, require_recent_sign_in
 from edisc_api.authz import (
     ROLE_PERMISSIONS,
     TENANT,
@@ -64,9 +65,10 @@ from edisc_core.time import UtcDatetime
 from edisc_custody.log import anchor_if_due, append, verify_chain
 from edisc_db.session import tenant_tx
 from edisc_evidence.writer import EvidenceWriter
-from edisc_worker.contracts import JobInput, RunConfig, task_queue
+from edisc_worker import access_lost
+from edisc_worker.contracts import MAINTENANCE_QUEUE, JobInput, RunConfig, task_queue
 from edisc_worker.pipeline import Pipeline
-from edisc_worker.workflows import CollectionJobWorkflow
+from edisc_worker.workflows import CollectionJobWorkflow, MaintenanceWorkflow
 
 router = APIRouter(prefix="/v1")
 
@@ -687,6 +689,59 @@ async def cancel_job(
         detail=f"cancelled by {caller.actor} (request {rid})", actor=caller.actor,
     )  # fmt: skip
     await _signal(res, job_id, "cancel")
+    async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        return await _job_out(s, job_id)
+
+
+class FinishWithoutAccessIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+@router.post(
+    "/jobs/{job_id}/finish-without-access",
+    response_model=JobOut,
+    openapi_extra=perm(P.JOB_RESUME, E.CONFLICT, E.FORBIDDEN, E.NOT_FOUND, E.REAUTH_REQUIRED),
+)
+async def finish_without_access(
+    job_id: uuid.UUID, body: FinishWithoutAccessIn, caller: CallerDep, res: ResourcesDep,
+    rid: RequestIdDep,
+) -> JobOut:  # fmt: skip
+    """ADR 0016 A6: a job paused for re-authorization finishes WITHOUT waiting for its deadline:
+    every unit not yet reconciled closes ``access_lost`` with the pause's reason class (each in
+    the job's chain), then the job finalizes (``completed_with_gaps``). Decided here (the pause's
+    end and ``job_pause_ended`` in the chain, the audit with ``authenticated_at``, one
+    transaction); carried out by the maintenance worker, started at once (and by its schedule
+    after any interruption). The answer is the job as it is now: still paused, decided."""
+    async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        await _authorize_job(s, caller, P.JOB_RESUME, job_id)
+        authenticated_at = require_recent_sign_in(caller, res.settings)
+        try:
+            ended = await access_lost.decide(
+                s, tenant_id=caller.tenant_id, job_id=job_id, how="finished_without_access",
+                actor=caller.actor, reason=body.reason,
+            )  # fmt: skip
+        except access_lost.NotPausedError as exc:
+            raise conflict("the job is not paused awaiting re-authorization") from exc
+        await audit.record(
+            s, tenant_id=caller.tenant_id, actor=caller.actor,
+            event_type="job_finished_without_access",
+            payload={"job_id": str(job_id), "pause_id": ended["pause_id"],
+                     "reason_class": ended["reason_class"], "reason": body.reason,
+                     "authenticated_at": authenticated_at},
+            request_id=rid,
+        )  # fmt: skip
+    await anchor_if_due(
+        res.sessions, res.s3, res.settings, tenant_id=caller.tenant_id, stream_id=job_id
+    )
+    await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
+    # carry it out now (a run already going carries this out too); the schedule does it anyway
+    # if this start is lost
+    with contextlib.suppress(WorkflowAlreadyStartedError):
+        await res.temporal.start_workflow(
+            MaintenanceWorkflow.run, "check_reauth_deadlines", id=f"access-lost-{job_id}",
+            task_queue=MAINTENANCE_QUEUE,
+        )  # fmt: skip
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         return await _job_out(s, job_id)
 

@@ -92,12 +92,14 @@ def describe(exc: BaseException) -> str:
 
 
 def to_application_error(
-    exc: BaseException, *, error_class: ErrorClass | None = None, final: bool = False
-) -> ApplicationError:
-    """``final`` makes a retryable class non-retryable (its own attempt budget is used up)."""
+    exc: BaseException, *, error_class: ErrorClass | None = None, final: bool = False,
+    suffix: str = "",
+) -> ApplicationError:  # fmt: skip
+    """``final`` makes a retryable class non-retryable (its own attempt budget is used up);
+    ``suffix`` is appended to the text (the credentials stamp of an authentication refusal)."""
     cls = error_class or classify(exc)
     return ApplicationError(
-        describe(exc),
+        describe(exc) + suffix,
         type(exc).__name__,
         type=cls.value,
         non_retryable=final or cls in NON_RETRYABLE,

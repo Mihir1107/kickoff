@@ -153,10 +153,12 @@ async def test_security_definer_functions_are_hardened(connect: Connect) -> None
         await conn.close()
     assert {r["fn"].split("(")[0] for r in rows} == {
         "bind_external",  # the cross-tenant registry's only writer (migration 0040)
+        "connections_to_check",  # check-connections' cross-tenant list (migration 0042)
         "create_tenant",
         "due_anchor_streams",
         "jobs_missing_report",
         "oauth_install_route",  # the install relay's lookup (migration 0040)
+        "open_reauth_pauses",  # the access-lost sweep's cross-tenant list (migration 0042)
         "pending_token_refreshes",
         "sealed_jobs_without_report",
         "stale_pending_evidence",

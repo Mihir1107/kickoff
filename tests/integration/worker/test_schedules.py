@@ -12,6 +12,8 @@ from temporalio.client import Client, ScheduleActionStartWorkflow, ScheduleOverl
 from temporalio.worker import Worker
 from types_aiobotocore_s3 import S3Client
 
+from edisc_connector_dummy.connector import DummyConnector
+from edisc_connectors_base.ratelimit import RateLimiter
 from edisc_core.settings import Settings
 from edisc_worker.maintenance import SWEEPS, MaintenanceActivities, ensure_schedules
 from edisc_worker.workflows import MaintenanceWorkflow
@@ -25,6 +27,7 @@ async def test_schedules_are_idempotent_skip_overlaps_and_run(
     sweeper_sessions: Sessions,
     s3: S3Client,
     settings: Settings,
+    limiter: RateLimiter,
 ) -> None:
     prefix = f"test-{uuid.uuid4().hex[:10]}-"
     queue = f"maintenance-test-{uuid.uuid4().hex[:10]}"
@@ -41,8 +44,9 @@ async def test_schedules_are_idempotent_skip_overlaps_and_run(
             assert [json.loads(a.data) for a in action.args] == [sweep.activity]  # type: ignore[union-attr]
         # scoped to an empty tenant: the shared test DB holds deliberately tampered chains
         acts = MaintenanceActivities(
-            sweeper_sessions, app_sessions, s3, settings, tenant_id=uuid.uuid4(), temporal=temporal
-        )
+            sweeper_sessions, app_sessions, s3, settings, tenant_id=uuid.uuid4(), temporal=temporal,
+            connectors={"dummy": DummyConnector(limiter)},  # as activities_for builds it
+        )  # fmt: skip
         async with Worker(
             temporal, task_queue=queue, workflows=[MaintenanceWorkflow], activities=acts.all()
         ):
@@ -75,6 +79,8 @@ def test_every_sweep_has_a_sane_interval() -> None:
         "extend_retention",
         "check_render_routing",
         "ensure_job_reports",
+        "check_reauth_deadlines",
+        "check_connections",
     }
     # retention extension works against a 60-day floor: every 6 hours is plenty
     assert all(timedelta(minutes=1) <= s.every <= timedelta(hours=6) for s in SWEEPS)

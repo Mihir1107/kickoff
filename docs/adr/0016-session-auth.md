@@ -5,7 +5,8 @@ decisions D1, D2, D3, D5, D10, D11) and **2026-10-14** (Amendment 2: D4, D6-D9, 
 access-lost bounds, operator-only moves, Slack's terms). Implemented so far: A8 (no error path
 echoes a request value: M17 step 0) and §1-§4 with A1 (browser sessions: M17 step 2, notes at the
 end), the UI's reads (step 3) and `private_key_jwt` client authentication (step 3b, notes at the end;
-real-tenant confirmation pending); the rest is M17 steps 5-8. Builds on ADR 0013 (tenant from the
+real-tenant confirmation pending), live job streams and the download cut-off (steps 5, 5b), install
+flows (step 6) and access lost (step 8, A6; notes at the end). Step 7 (A2.10) is on hold. Builds on ADR 0013 (tenant from the
 host, OIDC, scoped roles) and decision 7 of `docs/plans/phase-2.md` (server-side sessions, httpOnly
 cookies, CSRF, revocation, no tokens in the browser). It fixes the details the frontend
 (`feat/web-ui`, `apps/web/src/api/pending.ts`) had to assume, adopting its assumptions.
@@ -1048,3 +1049,92 @@ connection, not another; plaintext and deleting a received entry refused by the 
 `m17-step6-fixes`: 16 breaks, all caught; `microsoft_admin_unchecked` (round `m17-installs`) is
 superseded by `wids_non_admin_accepted` (its old test's non-admin case has no consent, which the gate
 now refuses on its own).
+
+## Implementation notes: M17 step 8, access lost (2026-10-17)
+
+Built (plan §2.6, §8 last row; A6, A2.1, A2.2; migration 0042): the pause deadline, its alerts,
+`access_lost` closing in the chain, the audited finish-without-access action and
+`check-connections`. **Not built in this step:** the directory snapshots of plan §3.3 (left for a
+later step by the user's scope for step 8), the SSE `connection` event (a new event schema changes
+`x-sse-events`; the job snapshot already says `paused`), and the report stating HOW a pause ended
+(below, item 7). Choices:
+1. **Reason classes** (`edisc_connectors_base.types`): `AuthenticationError(reason, reason_class)`
+   carries one of `credentials_revoked`, `credentials_expired`, `consent_withdrawn`,
+   `platform_credential_expired`, derived from the provider's code when not given
+   (`auth_reason_class`: Slack `token_expired`, Entra `AADSTS...` / OAuth `error` codes; anything
+   else is a revocation). The class crosses Temporal inside the error text (`(class)`), so the
+   workflow code is unchanged (no patch): `pause_connection` reads it back (`reason_class_in`).
+   `platform_credential_expired` also logs an error line for operations (our key, not the
+   customer's).
+2. **The pause** (`job_pauses`): reason class, `deadline_at` = pause + the tenant's
+   `reauth_deadline_hours` (fixed when the pause starts; a later change of the setting applies to
+   later pauses), `warn_at` = 24 h before the deadline, or half-way when the deadline is under 48 h
+   (A2.1); `job_paused` in the chain carries the class and the deadline. One alert per job
+   (`job_paused`, naming the job and the deadline) besides the connection's `reauth_required`
+   (now also raised when the connection turns `reauth_required` with no job running, i.e. found by
+   `check-connections`). A trigger keeps a pause's identity, deadline and end final.
+3. **The tenant setting** `tenants.reauth_deadline_hours` (24..2,160, default 168; a CHECK and the
+   request model, 422 outside, never clamped): `GET /v1/tenant/settings`, `PUT
+   /v1/tenant/settings/reauth-deadline` (`tenant.admin`, a reason, audited
+   `tenant_setting_changed` with old and new). Tests on test stacks use
+   `EDISC_REAUTH_DEADLINE_OVERRIDE_SECONDS` (test/ci only, refused elsewhere, like the retention
+   override).
+4. **Ending a pause without access** (`edisc_worker.access_lost`): DECIDE in one transaction (the
+   pause's `ended_how` `deadline` / `finished_without_access`, `ended_by`, `end_reason`, and
+   `job_pause_ended` in the job's chain), then CARRY OUT: every unit not yet reconciled closes
+   `access_lost` with the class, each in its own transaction with its `unit_reconciled` event (the
+   §28 format, `collected` = what its links hold), and only after the last one the pause ends
+   (`resumed_at`), its alerts resolve (`alerts.resolved_at`) and the job's `stop_reason` becomes
+   `access_lost`; the workflow (woken by a signal, else its own poll) finalizes it
+   `completed_with_gaps` with `stop_reason` in `job_finished`. A crash anywhere leaves a decided
+   pause that the sweep (`check-reauth-deadlines`, every 5 minutes, `open_reauth_pauses`) finishes;
+   closed units are skipped. A re-authorization never resumes a decided pause's job.
+5. **Found while building: a job revoked before enumeration would have finished clean.**
+   Enumeration writes every unit at once, so a job whose credentials were refused during
+   enumeration has no unit at all; "close every remaining unit" closes nothing, and
+   `finalize_job` (every counted unit settled, none with a gap) would have said `completed`.
+   A job without any work unit now finalizes `failed` (`status_detail.units_enumerated: false`),
+   whatever stopped it. Tested.
+6. **Finish without access** (`POST /v1/jobs/{id}/finish-without-access`, `job.resume`, a reason,
+   `require_recent_sign_in` and in `test_sessions._sensitive_requests`): 409 unless the job is
+   paused with an undecided pause (decided once); the decision and `audit.job_finished_without_access`
+   (with `authenticated_at`) in one transaction, then the maintenance workflow is started at once
+   (`access-lost-<job>`, the same sweep). The answer is the job as it is then (still paused).
+7. **The report** states the closed units (each `access_lost` with its class, from the chain;
+   `units.jsonl` recomputes from the job package byte for byte, tested) and the pause as "never
+   resumed" (true). It does NOT yet state how the pause ended (deadline or the action, who, the
+   reason): that is a report model change (`job_pause_ended`), a renderer bump with new HTML/JSON
+   goldens and PDF goldens recorded in the report image: next, recorded in HANDOFF.
+8. **check-connections** (a maintenance sweep every 6 hours (the plan said daily; the sweeps are bounded at 6 h), `connections_to_check`: active connections with
+   stored tokens, least recently checked first): `Connector.check_credentials` (new in the
+   protocol: the source's cheapest authenticated call through the limiter; the dummy's `auth.test`,
+   none for exports). A refusal pauses the connection as a job would have (status, alerts);
+   success stamps `connections.credentials_checked_at`. A source no connector of the worker serves
+   is counted `unchecked` (never reported fine); any other failure is collected and fails the run
+   after the rest. **Slack and Teams have no live connector yet (Phase 3)**: their connections are
+   `unchecked` until the live connectors implement `check_credentials` (Slack `auth.test`,
+   Microsoft a client-credentials token with the platform signer).
+9. **Found by an intermittent hang of the re-authorization test: a stale refusal re-paused a
+   resumed job.** A unit activity that loaded the revoked credentials could fail AFTER the
+   connection was re-authorized and the job resumed; its `pause_for_reauth` then paused the job
+   again (and turned the connection `reauth_required` again), so the job never finished (1 hang in
+   9 runs; reconstructed from the flow, then made deterministic). Every activity now records a
+   stamp of the credentials it loaded (`credentials_stamp`: token version + configuration digest,
+   `Activities._context`); an `AuthenticationError` carries it across Temporal in its text
+   (`[credentials <stamp>]`, added by `_classified`), and `pause_for_reauth` pauses only when the
+   refused credentials are the ones in force; otherwise the unit simply runs again with the
+   current ones (a refusal of THOSE pauses: no loop). Test:
+   `test_a_refusal_of_replaced_credentials_never_pauses_the_job_again` (deterministic, through the
+   activity); the step-8 worker tests then passed 5/5 under 4-core contention. Workflow code is
+   unchanged.
+
+Tests: `tests/integration/worker/test_access_lost.py` (the deadline end to end with the report's
+`units.jsonl` recomputed from the job package, the warning once even from two racing sweeps, a crash
+while closing, re-authorization before the deadline, a job revoked before enumeration, a stale
+refusal, check-connections), `tests/integration/api/test_access_lost.py` (the setting's bounds and
+audit, deadlines and warnings from the setting, finish-without-access audited, recorded, closing the
+units, refused for a job not paused or a caller without `job.resume`, a decided pause never resumed),
+`tests/unit/connectors/test_auth_reason.py`, the action in `test_sessions._sensitive_requests`, and
+`test_workflows` (one alert per paused job besides the connection's). Round `m17-access-lost`: 20
+breaks, all caught (the first run left `warning_repeated` uncaught: the sweep's own selection already
+excludes a warned pause, so the re-check matters only for two sweeps at once; the test now races two).

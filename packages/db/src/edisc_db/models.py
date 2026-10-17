@@ -55,6 +55,7 @@ class Tenant(Base):
     subdomain: Mapped[str] = mapped_column(Text)
     kms_key_ref: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    reauth_deadline_hours: Mapped[int] = mapped_column(Integer, server_default=text("168"))
 
 
 class Client(Base):
@@ -117,6 +118,7 @@ class Connection(Base):
     token_key_version: Mapped[str | None] = mapped_column(Text)
     token_version: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
     token_updated_at: Mapped[datetime | None] = mapped_column(TZ)
+    credentials_checked_at: Mapped[datetime | None] = mapped_column(TZ)
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'"))
     status: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
@@ -440,6 +442,7 @@ class JobPause(Base):
         ForeignKeyConstraint(
             ["tenant_id", "job_id"], ["collection_jobs.tenant_id", "collection_jobs.id"]
         ),
+        Index("ix_job_pauses_open", "deadline_at", postgresql_where=text("resumed_at IS NULL")),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
@@ -449,6 +452,13 @@ class JobPause(Base):
     reason: Mapped[str] = mapped_column(Text)
     paused_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     resumed_at: Mapped[datetime | None] = mapped_column(TZ)
+    reason_class: Mapped[str | None] = mapped_column(Text)
+    deadline_at: Mapped[datetime | None] = mapped_column(TZ)
+    warn_at: Mapped[datetime | None] = mapped_column(TZ)
+    warned_at: Mapped[datetime | None] = mapped_column(TZ)
+    ended_how: Mapped[str | None] = mapped_column(Text)
+    ended_by: Mapped[str | None] = mapped_column(Text)
+    end_reason: Mapped[str | None] = mapped_column(Text)
 
 
 class Alert(Base):
@@ -463,6 +473,7 @@ class Alert(Base):
     message: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     acknowledged_at: Mapped[datetime | None] = mapped_column(TZ)
+    resolved_at: Mapped[datetime | None] = mapped_column(TZ)
 
 
 class JobItem(Base):

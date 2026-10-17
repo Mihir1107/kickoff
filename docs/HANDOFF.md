@@ -1,4 +1,4 @@
-# Handoff (2026-10-16: the fixes before step 6 (stalled readers cut, nothing pooled held, permission loss cuts downloads, CI per main commit) and M17 step 6 (source installs) built; next: step 8, real-tenant confirmation of 3b and 6 in parallel)
+# Handoff (2026-10-17: the fixes to step 6 (pending_frontend gate, Microsoft consent without wids, token journal) and M17 step 8 (access lost, check-connections) built; next: the report stating how a pause ended, directory snapshots, real-tenant confirmation)
 
 This file alone is enough to continue. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisions §1-§18, notes
@@ -7,18 +7,71 @@ design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisi
 `docs/runs/2026-10-12-m16-complete.md`. Expert guide: `docs/VERIFYING.md`. Demo: `docs/DEMO.md`.
 **M17 plan: `docs/plans/m17.md`** (every decision taken: its §12; design changes in ADR 0016
 Amendments 1 and 2; build notes for steps 2, 3 and 3b at the end of ADR 0016). Steps 0, 2, 3 and 3b
-4, 5 (SSE), 5b (download cut-off) and 6 (install flows) are built (3b approved; its confirmation
-on real Entra and Okta tenants runs in parallel, the user is setting the tenants up; step 6 has its
-own items to confirm on the real apps); step 8 is next; step 7 is on hold (legal review). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
+4, 5 (SSE), 5b (download cut-off), 6 (install flows) and 8 (access lost, without the directory
+snapshots) are built (3b approved; its confirmation on real Entra and Okta tenants runs in parallel,
+the user is setting the tenants up; step 6 has its own items to confirm on the real apps); step 7 is
+on hold (legal review). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
 
 ## Current state
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`.
-Migrations at head: **0040** (`oauth_installs`, `external_bindings`, M17 step 6). Renderer **1.3.2**, dummy connector **0.5.0**, normalizer
+Migrations at head: **0042** (0041 the token journal fix, 0042 access lost, M17 step 8). Renderer **1.3.2**, dummy connector **0.5.0**, normalizer
 **0.3.0**, report renderer **1.5.0**, preview renderer **1.0.0**. CI: run 38716016425 green on
 `5f0774e` (pool exhaustion, every job); run 38722400091 green on `4c0d513` (step 3b, every job;
 the unit job prints the real-IdP skips).
 Run 38577569420 green on `43f41b4` (step 3); run 38536427956's failure on `4a8c05f` is diagnosed
 and fixed (below).
+
+## Done: the fixes to step 6, then M17 step 8 (2026-10-17)
+**CI:** see "Current state" (the runs on the two commits of this session).
+
+**Found first: CI run 38907553613 on `8172a9a` (the HANDOFF commit) had FAILED** (the previous
+session reported step 6 green on `da6efe0`, which it was; the HANDOFF commit after it was not):
+- `api-compat`: the two D10 allow-list entries matched nothing once their base already had the
+  change, so the check failed as designed for stale entries. Fixed by fix 1 (pending entries are
+  standing records).
+- integration shard 0: `test_50k_messages_survive_sigkills...` failed the loop guard once (one
+  275 ms stall in a spawned worker, 37 % loop CPU, in a non-blocking asyncpg send). DIAGNOSED:
+  host starvation, same class as ADR 0015 §24.11; reproduced the shape locally (4 runs under
+  8-core contention, all passed, stalls of 286-317 ms at unrelated frames with 12-15 % loop CPU).
+  No product change, nothing loosened. ADR 0015 §24.18 has the data and what to check if it recurs.
+
+**Fixes to step 6 (ADR 0016 "Implementation notes: the fixes to M17 step 6"; round
+`m17-step6-fixes` 16/16; migration 0041):**
+1. **Allow-list `pending_frontend`:** an entry names EITHER the frontend commit that absorbed the
+   change OR `status: pending_frontend` + `tracking: <file>.md#<anchor>` (the file must hold
+   `<!-- pending-frontend: <anchor> -->`). The two D10 entries are converted (tracking
+   `docs/HANDOFF.md#install-routes`). `scripts/production_readiness.py` (`make
+   production-readiness`) fails while any exists: CI job `production-readiness` (red until the
+   frontend absorbs the install routes; blocks the run only on `v*` tags, `continue-on-error`
+   elsewhere) and the report image's production target `report` (its `readiness` stage; the demo
+   now builds `runtime`). **So `production-readiness` is EXPECTED red on main until the frontend
+   moves to the install routes.**
+2. **Microsoft consent without `wids`:** the gate is the consent token (client credentials for the
+   `tid`: that tid, our `appid`, application roles); `wids` when present must name an administrator
+   (else refused), when absent nothing is skipped; `admin_evidence` in the completed audit.
+   To confirm on a real tenant: `appid` in Graph app-only tokens.
+3. **Token journal:** entries deleted with their apply (refresh and install), only sealed blobs
+   (database CHECK), a received entry undeletable (trigger); an install's entry carries its
+   completion facts and the worker's reconciler (`edisc_worker.install_recovery`) finishes the
+   install exactly once (tested: two reconcilers racing plus a rerun).
+
+**M17 step 8 (ADR 0016 "Implementation notes: M17 step 8"; round `m17-access-lost` 20/20; migration
+0042):** reason classes on `AuthenticationError`; pause deadline from the tenant setting
+`reauth_deadline_hours` (24 h..90 d, default 168; `GET /v1/tenant/settings`, `PUT
+/v1/tenant/settings/reauth-deadline`), warning time, one alert per job + one warning alert, alerts
+resolved when the pause ends; `check-reauth-deadlines` (5 min) closes every unsettled unit
+`access_lost` with the class, each with its chain event, then `stop_reason = access_lost` and the
+job finalizes `completed_with_gaps`; `POST /v1/jobs/{id}/finish-without-access` (`job.resume`,
+reason, recent sign-in, audited); `check-connections` (every 6 hours, `Connector.check_credentials`).
+**Found:** a job whose credentials were refused during enumeration has no units and would have
+finished `completed`; it now fails (`units_enumerated: false`). **Found (intermittent hang, 1 in 9
+runs):** a unit activity holding the REVOKED credentials could fail after a re-authorization and
+pause the resumed job again for ever; activities now stamp the credentials they loaded and a
+refusal pauses only the credentials in force (deterministic test; 5/5 under contention).
+**Not built in step 8:** the directory snapshots (plan §3.3), the SSE `connection` event, the
+report stating HOW a pause ended (needs a report renderer bump + goldens + PDF goldens in the
+image), live Slack/Teams `check_credentials` (Phase 3 connectors; until then their connections are
+counted `unchecked`).
 
 ## Done: the fixes before step 6, then M17 step 6 (2026-10-16, second session)
 **CI:** run 38894640908 on `3665ca1` (the fixes): every job green but integration shard 2, which
@@ -314,6 +367,13 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
   the browser to `authorize_url` (only `https:` on `slack.com` / `login.microsoftonline.com`). The
   user comes back to `/clients/<c>/connections/<id>?install=ok` or `?install_error=<code>`
   (`denied`, `expired`, `replayed`, `invalid`, `mismatch`, `already_bound`, `failed`, `refused`).
+- **Access lost (step 8):** a job paused for re-authorization shows its deadline (alerts
+  `job_paused`, `reauth_deadline_near` carry it); `POST /v1/jobs/{id}/finish-without-access`
+  (`{"reason"}`, `job.resume`, a recent sign-in: 401 `reauth_required` means sign in again with
+  `reauth=1`; 409 when the job is not paused or already decided) answers the job still paused: its
+  units close in the background and it finishes `completed_with_gaps`. Tenant admins:
+  `GET /v1/tenant/settings`, `PUT /v1/tenant/settings/reauth-deadline` (`{"hours": 24..2160,
+  "reason"}`; 422 outside).
 - **422 bodies:** `ValidationErrorOut` / `UnprocessableOut` in the document (regenerate types). 429 `too_many_streams`
   above 10 open streams per user. Fallback: poll `GET /v1/jobs/{id}` and `/units`.
 - **Error codes:** every operation's `x-error-codes` in the document; `service_busy` (503) and
@@ -388,12 +448,20 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
   tenant); revocation cuts in-flight downloads; revoked tokens end as `access_lost` units.
 
 ## Next
-1. **Confirm step 3b on real tenants** (in parallel: the user is setting up the Entra ID and Okta
-   developer tenants; `make test-real-idp`; record every answer in ADR 0016 "To confirm on real
-   tenants"; Entra's `auth_time` optional claim and Okta's omitted groups claim are the likeliest
-   findings).
-2. Step 8 (directory snapshots, `check-connections`, the pause deadline
-24 h..90 d). Step 7 waits for legal review.
+1. **The report states how a pause ended** (ADR 0016 step-8 note 7): fold `job_pause_ended`
+   (`ended_how`, actor, reason, deadline) into the report's pauses section; a report renderer bump
+   (1.6.0) with new JSON/HTML goldens (`EDISC_RECORD_REPORT=1`) and PDF goldens recorded in the
+   report image (`EDISC_RECORD_REPORT_PDF=1`, by hand), the verifier's recomputation if it states
+   them; VERIFYING.md.
+2. **Directory snapshots** (plan §3.3, the rest of step 8 as planned; migration 0043 now).
+3. **Confirm step 3b and step 6 on real tenants** (in parallel: the user is setting up the Entra
+   ID and Okta developer tenants; `make test-real-idp`; record every answer in ADR 0016 "To confirm
+   on real tenants"; also: Slack PKCE, Graph app roles, the `appid` claim of an app-only Graph
+   token, `wids` no longer required).
+4. **The frontend must absorb the install routes** (pending_frontend `install-routes`): until it
+   does, CI's `production-readiness` job is red and the production report image cannot be built.
+5. Step 7 waits for legal review. Phase 3 live connectors implement `check_credentials` (Slack
+   `auth.test`, Microsoft client credentials): until then their connections are `unchecked`.
 
 ## Done: the fixes before step 7 (2026-10-12; ADR 0018 §30; mutation round `m16-pre7`, 15/15)
 1. **Collation.** Every ORDER BY reaching output bytes reviewed; migration 0035: the remaining

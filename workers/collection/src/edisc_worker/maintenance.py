@@ -7,7 +7,7 @@ overlap SKIP: a sweep still running when the next one is due is never doubled.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
@@ -27,12 +27,15 @@ from temporalio.client import (
 )
 from types_aiobotocore_s3 import S3Client
 
+from edisc_connectors_base.protocol import Connector
 from edisc_core.settings import Settings
 from edisc_custody.recovery import sweep_stale_uploads
 from edisc_custody.retention_extension import extend_retention
 from edisc_custody.sweeper import sweep_anchors
+from edisc_worker import access_lost
 from edisc_worker.contracts import MAINTENANCE_QUEUE
 from edisc_worker.install_recovery import reconcile_tokens
+from edisc_worker.pipeline import Pipeline
 from edisc_worker.render_routing import check_render_routing
 from edisc_worker.report_ops import ensure_job_reports
 from edisc_worker.workflows import MaintenanceWorkflow
@@ -52,6 +55,9 @@ SWEEPS = (
     Sweep("extend-retention", "extend_retention", timedelta(hours=6)),
     Sweep("check-render-routing", "check_render_routing", timedelta(minutes=1)),
     Sweep("ensure-job-reports", "ensure_job_reports", timedelta(minutes=5)),
+    Sweep("check-reauth-deadlines", "check_reauth_deadlines", timedelta(minutes=5)),
+    # every 6 hours (the plan said daily; sooner costs one limited call per connection)
+    Sweep("check-connections", "check_connections", timedelta(hours=6)),
 )
 
 
@@ -65,6 +71,30 @@ class MaintenanceActivities:
         None  # None (production): every tenant; set: one tenant (tests, ops)
     )
     temporal: Client | None = None  # for the render routing check (DescribeTaskQueue)
+    # the sources this worker can call (check-connections); the others are counted unchecked
+    connectors: dict[str, Connector] = field(default_factory=dict)
+
+    def _pipeline(self) -> Pipeline:
+        """For calls that never touch a source (pause, close units): any connector will do."""
+        if not self.connectors:
+            raise RuntimeError("this maintenance worker was started without a source")
+        return Pipeline(self.sessions, self.s3, self.settings, next(iter(self.connectors.values())))
+
+    @activity.defn(name="check_reauth_deadlines")
+    async def check_reauth_deadlines(self) -> dict[str, Any]:
+        result = await access_lost.check_reauth_deadlines(
+            self.sweeper_sessions, self._pipeline(), self.temporal, tenant_id=self.tenant_id
+        )
+        return {"closed_jobs": result.closed_jobs, "units_closed": result.units_closed,
+                "warned": result.warned}  # fmt: skip
+
+    @activity.defn(name="check_connections")
+    async def check_connections(self) -> dict[str, Any]:
+        result = await access_lost.check_connections(
+            self.sweeper_sessions, self._pipeline(), dict(self.connectors),
+            tenant_id=self.tenant_id,
+        )  # fmt: skip
+        return {"ok": result.ok, "revoked": result.revoked, "unchecked": result.unchecked}
 
     @activity.defn(name="check_render_routing")
     async def check_render_routing(self) -> dict[str, Any]:
@@ -145,6 +175,8 @@ class MaintenanceActivities:
             self.extend_retention,
             self.check_render_routing,
             self.ensure_job_reports,
+            self.check_reauth_deadlines,
+            self.check_connections,
         ]
 
 
