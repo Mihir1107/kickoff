@@ -14,7 +14,8 @@ on hold (legal review). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
 
 ## Current state
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`.
-Migrations at head: **0042** (0041 the token journal fix, 0042 access lost, M17 step 8). Renderer **1.3.2**, dummy connector **0.5.0**, normalizer
+Migrations at head: **0042** (0041 the token journal fix, 0042 access lost, M17 step 8). CI: run 39030431440
+green on `3d8bebc`; run 39034834091 on `59233c9` failed one test (§24.20, open; above). Renderer **1.3.2**, dummy connector **0.5.0**, normalizer
 **0.3.0**, report renderer **1.5.0**, preview renderer **1.0.0**. CI: run 38716016425 green on
 `5f0774e` (pool exhaustion, every job); run 38722400091 green on `4c0d513` (step 3b, every job;
 the unit job prints the real-IdP skips).
@@ -22,7 +23,13 @@ Run 38577569420 green on `43f41b4` (step 3); run 38536427956's failure on `4a8c0
 and fixed (below).
 
 ## Done: the fixes to step 6, then M17 step 8 (2026-10-17)
-**CI:** see "Current state" (the runs on the two commits of this session).
+**CI:** run 39030431440 on `3d8bebc` (the fixes): **success**; `production-readiness` red by
+design (non-blocking until the frontend absorbs the install routes). Run 39034834091 on `59233c9`
+(step 8): **failure** in integration shard 0 only: `test_zip64_by_entry_count` ran out of its 60 s
+settle bound. DIAGNOSED as CI runner variance (ADR 0015 §24.20: the same code took 10 s and 42.6 s
+on two earlier runs; locally 8.6 s before and after this session's changes, also right after the
+soak); NOT re-run to green and NOT fixed: it is the first item under "Next". Every other job passed
+(lint, typecheck, unit, api-compat, production-install, report-pdf, integration 1-3).
 
 **Found first: CI run 38907553613 on `8172a9a` (the HANDOFF commit) had FAILED** (the previous
 session reported step 6 green on `da6efe0`, which it was; the HANDOFF commit after it was not):
@@ -448,6 +455,9 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
   tenant); revocation cuts in-flight downloads; revoked tokens end as `access_lost` units.
 
 ## Next
+0. **`test_zip64_by_entry_count` on slow CI runners** (ADR 0015 §24.20): profile `validate_export`
+   on the 66,000-entry export and make it cheaper (or show where the runner loses the time); never
+   raise the 60 s bound to make it pass.
 1. **The report states how a pause ended** (ADR 0016 step-8 note 7): fold `job_pause_ended`
    (`ended_how`, actor, reason, deadline) into the report's pauses section; a report renderer bump
    (1.6.0) with new JSON/HTML goldens (`EDISC_RECORD_REPORT=1`) and PDF goldens recorded in the

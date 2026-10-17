@@ -1347,3 +1347,17 @@ what was done and why.
     (`test_corpus.py`, `test_collation.py`, `test_corpus_export.py`,
     `test_render_batch_boundary.py`); two runs under the same contention afterwards: worst block
     116 ms, idle. Nothing in the guard changed.
+20. **The ZIP64-by-count export test runs out of its 60 s on some CI runners (2026-10-17,
+    diagnosed as runner variance, NOT fixed: open).** CI run 39034834091 (`59233c9`) failed
+    `test_zip64_by_entry_count` in shard 0: `settled()`'s 60 s bound expired while
+    `validate_export` of the 66,000-entry export was still running its FIRST attempt, heartbeating
+    (the history: one attempt from 13:09:10 to the teardown at 13:10:12; the later "attempts" are the
+    worker shutting down). Not caused by code: the file's share of shard 0 took 10 s on `da6efe0`,
+    42.6 s on `8172a9a` (a HANDOFF-only commit: identical code), 60 s on `3d8bebc` (passed) and 63 s
+    here. Locally the test takes 8.5-8.6 s at `8172a9a` and at `59233c9` alike, and the same right
+    after the 50k soak in one session; 22-27 s under 8-core contention (it is CPU-bound). So some
+    hosted runners run this validation 4-6x slower than others, and its 60 s bound has become
+    marginal there. Not loosened (CLAUDE.md). Next: profile `validate_export` on the 66,000-entry
+    export (where its 8.6 s go: zip directory parsing, per-entry rows, range reads) and make it
+    cheaper, or show where the runner loses the time (the job's CPU steal and disk wait during the
+    test window).
