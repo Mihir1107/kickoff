@@ -53,7 +53,7 @@ echo "   schema migrated to $("${COMPOSE[@]}" exec -T postgres psql -U postgres 
 echo "   Temporal UI: http://localhost:28080   MinIO console: http://localhost:29001"
 
 bold "1b. Report image (linux/amd64: the pinned PDF toolchain) and a report worker container"
-docker buildx build --platform linux/amd64 -f deploy/report-image/Dockerfile --target report \
+docker buildx build --platform linux/amd64 -f deploy/report-image/Dockerfile --target runtime \
   -t "$REPORT_IMAGE" --load . >"$OUT/logs/report-image.log" 2>&1 \
   || { echo "report image build failed: $OUT/logs/report-image.log" >&2; exit 1; }
 TOOLCHAIN=$(docker run --rm --platform linux/amd64 --entrypoint /opt/edisc/venv/bin/python "$REPORT_IMAGE" \

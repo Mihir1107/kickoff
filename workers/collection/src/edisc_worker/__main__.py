@@ -34,12 +34,12 @@ from edisc_connectors_base.ratelimit import RateLimiter
 from edisc_core import loopblock, loopguard
 from edisc_core.logs import configure_logging, get_logger
 from edisc_core.settings import Settings
-from edisc_db.connection_tokens import reconcile_token_refreshes
 from edisc_db.session import create_engine, session_factory, warm_pool
 from edisc_evidence.s3 import s3_client
 from edisc_worker.activities import Activities
 from edisc_worker.contracts import EXPORTS_QUEUE, MAINTENANCE_QUEUE, task_queue
 from edisc_worker.exports import ExportActivities
+from edisc_worker.install_recovery import reconcile_tokens
 from edisc_worker.maintenance import MaintenanceActivities, ensure_schedules
 from edisc_worker.renders import RenderActivities, barrier_hooks
 from edisc_worker.reports import ReportActivities, report_barrier_hooks
@@ -93,10 +93,10 @@ async def activities_for(
         await warm_pool(engine)
         await warm_pool(sweeper)
         sessions = session_factory(engine)
-        result = await reconcile_token_refreshes(session_factory(sweeper), sessions)
-        log.info("token refresh journal reconciled", **result)
         limiter = RateLimiter(redis, settings.rate_limits)
         async with s3_client(settings) as s3:
+            result = await reconcile_tokens(session_factory(sweeper), sessions, s3, settings)
+            log.info("token refresh journal reconciled", **result)
             connectors = build_connectors(
                 limiter, sources, sessions=sessions, s3=s3, settings=settings, http=http
             )

@@ -42,6 +42,7 @@ make test               # unit tests
 make test-integration   # FRESH ephemeral stack (-p edisc-test, .env.test, other ports), tests, then down -v
 make test-env-up / test-integration-only / test-env-down   # keep the test stack up while iterating
                         # up/up-ci/test targets refuse below MIN_FREE_GB (15) free disk
+make production-readiness  # fails while anything refuses production (allow-list pending_frontend)
 make test-report-pdf    # report image (amd64): in-image PDF tests, PDF goldens, veraPDF, worker OOM (needs test-env-up)
 make worker / api       # Temporal worker (+ maintenance queue, sweeper schedules, exports, renders) / API
 ```
@@ -70,7 +71,11 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - The contract (M17 step 4): `docs/api/openapi.json` is generated (`make openapi`) and committed with
   every API change (a unit test and CI's `api-compat` job fail on drift); operationId = function name.
   `scripts/api_compat.py` (pinned oasdiff + our rules) fails CI on a breaking change; an intended one
-  needs `/v2` or a `docs/api/breaking-allowlist.yaml` entry (rule, operation, reason, frontend commit).
+  needs `/v2` or a `docs/api/breaking-allowlist.yaml` entry (rule, operation, reason, and EITHER the
+  frontend commit that ABSORBED it OR `status: pending_frontend` + `tracking: <file>.md#<anchor>`;
+  never a commit that does not absorb it). While any `pending_frontend` entry exists,
+  `make production-readiness` fails (CI job `production-readiness`, blocking on `v*` tags) and the
+  report image's production target (`report`) cannot be built.
   A new response enum value is not breaking (D9). Error bodies are published as sent (422:
   `ValidationErrorOut` / `UnprocessableOut`) and validated against the document at test time.
 - Job streams (M17 step 5, `edisc_api.stream`): only the models of `edisc_api.stream_events`, only
@@ -139,7 +144,11 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   reads anything else from the query. External ids come ONLY from the providers' authenticated
   answers (Slack's exchange, Microsoft's signed ID token `tid`), never the redirect, and bind
   through `bind_external` (one tenant per external id; moves only by `edisc_api.admin
-  move-binding`). Install tokens: redactor first, journal first (`install_tokens`).
+  move-binding`). Install tokens: redactor first, journal first (`install_tokens`). Microsoft:
+  the gate is the consent token (client credentials for the `tid`: that tid, our app, application
+  roles); `wids` is extra confirmation, never required, never skipping a check. The token journal
+  holds only sealed blobs (a CHECK) and is DELETED with its apply; a journaled install is finished
+  by the worker's reconciler (`edisc_worker.install_recovery`), exactly once.
 
 ## Slack exports (M14, ADR 0014)
 - Upload: `POST /v1/clients/{c}/exports` → `PUT /v1/exports/{id}/parts/{n}` (Content-Digest sha-256) →

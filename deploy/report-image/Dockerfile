@@ -10,9 +10,11 @@
 # Every one of them is part of the PDF toolchain id (`python -m edisc_worker.versions`), except the
 # installers, which take no part in rendering.
 #
-# Targets: `report` (production: the worker, the PDF child, the fonts) and `report-test` (the same
-# layers plus test tooling in a SEPARATE venv, /opt/edisc/testenv, so pytest/pypdf never enter the
-# worker's interpreter and its toolchain id; the PDF child of a test runs /opt/edisc/venv/bin/python).
+# Targets: `report` (production: the worker, the PDF child, the fonts; REFUSED while
+# scripts/production_readiness.py fails, its `readiness` stage), `runtime` (the same image without
+# that gate: the demo and local runs) and `report-test` (the runtime layers plus test tooling in a
+# SEPARATE venv, /opt/edisc/testenv, so pytest/pypdf never enter the worker's interpreter and its
+# toolchain id; the PDF child of a test runs /opt/edisc/venv/bin/python).
 
 ARG PYTHON_IMAGE=python:3.12.13-slim-bookworm@sha256:6e13e65c55e33adf203d77ee371cf8bf5d81bd4902ef07565721f46bf44917af
 
@@ -54,8 +56,18 @@ RUN UV_PROJECT_ENVIRONMENT=/opt/edisc/venv uv sync --frozen --no-dev --package e
 # the test environment (report-test only): everything plus the dev group
 RUN UV_PROJECT_ENVIRONMENT=/opt/edisc/testenv uv sync --frozen --all-packages --no-editable
 
-# ---------------------------------------------------------------- production
-FROM base AS report
+# ---------------------------------------------------------------- production readiness (build-only)
+# a production image is refused while anything refuses production (a break the frontend has not
+# absorbed: scripts/production_readiness.py); `report` copies this stage's marker, so it cannot be
+# built without it
+FROM venv AS readiness
+COPY scripts/api_compat.py scripts/production_readiness.py scripts/
+COPY docs/api/breaking-allowlist.yaml docs/api/
+RUN /opt/edisc/testenv/bin/python scripts/production_readiness.py \
+ && touch /opt/edisc/production-ready
+
+# ---------------------------------------------------------------- runtime (production layers)
+FROM base AS runtime
 COPY --from=fonts /opt/edisc/fonts /opt/edisc/fonts
 COPY deploy/report-image/fonts.conf /opt/edisc/fonts.conf
 RUN FONTCONFIG_FILE=/opt/edisc/fonts.conf fc-cache -f \
@@ -69,8 +81,12 @@ ENV FONTCONFIG_FILE=/opt/edisc/fonts.conf \
 ENTRYPOINT ["python", "-m", "edisc_worker"]
 CMD ["--reports"]
 
+# ---------------------------------------------------------------- production
+FROM runtime AS report
+COPY --from=readiness /opt/edisc/production-ready /opt/edisc/production-ready
+
 # ---------------------------------------------------------------- admission / tests
-FROM report AS report-test
+FROM runtime AS report-test
 COPY --from=fonts /opt/edisc/leak /opt/edisc/leak
 COPY --from=venv /opt/edisc/testenv /opt/edisc/testenv
 WORKDIR /src

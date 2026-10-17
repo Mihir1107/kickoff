@@ -1556,43 +1556,15 @@ class Pipeline:
     async def resume_connection(
         self, *, tenant_id: uuid.UUID, connection_id: uuid.UUID, actor: str
     ) -> list[uuid.UUID]:
-        resumed: list[uuid.UUID] = []
         async with tenant_tx(self.sessions, tenant_id) as s:
             await s.execute(
                 text("UPDATE connections SET status = 'active', updated_at = now() WHERE id = :c"),
                 {"c": connection_id},
             )
-            jobs: Sequence[uuid.UUID] = (
-                (
-                    await s.execute(
-                        text(
-                            "UPDATE collection_jobs SET status = 'running' WHERE connection_id = :c"
-                            " AND status = 'paused_awaiting_reauth' RETURNING id"
-                        ),
-                        {"c": connection_id},
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            for job in jobs:
-                await s.execute(
-                    text(
-                        "UPDATE job_pauses SET resumed_at = now() WHERE job_id = :j AND resumed_at IS NULL"
-                    ),
-                    {"j": job},
-                )
-                await append(
-                    s,
-                    tenant_id=tenant_id,
-                    stream_id=job,
-                    job_id=job,
-                    event_type="job_resumed",
-                    actor=actor,
-                    payload={"connection_id": str(connection_id)},
-                    anchor_every=self.anchor_every,
-                )
-                resumed.append(job)
+            resumed = await resume_paused_jobs(
+                s, tenant_id=tenant_id, connection_id=connection_id, actor=actor,
+                anchor_every=self.anchor_every,
+            )  # fmt: skip
         for job in resumed:
             await anchor_if_due(
                 self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=job
@@ -1830,3 +1802,42 @@ class Pipeline:
 
 async def _one(data: bytes) -> AsyncIterator[bytes]:
     yield data
+
+
+async def resume_paused_jobs(
+    s: AsyncSession, *, tenant_id: uuid.UUID, connection_id: uuid.UUID, actor: str,
+    anchor_every: int,
+) -> list[uuid.UUID]:  # fmt: skip
+    """Every job paused for re-authorization on the connection runs again (its pause closed, a
+    ``job_resumed`` event in its chain), in the caller's transaction. The caller anchors after."""
+    jobs: Sequence[uuid.UUID] = (
+        (
+            await s.execute(
+                text(
+                    "UPDATE collection_jobs SET status = 'running' WHERE connection_id = :c"
+                    " AND status = 'paused_awaiting_reauth' RETURNING id"
+                ),
+                {"c": connection_id},
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for job in jobs:
+        await s.execute(
+            text(
+                "UPDATE job_pauses SET resumed_at = now() WHERE job_id = :j AND resumed_at IS NULL"
+            ),
+            {"j": job},
+        )
+        await append(
+            s,
+            tenant_id=tenant_id,
+            stream_id=job,
+            job_id=job,
+            event_type="job_resumed",
+            actor=actor,
+            payload={"connection_id": str(connection_id)},
+            anchor_every=anchor_every,
+        )
+    return list(jobs)

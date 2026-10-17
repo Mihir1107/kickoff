@@ -305,7 +305,9 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
 - **Downloads (5b):** a download can be cut when the session ends, the permission is lost or the
   client stalls 60 s: the connection closes short of its `Content-Length`; treat it as failed
   (never save a partial file), then re-authenticate.
-- **Installs (step 6), REQUIRED before production:** the live client (`src/api/http.ts`
+- <!-- pending-frontend: install-routes -->
+  **Installs (step 6), REQUIRED before production** (allow-list `pending_frontend`, tracking
+  `docs/HANDOFF.md#install-routes`; production builds are refused until it is absorbed): the live client (`src/api/http.ts`
   `createConnection` / `reauthConnection`) calls routes that no longer exist outside
   local/test/ci. Use `POST /v1/clients/{c}/connections/slack/install` or `.../teams/consent`
   (body `{}` or `{"connection_id"}` to re-authorize; same-origin with `X-CSRF-Token`), then navigate

@@ -11,6 +11,7 @@ then gets a report whose ``units.jsonl`` is rebuilt from the job package byte fo
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -84,8 +85,10 @@ async def test_export_case(api: Api, tenant: TenantCtx, tmp_path: Path, name: st
         assert result["status"] == "completed", result
         st = await render_state(exp.sessions, tenant.tenant_id, render_id)
         files = await stored(exp.sessions, exp.s3, rs, tenant.tenant_id, render_id)
-        manifests = check_against_oracle(case, oracle, files, dict(st["row"].summary))
-        check_golden(name, manifests)
+        manifests = await asyncio.to_thread(  # pure CPU: never on the loop (ADR 0015 §24.19)
+            check_against_oracle, case, oracle, files, dict(st["row"].summary)
+        )
+        await asyncio.to_thread(check_golden, name, manifests)
         await check_package(exp.sessions, exp.s3, rs, tenant.tenant_id, render_id, tmp_path / "pkg")
         if case.spec.lone_surrogates:
             await check_job_package(

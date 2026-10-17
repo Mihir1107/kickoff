@@ -984,3 +984,67 @@ and Slack; re-authorization mismatch; the registry's privileges; no move route; 
 the reserved subdomain; the journal crash), `providers.py` (fake Slack and Microsoft on the
 production URLs), the RLS seed, `tests/unit/api/test_credential_routes.py`. Round `m17-installs`:
 16 breaks, all caught.
+
+## Implementation notes: the fixes to M17 step 6 (2026-10-17)
+
+1. **A break the frontend has not absorbed is `pending_frontend`, never a commit id.** The two D10
+   allow-list entries named `aeee68e`, a frontend commit that does NOT absorb the change (it still
+   calls both routes): the rule was satisfied while its purpose was defeated. An entry now names
+   EITHER `frontend_commit` (a commit that absorbed it) OR `status: pending_frontend` + `tracking`
+   (`<file>.md#<anchor>`; the file must hold `<!-- pending-frontend: <anchor> -->` at the
+   requirement: `docs/HANDOFF.md#install-routes`). Both forms, mixing them, another status or a
+   tracking that names nothing are refused. A pending entry is a standing record: it outlives the
+   change it allowed (the next diff no longer shows the break; an absorbed entry matching nothing
+   still fails as stale), and the compat summary lists it. **Production readiness**
+   (`scripts/production_readiness.py`, `make production-readiness`) fails while any pending entry
+   exists: the CI job `production-readiness` (red while the frontend has not caught up; it blocks
+   the run on release tags `v*`, on main and branches it is `continue-on-error` so the other results
+   stay readable) and the report image's production target, whose `readiness` stage runs the
+   check (`report` copies its marker; `runtime` is the same image without the gate, for the demo;
+   `report-test` derives from `runtime`). Found on the way: the step-6 entries had already gone
+   stale against their own merge (CI run 38907553613's api-compat failure on `8172a9a`); pending
+   entries no longer do.
+2. **Microsoft consent never depends on `wids`.** Entra emits `wids` only when the app
+   registration's optional claims ask for it. The gate is now Microsoft's admin consent itself: a
+   client-credentials token for the ID token's `tid` (our assertion), whose claims must name that
+   `tid`, OUR app (`appid`/`azp`) and at least one application role (only an administrator's
+   consent grants application permissions). No token (Entra answers `unauthorized_client` for an
+   app with no service principal there), another tenant or app, or no roles: `refused`
+   (`consent_token_refused`, `consent_token_tenant`, `consent_token_app`, `admin_consent_missing`),
+   nothing bound, the connection pending. `wids`, when present, must be a list of strings naming an
+   administrator role (`wids_malformed`, `not_tenant_admin`: a contradiction refuses even with
+   consent); when absent, nothing is skipped (the consent token is required either way) and
+   `oauth_install_completed.admin_evidence` records `consent_token` (else `consent_token+wids`).
+   Microsoft not answering stays `failed` (`exchange_unreachable`), not a refusal. To confirm on
+   the real tenant: the `appid` claim of a Graph app-only token (v1 tokens carry it).
+3. **The token journal holds a token only until it is applied** (migration 0041). An entry is
+   deleted in the transaction that applies or supersedes it (`_close_journal`: resolve, then
+   delete), for refreshes and installs; the app role may delete, a trigger refuses deleting an
+   entry still `received`, TRUNCATE stays refused (`test_app_role.DELETES_RESOLVED` is the one
+   documented exception to "the app never deletes"). Both token columns must be a sealed
+   `SecretBox` envelope (`is_sealed_secret`, a CHECK: plaintext is refused by the database); the
+   blobs are sealed with the connection's own context (tenant + connection + purpose), so the apply
+   copies them unopened. **An install's entry carries its completion facts** (`install`: install,
+   connection, principal, request, the connection's identity and grant, the audit payload; no
+   secret, `edisc_db.install_completion.InstallFacts`), and the reconciler
+   (`edisc_worker.install_recovery.reconcile_tokens`, worker start and the 10-minute schedule)
+   finishes the install in the same transaction: connection active, outcome `completed`,
+   `audit.oauth_install_completed` with `recovered: true` (actor `system:token-reconciler`, the
+   principal in the payload), a re-authorization's paused jobs resumed (`resume_paused_jobs`,
+   shared with `Pipeline.resume_connection`); a superseded entry ends the install `failed`
+   (`recovery_superseded`). Exactly once: the entry is deleted with the apply under the connection
+   row lock, so a second reconciler racing it, or a rerun, finds nothing (tested: two at once plus
+   a rerun, for a new install and a re-authorization). An install entry met without a finisher
+   raises (`UnfinishedInstallError`): never applied half. Before: the tokens were applied but the
+   connection stayed `pending` and the install had no outcome; applied entries stayed for ever.
+
+Tests: `tests/unit/api/test_api_compat.py` (pending entries), `tests/unit/test_production_readiness.py`
+(the gate, a file run, the image stages, the CI job), `tests/integration/api/test_installs.py`
+(consent with and without `wids`, without consent with and without `wids`, four consent tokens
+that prove nothing, `wids` contradicting, no journal entry after an install, the crash repaired
+exactly once for a new install and a re-authorization),
+`tests/integration/secrets/test_connection_tokens.py` (no entry survives a refresh; sealed for the
+connection, not another; plaintext and deleting a received entry refused by the database). Round
+`m17-step6-fixes`: 16 breaks, all caught; `microsoft_admin_unchecked` (round `m17-installs`) is
+superseded by `wids_non_admin_accepted` (its old test's non-admin case has no consent, which the gate
+now refuses on its own).

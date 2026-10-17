@@ -23,7 +23,7 @@ TEST_LOCK := $(or $(EDISC_TEST_STACK_LOCK),$(or $(TMPDIR),/tmp)/edisc-test-stack
 STACK_LOCK := uv run python scripts/stack_lock.py
 
 .DEFAULT_GOAL := help
-.PHONY: help hooks sync disk-guard test-env-up test-env-down up up-search up-ci down nuke ps logs migrate lint fmt typecheck test test-integration test-all worker api check test-report-pdf test-production-install test-real-idp openapi openapi-check api-compat
+.PHONY: production-readiness help hooks sync disk-guard test-env-up test-env-down up up-search up-ci down nuke ps logs migrate lint fmt typecheck test test-integration test-all worker api check test-report-pdf test-production-install test-real-idp openapi openapi-check api-compat
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -112,6 +112,9 @@ openapi-check: ## Fail when docs/api/openapi.json differs from the code (the dri
 
 api-compat: ## Breaking-change check against BASE (default origin/main): oasdiff + our rules + the allow-list
 	uv run python scripts/api_compat.py --base-ref $${BASE:-origin/main}
+
+production-readiness: ## Fail while anything refuses a production build (allow-list pending_frontend entries)
+	uv run python scripts/production_readiness.py
 
 test-real-idp: ## private_key_jwt against a real Entra/Okta developer tenant (EDISC_REAL_IDP_*: tests/real_idp)
 	uv run pytest tests/real_idp -rs -s -p no:randomly

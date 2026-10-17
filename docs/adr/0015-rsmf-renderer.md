@@ -1319,3 +1319,31 @@ what was done and why.
     run their bodies on a private loop (`_on_own_loop`; the session loop is not running during a
     sync test). Nothing in the guard changed; its five mutations in this file are still caught; a
     full unit run under 4-core contention passes.
+18. **The 50k soak stalled once on CI (2026-10-17, diagnosed: host starvation, no product
+    change).** CI run 38907553613 (`8172a9a`, a commit touching only `docs/HANDOFF.md`) failed
+    `test_50k_messages_survive_sigkills_and_a_full_restart_exactly` in shard 0 with ONE block in a
+    spawned worker: lag 261 ms when sampled, 275 ms total, 103 ms of CPU on the loop's thread
+    (37 %, over the 25 % "measured busy" rule of item 13), sampled in a NON-BLOCKING asyncpg send
+    (`selector_events.py:1075`) under `EvidenceWriter._dedup_hit`; nothing of ours ran long on
+    the loop (a dedup lookup is one short statement). The test otherwise passed (every assertion
+    of the soak). Reproduction (the test alone, all 8 cores taken by busy loops, report mode at
+    50 ms, 4 runs): 4/4 passed; two runs had a worker stall of the SAME shape at unrelated frames
+    -- 317 ms at the same non-blocking send with 47 ms of loop CPU (15 %), 286 ms in
+    `worm.list_versions` with 36 ms (12 %) -- excused because the thread was descheduled most of
+    the window. Same class as item 11: the soak runs three worker processes plus the test process
+    next to Postgres, MinIO and Temporal on a 4-vCPU runner; a stall lands on whatever frame runs,
+    and how much of it the loop's thread got decides whether it counts. Not loosened (CLAUDE.md).
+    If it recurs: compare the runner's steal/load with the stall window (the artifact has the
+    worker logs) before anything else; a CPU-bound site of ours shows up as the SAME frame across
+    runs, which neither CI nor these runs showed.
+19. **The corpus tests checked their oracle on the loop (2026-10-17, diagnosed, test bug).** A
+    full local run failed `test_live_case[externals]` once (a 259 ms block in the TEST process,
+    309 ms of loop CPU, sampled at an asyncpg send after the test's line 94) while other work
+    loaded the laptop. Report mode at 50 ms, the case alone, 3 runs under 8-core contention: every
+    run showed two blocks of 320-470 ms of loop CPU at `test_corpus.py:94`, i.e.
+    `check_against_oracle` (parsing every rendered manifest) and then `check_golden`
+    (canonicalising them), both synchronous, in the async test body; under the threshold unloaded,
+    over it under load. Fix (tests only): both run in a thread at every async call site
+    (`test_corpus.py`, `test_collation.py`, `test_corpus_export.py`,
+    `test_render_batch_boundary.py`); two runs under the same contention afterwards: worst block
+    116 ms, idle. Nothing in the guard changed.

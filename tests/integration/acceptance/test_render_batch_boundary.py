@@ -5,6 +5,7 @@ checks as the corpus (`tests/integration/corpus`)."""
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,8 @@ async def test_the_production_batch_boundary(
         [PRODUCTION_BATCH] if files == PRODUCTION_BATCH else [PRODUCTION_BATCH, 1]
     )
     out = await stored(app_sessions, s3, settings, t.tenant_id, render_id)
-    manifests = check_against_oracle(case, build(case), out, dict(st["row"].summary))
-    check_golden(f"production_batch_{files}", manifests)
+    manifests = await asyncio.to_thread(  # pure CPU: never on the loop (ADR 0015 §24.19)
+        check_against_oracle, case, build(case), out, dict(st["row"].summary)
+    )
+    await asyncio.to_thread(check_golden, f"production_batch_{files}", manifests)
     await check_package(app_sessions, s3, settings, t.tenant_id, render_id, tmp_path / "pkg")

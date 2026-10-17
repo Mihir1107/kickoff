@@ -19,7 +19,7 @@ from edisc_db.session import (
     tenant_tx,
 )
 
-from .conftest import Seeded
+from .conftest import SEALED_BYTES, Seeded
 
 
 def _fast(settings: Settings, **kw: int) -> Settings:
@@ -93,9 +93,10 @@ async def test_application_level_deadlock_shape_surfaces_as_retryable_error(
                     await inner.execute(
                         text(
                             "INSERT INTO token_refresh_journal (id, tenant_id, connection_id, based_on_version,"
-                            " encrypted_access_token, token_key_id, token_key_version) VALUES (:i, :t, :c, 0, 'x', 'k', '1')"
+                            " encrypted_access_token, token_key_id, token_key_version)"
+                            " VALUES (:i, :t, :c, 0, :b, 'k', '1')"
                         ),
-                        {"i": new_id(), "t": a.tenant_id, "c": a.connection_id},
+                        {"i": new_id(), "t": a.tenant_id, "c": a.connection_id, "b": SEALED_BYTES},
                     )
         assert is_retryable_db_error(exc.value)
     finally:

@@ -10,8 +10,10 @@ attacks the tests make:
 - **Microsoft** ``/organizations/oauth2/v2.0/token`` checks PKCE, the redirect URI and our client
   assertion (signed by the platform key, verified with our published JWKS), and answers an ID
   token SIGNED by its own key with ``tid`` = the Entra tenant the code was issued in, the nonce and
-  ``wids``; ``/<tid>/oauth2/v2.0/token`` (client credentials) answers a token whose ``roles`` are
-  what that tenant granted. ``/common/discovery/v2.0/keys`` publishes the signing key.
+  ``wids`` (only when asked for: Entra emits it only when the app registration's optional claims
+  include it); ``/<tid>/oauth2/v2.0/token`` (client credentials) answers a token (``tid``,
+  ``appid``, ``roles`` = what that tenant's administrator granted) only for a tenant that
+  consented, like Entra (no service principal there: ``unauthorized_client``). ``/common/discovery/v2.0/keys`` publishes the signing key.
 
 Every token handed out is kept in ``issued`` so tests can scan responses and logs for them.
 """
@@ -110,7 +112,7 @@ class _MsCode:
     challenge: str
     nonce: str
     tid: str
-    wids: list[str]
+    wids: object  # None: no wids claim at all
 
 
 @dataclass
@@ -122,27 +124,33 @@ class FakeMicrosoft:
     )
     codes: dict[str, _MsCode] = field(default_factory=dict)
     granted: dict[str, list[str]] = field(default_factory=dict)  # tid -> app roles granted
+    # tid -> claims that replace the consent token's own (a token of another tenant or app)
+    consent_claims: dict[str, dict[str, Any]] = field(default_factory=dict)
     issued: list[str] = field(default_factory=list)
     refusals: list[str] = field(default_factory=list)
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self._handle)
 
-    def authorize(self, url: str, *, tid: str, admin: bool = True,
-                  roles: list[str] | None = None) -> dict[str, str]:  # fmt: skip
-        """An administrator of ``tid`` consents: the query Microsoft redirects back with (it would
-        also carry ``tenant`` and ``admin_consent``, which the product must never read)."""
+    def authorize(self, url: str, *, tid: str, admin: bool | None = True,
+                  roles: list[str] | None = None, wids: object = None) -> dict[str, str]:  # fmt: skip
+        """A user of ``tid`` signs in through the consent prompt: the query Microsoft redirects
+        back with (it would also carry ``tenant`` and ``admin_consent``, which the product must
+        never read). ``admin``: True/False put an administrator / another role in ``wids``; None
+        leaves ``wids`` out (``wids`` given: exactly that claim). ``roles``: what the tenant's
+        administrator granted (None: nobody consented, no client-credentials token)."""
         parts = urllib.parse.urlsplit(url)
         assert (parts.netloc, parts.path) == (MS_HOST, "/organizations/oauth2/v2.0/authorize")
         q = dict(urllib.parse.parse_qsl(parts.query))
         assert q["client_id"] == self.client_id and q["prompt"] == "consent"
         assert q["code_challenge_method"] == "S256" and "openid" in q["scope"].split()
         code = secrets.token_urlsafe(24)
-        wids = (
-            ["62e90394-69f5-4237-9190-012177145e10"]
-            if admin
-            else ["b79fbf4d-3ef9-4689-8143-76b194e85509"]
-        )
+        if wids is None and admin is not None:
+            wids = (
+                ["62e90394-69f5-4237-9190-012177145e10"]
+                if admin
+                else ["b79fbf4d-3ef9-4689-8143-76b194e85509"]
+            )
         self.codes[code] = _MsCode(q["redirect_uri"], q["code_challenge"], q["nonce"], tid, wids)
         if roles is not None:
             self.granted[tid] = roles
@@ -192,18 +200,23 @@ class FakeMicrosoft:
                 return httpx.Response(400, json={"error": "invalid_grant"})
             id_token = jwt.encode({
                 "iss": f"https://{MS_HOST}/{grant.tid}/v2.0", "aud": self.client_id,
-                "tid": grant.tid, "nonce": grant.nonce, "wids": grant.wids, "sub": "admin-sub",
+                "tid": grant.tid, "nonce": grant.nonce, "sub": "admin-sub",
                 "iat": now, "nbf": now, "exp": now + 3600,
+                **({} if grant.wids is None else {"wids": grant.wids}),
             }, self.key, algorithm="RS256", headers={"kid": MS_KID})  # fmt: skip
             access = f"eyJ.{secrets.token_hex(8)}.sig"
             self.issued += [id_token, access]
             return httpx.Response(200, json={"id_token": id_token, "access_token": access,
                                              "token_type": "Bearer"})  # fmt: skip
         tid = path.split("/")[1]
-        if form.get("grant_type") != "client_credentials" or tid not in self.granted:
+        if form.get("grant_type") != "client_credentials":
             return httpx.Response(400, json={"error": "invalid_grant"})
+        if tid not in self.granted:  # no consent in that tenant: no service principal there
+            return httpx.Response(400, json={"error": "unauthorized_client"})
+        claims = {"tid": tid, "appid": self.client_id, "roles": self.granted[tid],
+                  "aud": "https://graph.microsoft.com"} | self.consent_claims.get(tid, {})  # fmt: skip
         body = base64.urlsafe_b64encode(json.dumps(
-            {"tid": tid, "roles": self.granted[tid], "aud": "https://graph.microsoft.com"}
+            {k: v for k, v in claims.items() if v is not None}
         ).encode()).rstrip(b"=").decode()  # fmt: skip
         token = f"eyJhbGciOiJSUzI1NiJ9.{body}.c2ln"
         self.issued.append(token)

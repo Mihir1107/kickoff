@@ -9,6 +9,7 @@ would be, whatever the redirect's query says.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import re
 import urllib.parse
@@ -49,6 +50,7 @@ async def _providers(api: Api) -> None:
     FAKE_MICROSOFT.codes.clear()
     FAKE_MICROSOFT.issued.clear()
     FAKE_MICROSOFT.refusals.clear()
+    FAKE_MICROSOFT.consent_claims.clear()
     FAKE_MICROSOFT.client_jwks = await api.resources.signer.jwks()
 
 
@@ -174,6 +176,91 @@ async def test_teams_binds_the_signed_id_tokens_tid_and_records_a_partial_grant(
     for token in FAKE_MICROSOFT.issued:
         assert token not in logs.getvalue()
         assert token not in repr(await _audits(api, tenant, "audit."))
+
+
+# ------------------------------------------------------------------ the Microsoft consent gate
+async def _completed(api: Api, t: TenantCtx) -> dict[str, Any]:
+    found = [a.payload for a in await _audits(api, t) if a.event_type.endswith("_completed")]
+    assert len(found) == 1, found
+    return dict(found[0])
+
+
+async def _refused(api: Api, t: TenantCtx, target: str, started: dict[str, Any], tid: str,
+                   detail: str) -> None:  # fmt: skip
+    """Refused with ``detail``: nothing bound, the connection still pending, audited."""
+    assert target.endswith("install_error=refused"), target
+    row = await _connection(api, t, started["connection_id"])
+    assert row.status == "pending" and not row.external_org_id  # a pending row: no identity
+    assert ("microsoft_tenant", tid) not in await _bindings(api)
+    outcomes = [a.payload for a in await _audits(api, t) if a.event_type.endswith("_refused")]
+    assert [o["detail"] for o in outcomes] == [detail], outcomes
+
+
+@pytest.mark.parametrize("wids", ["admin", "absent"])
+async def test_teams_consent_is_proven_by_the_consent_token_with_or_without_wids(
+    api: Api, tenant: TenantCtx, wids: str
+) -> None:
+    """The gate is Microsoft's admin consent (a client-credentials token for the tid, issued to our
+    app, carrying the granted roles); wids is extra confirmation, never a requirement."""
+    tid = str(uuid.uuid4())
+    admin = True if wids == "admin" else None
+    target, started = await install(api, tenant, "microsoft", tid=tid, admin=admin,
+                                    roles=["ChannelMessage.Read.All"])  # fmt: skip
+    assert target.endswith("?install=ok"), target
+    assert (await _bindings(api))[("microsoft_tenant", tid)] == tenant.tenant_id
+    evidence = await _completed(api, tenant)
+    assert evidence["admin_evidence"] == (
+        "consent_token+wids" if wids == "admin" else "consent_token"
+    )
+
+
+@pytest.mark.parametrize("wids", ["admin", "absent"])
+async def test_teams_without_admin_consent_is_refused_with_or_without_wids(
+    api: Api, tenant: TenantCtx, wids: str
+) -> None:
+    """No consent in the tenant (Microsoft issues no client-credentials token): refused, even
+    when the ID token's wids names a Global Administrator; the missing wids skips nothing."""
+    tid = str(uuid.uuid4())
+    target, started = await install(api, tenant, "microsoft", tid=tid,
+                                    admin=True if wids == "admin" else None, roles=None)  # fmt: skip
+    await _refused(api, tenant, target, started, tid, "consent_token_refused")
+
+
+@pytest.mark.parametrize(
+    ("claims", "roles", "detail"),
+    [
+        ({}, [], "admin_consent_missing"),  # a token, but nothing granted
+        ({"roles": None}, ["Chat.Read.All"], "admin_consent_missing"),  # no roles claim
+        (
+            {"tid": "00000000-0000-0000-0000-000000000001"},
+            ["Chat.Read.All"],
+            "consent_token_tenant",
+        ),
+        ({"appid": "another-app"}, ["Chat.Read.All"], "consent_token_app"),
+    ],
+)
+async def test_a_consent_token_that_does_not_prove_consent_is_refused(
+    api: Api, tenant: TenantCtx, claims: dict[str, Any], roles: list[str], detail: str
+) -> None:
+    tid = str(uuid.uuid4())
+    FAKE_MICROSOFT.consent_claims[tid] = claims
+    target, started = await install(api, tenant, "microsoft", tid=tid, admin=None, roles=roles)
+    await _refused(api, tenant, target, started, tid, detail)
+
+
+@pytest.mark.parametrize(
+    ("wids", "detail"),
+    [(["b79fbf4d-3ef9-4689-8143-76b194e85509"], "not_tenant_admin"),
+     ("62e90394-69f5-4237-9190-012177145e10", "wids_malformed"), ([7], "wids_malformed")],
+)  # fmt: skip
+async def test_wids_when_present_must_confirm_an_administrator(
+    api: Api, tenant: TenantCtx, wids: object, detail: str
+) -> None:
+    """Consent granted, but the ID token's wids contradicts an administrator: refused."""
+    tid = str(uuid.uuid4())
+    target, started = await install(api, tenant, "microsoft", tid=tid, wids=wids,
+                                    roles=["ChannelMessage.Read.All"])  # fmt: skip
+    await _refused(api, tenant, target, started, tid, detail)
 
 
 # ------------------------------------------------------------------ A3: relay, redirects, state
@@ -510,32 +597,84 @@ async def test_the_relay_subdomain_is_never_a_tenant(api: Api) -> None:
                              admin_subject="s", admin_name="n", operator="tests")  # fmt: skip
 
 
-async def test_a_crash_after_the_journal_never_loses_the_installed_token(
-    api: Api, tenant: TenantCtx, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Plan §2.5: the tokens are journaled (encrypted) before anything else; a crash then is
-    repaired by ``reconcile_token_refreshes`` at worker start."""
-    from edisc_db import connection_tokens
+async def _journal(api: Api, t: TenantCtx) -> int:
+    async with tenant_tx(api.sessions, t.tenant_id) as s:
+        return int(
+            (await s.execute(text("SELECT count(*) FROM token_refresh_journal"))).scalar_one()
+        )
+
+
+async def _reconcile(api: Api) -> dict[str, int]:
+    """What a worker does at start (and on its schedule): its own sweeper engine."""
     from edisc_db.session import create_engine, session_factory
+    from edisc_worker.install_recovery import reconcile_tokens
+
+    sweeper = create_engine(api.settings, "sweeper")
+    try:
+        return await reconcile_tokens(
+            session_factory(sweeper), api.sessions, api.resources.s3, api.settings
+        )
+    finally:
+        await sweeper.dispose()
+
+
+async def test_no_journal_entry_survives_an_install(api: Api, tenant: TenantCtx) -> None:
+    """Plan §2.5: the tokens are journaled sealed before anything else, then the entry is deleted
+    in the transaction that applies them: a completed install leaves no copy behind."""
+    target, _ = await install(api, tenant, "slack", team=_team())
+    assert target.endswith("?install=ok") and await _journal(api, tenant) == 0
+
+
+@pytest.mark.parametrize("reauth", [False, True])
+async def test_a_crash_after_the_journal_is_repaired_exactly_once(
+    api: Api, tenant: TenantCtx, monkeypatch: pytest.MonkeyPatch, reauth: bool
+) -> None:
+    """A crash after the install's tokens were journaled and before they were applied: the
+    reconciler applies them AND completes the install (connection active, outcome, audit) exactly
+    once: two reconcilers racing and a rerun change nothing more; the journal is empty afterwards.
+    A re-authorization bumps the existing connection's token version by exactly one."""
+    from edisc_db import connection_tokens
+
+    team = _team()
+    browser = await _signed_in(api, tenant)
+    connection_id: str | None = None
+    if reauth:
+        _, first = await install(api, tenant, "slack", browser=browser, team=team)
+        connection_id = first["connection_id"]
+    before = (await _connection(api, tenant, connection_id)).token_version if reauth else 0
 
     async def crash() -> None:
         raise RuntimeError("crash point: after the journal, before the apply")
 
     monkeypatch.setattr(connection_tokens, "_before_apply_hook", crash)
-    browser, started = await start(api, tenant, "slack")
-    hop = await relay(api, "slack", FAKE_SLACK.authorize(started["authorize_url"], team=_team()))
+    browser, started = await start(api, tenant, "slack", browser, connection_id)
+    hop = await relay(api, "slack", FAKE_SLACK.authorize(started["authorize_url"], team=team))
     parts = urllib.parse.urlsplit(hop.headers["location"])
     r = await call(api, tenant, browser, "GET", f"{parts.path}?{parts.query}", site="cross-site")
     assert r.status_code == 500 and FAKE_SLACK.issued[-1] not in r.text
     monkeypatch.undo()
-    sweeper = create_engine(api.settings, "sweeper")
-    try:
-        done = await connection_tokens.reconcile_token_refreshes(
-            session_factory(sweeper), api.sessions
-        )
-    finally:
-        await sweeper.dispose()
-    assert done["applied"] >= 1
+    cid = started["connection_id"]
+    assert await _journal(api, tenant) == 1
+    assert (await _connection(api, tenant, cid)).token_version == before  # not applied
+
+    first, second = await asyncio.gather(_reconcile(api), _reconcile(api))
+    again = await _reconcile(api)
+    assert first["installs"] + second["installs"] == 1 and again["installs"] == 0
+    assert first["applied"] + second["applied"] == 1 and again["applied"] == 0
+    assert await _journal(api, tenant) == 0
+
+    row = await _connection(api, tenant, cid)
+    assert (row.external_org_id, row.status, row.token_version) == (team, "active", before + 1)
     stored = await load_tokens(api.sessions, api.resources.box, tenant_id=tenant.tenant_id,
-                               connection_id=uuid.UUID(started["connection_id"]))  # fmt: skip
+                               connection_id=uuid.UUID(cid))  # fmt: skip
     assert stored.access_token.get_secret_value() == FAKE_SLACK.issued[-1]
+    completed = [a.payload for a in await _audits(api, tenant)
+                 if a.event_type == "audit.oauth_install_completed"]  # fmt: skip
+    recovered = [p for p in completed if p.get("recovered")]
+    assert len(recovered) == 1 and recovered[0]["external_id"] == team
+    assert FAKE_SLACK.issued[-1] not in repr(completed)
+    async with tenant_tx(api.sessions, tenant.tenant_id) as s:
+        outcomes = (await s.execute(text(
+            "SELECT outcome FROM oauth_installs WHERE connection_id = :c ORDER BY started_at"),
+            {"c": uuid.UUID(cid)})).scalars().all()  # fmt: skip
+    assert outcomes[-1] == "completed"

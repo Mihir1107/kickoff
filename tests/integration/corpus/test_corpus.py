@@ -4,6 +4,7 @@ through the render steps, check against the oracle, the structural EML checks, a
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from datetime import UTC, datetime
@@ -91,7 +92,9 @@ async def test_live_case(
     assert result["status"] == "completed", result
     st = await render_state(app_sessions, t.tenant_id, render_id)
     files = await stored(app_sessions, s3, rs, t.tenant_id, render_id)
-    manifests = check_against_oracle(case, oracle, files, dict(st["row"].summary))
+    manifests = await asyncio.to_thread(  # pure CPU: never on the loop (ADR 0015 §24.19)
+        check_against_oracle, case, oracle, files, dict(st["row"].summary)
+    )
     if case.expect_files is not None:  # the batch boundary: ceil(files / B) batch events
         batches = st["types"].count("render_files_batch")
         assert batches == -(-case.expect_files // case.batch_size)
@@ -110,7 +113,7 @@ async def test_live_case(
     }
     assert set(natives) == referenced
     assert all(hashlib.sha256(data).hexdigest() == sha for sha, data in natives.items())
-    check_golden(name, manifests)
+    await asyncio.to_thread(check_golden, name, manifests)
     await check_package(app_sessions, s3, rs, t.tenant_id, render_id, tmp_path / "pkg")
     if case.spec.lone_surrogates:
         await check_job_package(app_sessions, s3, rs, t.tenant_id, job_id, tmp_path / "job")

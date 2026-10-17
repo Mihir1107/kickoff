@@ -11,6 +11,7 @@ import uuid
 from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import SecretStr
@@ -435,7 +436,7 @@ async def test_crash_after_provider_rotation_is_recovered_from_the_journal(
             .scalars()
             .all()
         )
-    assert states == ["applied"]
+    assert states == []  # applied, then deleted with the apply: no copy of the token remains
 
 
 async def test_stale_journal_entry_is_superseded_not_applied(
@@ -482,7 +483,7 @@ async def test_stale_journal_entry_is_superseded_not_applied(
             .scalars()
             .all()
         )
-    assert states == ["superseded"]
+    assert states == []  # superseded: deleted too
 
 
 async def test_app_role_cannot_list_pending_refreshes(connect: Connect) -> None:
@@ -492,5 +493,85 @@ async def test_app_role_cannot_list_pending_refreshes(connect: Connect) -> None:
     try:
         with pytest.raises(asyncpg.InsufficientPrivilegeError):
             await app.fetch("SELECT * FROM pending_token_refreshes(10)")
+    finally:
+        await app.close()
+
+
+async def test_no_journal_entry_survives_its_apply_and_none_holds_plaintext(
+    app_sessions: Sessions, box: SecretBox, kms: LocalKmsClient, connect: Connect
+) -> None:
+    """A refresh journals the provider's answer sealed under the connection's OWN context (tenant +
+    connection + purpose) and deletes it in the transaction that applies it; the database refuses
+    an entry that is not a sealed envelope, and refuses to delete one not yet applied."""
+    import asyncpg
+
+    from edisc_core.envelope import DecryptionError, SecretContext, SecretPurpose
+
+    t = await new_tenant(app_sessions, kms)
+    c = await new_connection(app_sessions, t)
+    other = await new_connection(app_sessions, t)
+    await store_tokens(
+        app_sessions, box, tenant_id=t, connection_id=c, tokens=tokens("g1"), expected_version=0
+    )
+    seen: list[bytes] = []
+    issued = tokens("g2")
+
+    async def provider(_: TokenSet) -> TokenSet:
+        return issued
+
+    import edisc_db.connection_tokens as ct
+
+    original = ct._close_journal
+
+    async def peek(session: Any, journal_id: Any, state: str) -> None:  # the entry, just before
+        row = (await session.execute(text(
+            "SELECT encrypted_access_token FROM token_refresh_journal WHERE id = :i"),
+            {"i": journal_id})).one()  # fmt: skip
+        seen.append(bytes(row.encrypted_access_token))
+        await original(session, journal_id, state)
+
+    ct._close_journal = peek  # type: ignore[assignment]
+    try:
+        await refresh_tokens(app_sessions, box, tenant_id=t, connection_id=c, refresher=provider)
+    finally:
+        ct._close_journal = original  # type: ignore[assignment]
+    assert len(seen) == 1
+    plaintext = issued.access_token.get_secret_value()
+    assert plaintext.encode() not in seen[0]
+    opened = await box.open(seen[0], context=SecretContext(
+        tenant_id=t, connection_id=c, purpose=SecretPurpose.CONNECTION_ACCESS_TOKEN))  # fmt: skip
+    assert opened.get_secret_value() == plaintext
+    with pytest.raises(DecryptionError):  # sealed for c, bound to c
+        await box.open(seen[0], context=SecretContext(
+            tenant_id=t, connection_id=other, purpose=SecretPurpose.CONNECTION_ACCESS_TOKEN))  # fmt: skip
+    async with tenant_tx(app_sessions, t) as s:
+        left = (await s.execute(text("SELECT count(*) FROM token_refresh_journal"))).scalar_one()
+    assert left == 0
+
+    app = await connect("app")
+    try:
+        async with app.transaction():
+            await app.execute("SELECT set_config('app.tenant_id', $1, true)", str(t))
+            with pytest.raises(asyncpg.CheckViolationError):  # plaintext is refused
+                await app.execute(
+                    "INSERT INTO token_refresh_journal (id, tenant_id, connection_id,"
+                    " based_on_version, encrypted_access_token, token_key_id, token_key_version)"
+                    " VALUES (gen_random_uuid(), $1, $2, 1, $3, 'k', '1')",
+                    t, c, plaintext.encode(),
+                )  # fmt: skip
+        probe = app.transaction()  # rolled back: the probe entry never stays
+        await probe.start()
+        try:
+            await app.execute("SELECT set_config('app.tenant_id', $1, true)", str(t))
+            journal = await app.fetchval(
+                "INSERT INTO token_refresh_journal (id, tenant_id, connection_id,"
+                " based_on_version, encrypted_access_token, token_key_id, token_key_version)"
+                " VALUES (gen_random_uuid(), $1, $2, 1, $3, 'k', '1') RETURNING id",
+                t, c, seen[0],
+            )  # fmt: skip
+            with pytest.raises(asyncpg.PostgresError, match="received entry is never deleted"):
+                await app.execute("DELETE FROM token_refresh_journal WHERE id = $1", journal)
+        finally:
+            await probe.rollback()
     finally:
         await app.close()

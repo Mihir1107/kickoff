@@ -25,7 +25,6 @@
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import datetime
 from typing import Any
@@ -56,6 +55,7 @@ from edisc_api.sessions import (
 from edisc_core.ids import new_id
 from edisc_core.logs import get_logger
 from edisc_db.connection_tokens import TokenSet, install_tokens
+from edisc_db.install_completion import InstallFacts, complete_install
 from edisc_db.session import tenant_tx
 
 log = get_logger(__name__)
@@ -411,28 +411,30 @@ class _Install:
         payload = {**self.base, "external_id": grant.external_id,
                    "enterprise_id": grant.enterprise_id, "granted_scopes": list(grant.scopes),
                    "blind_spots": list(grant.blind_spots), "token_type": grant.token_type,
+                   "admin_evidence": grant.admin_evidence,
                    "authenticated_at": self.actor.authenticated_at.isoformat()
                    if self.actor is not None and self.actor.authenticated_at else None}  # fmt: skip
 
+        facts = InstallFacts(
+            r.id, r.connection_id, r.principal_id, self.rid, bool(r.reauth), grant.external_id,
+            tuple(grant.scopes), tuple(grant.blind_spots),
+            {"enterprise_id": grant.enterprise_id} if grant.enterprise_id else {},
+            {**payload, "token_version": None},
+        )  # fmt: skip
+
         async def finish_install(s: AsyncSession) -> None:
-            config = {"enterprise_id": grant.enterprise_id} if grant.enterprise_id else {}
-            await s.execute(text(
-                "UPDATE connections SET external_org_id = :x, granted_scopes = :sc,"
-                " blind_spots = :b, config = config || CAST(:cfg AS jsonb), status = 'active',"
-                " updated_at = now() WHERE id = :i"),
-                {"x": grant.external_id, "sc": list(grant.scopes), "b": list(grant.blind_spots),
-                 "cfg": json.dumps(config), "i": r.connection_id})  # fmt: skip
-            await self._outcome(s, "completed", None, grant.external_id)
+            await complete_install(s, facts)
             await audit.record(s, tenant_id=self.tenant_id, actor=f"user:{r.principal_id}",
-                               event_type="oauth_install_completed",
-                               payload={**payload, "token_version": None}, request_id=self.rid)  # fmt: skip
+                               event_type="oauth_install_completed", payload=facts.audit,
+                               request_id=self.rid)  # fmt: skip
 
         if grant.access_token is not None:  # Slack: tokens journaled first, then applied
             await install_tokens(
                 res.sessions, res.box, tenant_id=self.tenant_id, connection_id=r.connection_id,
                 tokens=TokenSet(grant.access_token, grant.refresh_token, grant.expires_at,
                                 conn.token_version),
-                expected_version=conn.token_version, with_tokens=finish_install,
+                expected_version=conn.token_version, install=facts.as_journal(),
+                with_tokens=finish_install,
             )  # fmt: skip
         else:  # Microsoft: no token is stored (client credentials on demand)
             async with tenant_tx(res.sessions, self.tenant_id) as s:

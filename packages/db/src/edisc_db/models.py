@@ -417,6 +417,7 @@ class TokenRefreshJournal(Base):
     state: Mapped[str] = mapped_column(Text, server_default=text("'received'"))
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     resolved_at: Mapped[datetime | None] = mapped_column(TZ)
+    install: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
 
 class ItemDerivation(Base):

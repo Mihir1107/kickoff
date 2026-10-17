@@ -14,10 +14,15 @@ A2, A3, A4).
 - **Microsoft** (A4): consent through the OIDC authorization-code endpoint (``prompt=consent``,
   our app's ``.default`` scope, ``openid``, PKCE, nonce); the Entra tenant bound is the ``tid`` of
   the SIGNED ID token (Microsoft's keys, issuer ``https://login.microsoftonline.com/<tid>/v2.0``,
-  audience, nonce), and the user must be an administrator of it (``wids``). The redirect's
-  ``tenant`` and ``admin_consent`` are never read. The granted application permissions are the
-  ``roles`` of a client-credentials token for that ``tid`` (our client assertion), fetched over
-  TLS from Microsoft's token endpoint; no Graph token is stored.
+  audience, nonce). The redirect's ``tenant`` and ``admin_consent`` are never read. **The gate is
+  Microsoft's admin consent, shown by a client-credentials token for that ``tid``** (our client
+  assertion, over TLS from Microsoft's token endpoint) issued to OUR app in THAT tenant and
+  carrying application roles: only a tenant administrator's consent grants application
+  permissions, so a token without them means no consent and the install is refused. ``wids`` in
+  the ID token is NOT required (Entra emits it only when the app registration asks for it): when
+  present it must name an administrator role (a contradiction refuses), when absent the install
+  records that the consent token alone proved it (``admin_evidence``); either way the consent
+  token is always required. No Graph token is stored.
 """
 
 from __future__ import annotations
@@ -179,6 +184,9 @@ class Grant:
     refresh_token: SecretStr | None
     expires_at: datetime | None
     token_type: str | None
+    # Microsoft: what showed tenant-wide admin consent: "consent_token" (the client-credentials
+    # token's roles), "consent_token+wids" (and an administrator role in the ID token's wids)
+    admin_evidence: str | None = None
 
 
 async def slack_exchange(
@@ -275,20 +283,51 @@ async def microsoft_exchange(
         raise InstallError("failed", "exchange_no_id_token")
     claims = await _verify_id_token(settings, jwks, token, client_id=client_id, nonce=nonce)
     tid = claims["tid"]
-    roles = claims.get("wids")
-    if not isinstance(roles, list) or not ADMIN_ROLES & {r for r in roles if isinstance(r, str)}:
-        raise InstallError("refused", "not_tenant_admin")
-    # the granted application permissions: a client-credentials token for THAT tid
-    tenant_token = f"{MS_LOGIN}/{tid}/oauth2/v2.0/token"
-    granted_body = await _ms_token(http, limiter, tenant_id, tenant_token, {
-        "grant_type": "client_credentials", "client_id": client_id, "scope": GRAPH_DEFAULT,
-        **await signer.form(client_id=client_id, audience=tenant_token),
-    })  # fmt: skip
-    granted = teams_permissions.granted(
-        _unverified_claims(granted_body.get("access_token")).get("roles")
-    )
+    evidence = "consent_token"
+    if "wids" in claims:  # extra confirmation when Entra emits it; never required, never skipped
+        wids = claims["wids"]
+        if not isinstance(wids, list) or not all(isinstance(r, str) for r in wids):
+            raise InstallError("refused", "wids_malformed")
+        if not ADMIN_ROLES & set(wids):
+            raise InstallError("refused", "not_tenant_admin")
+        evidence = "consent_token+wids"
+    # THE GATE: Microsoft's admin consent, shown by a client-credentials token for THAT tid
+    granted = await _consented_roles(http, limiter, signer, tenant_id=tenant_id,
+                                     client_id=client_id, tid=tid)  # fmt: skip
     return Grant(tid, None, granted, teams_permissions.blind_spots(granted), None, None, None,
-                 "client_credentials")  # fmt: skip
+                 "client_credentials", evidence)  # fmt: skip
+
+
+async def _consented_roles(
+    http: httpx.AsyncClient, limiter: RateLimiter, signer: ClientSigner, *, tenant_id: uuid.UUID,
+    client_id: str, tid: str,
+) -> tuple[str, ...]:  # fmt: skip
+    """The application permissions a tenant administrator of ``tid`` granted OUR app. Microsoft
+    issues a client-credentials token only to an app with a service principal in that tenant, and
+    puts application roles in it only once an administrator consented: no token, a token for
+    another tenant or app, or a token without any of our roles = no admin consent (refused)."""
+    tenant_token = f"{MS_LOGIN}/{tid}/oauth2/v2.0/token"
+    try:
+        body = await _ms_token(http, limiter, tenant_id, tenant_token, {
+            "grant_type": "client_credentials", "client_id": client_id, "scope": GRAPH_DEFAULT,
+            **await signer.form(client_id=client_id, audience=tenant_token),
+        })  # fmt: skip
+    except InstallError as exc:
+        if exc.detail == "exchange_unreachable":
+            raise  # Microsoft did not answer: a failure to retry, not a refusal
+        raise InstallError("refused", "consent_token_refused") from exc
+    claims = _unverified_claims(body.get("access_token"))
+    if claims.get("tid") != tid:
+        raise InstallError("refused", "consent_token_tenant")
+    if (claims.get("appid") or claims.get("azp")) != client_id:
+        raise InstallError("refused", "consent_token_app")
+    roles = claims.get("roles")
+    if not isinstance(roles, list) or not all(isinstance(r, str) for r in roles):
+        raise InstallError("refused", "admin_consent_missing")
+    granted = teams_permissions.granted(roles)
+    if not granted:
+        raise InstallError("refused", "admin_consent_missing")
+    return granted
 
 
 async def _verify_id_token(settings: Settings, jwks: JwksCache, token: str, *, client_id: str,

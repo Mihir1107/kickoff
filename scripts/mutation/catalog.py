@@ -101,6 +101,12 @@ Rounds (ADR 0015):
   single-use state (tenant, principal, nonce, expiry), the install cookie and session row, external
   ids only from the providers' authenticated answers, the cross-tenant registry, re-authorization
   to the same workspace, tokens journaled first, D10, the reserved relay subdomain.
+- ``m17-step6-fixes``: the fixes to M17 step 6: an allow-list break the frontend has not absorbed
+  is ``pending_frontend`` with a tracking reference (never a commit id) and refuses production (the
+  readiness check, CI, the production image); Microsoft consent is proven by the consent token (a
+  client-credentials token for the tid, our app, granted roles) whether or not ``wids`` is present;
+  the token journal deletes an entry with its apply, holds only sealed blobs, and finishes a
+  journaled install exactly once.
 - ``m17-host-cookie``: the session cookie is host-only (``__Host-``, no ``Domain``) and a same-site
   request from a neighbouring subdomain is refused, both in real browsers (ADR 0016 §2).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
@@ -1493,10 +1499,10 @@ CATALOG: list[Mutation] = [
       '        if "default" in old and old.get("default") != cur.get("default"):',
       "        if False:", UAC, "default_changed"),
     m("allowlist_reason_optional", "m17-openapi", ACS,
-      'for k in ("rule", "operation", "reason", "frontend_commit")',
-      'for k in ("rule", "operation", "frontend_commit")', UAC, "all_four_fields"),
+      'for k in ("rule", "operation", "reason", *absorbed)',
+      'for k in ("rule", "operation", *absorbed)', UAC, "all_four_fields"),
     m("allowlist_commit_unchecked", "m17-openapi", ACS,
-      '        if not COMMIT.match(e["frontend_commit"]):', "        if False:", UAC, "commit_id"),
+      '        elif not COMMIT.match(e["frontend_commit"]):', "        elif False:", UAC, "commit_id"),
     m("allowlist_stale_entry_ok", "m17-openapi", ACS,
       "        return not self.breaking and not self.unused", "        return not self.breaking",
       UAC, "matching_nothing or another_operation"),
@@ -1627,8 +1633,8 @@ CATALOG: list[Mutation] = [
       '                "msg": _message(e),\n', '                "msg": _message(e),\n                "input": "x",\n',
       TEB, "published_document"),
     m("allowlist_operations_any_match", "m17-stream-fixes", ACS,
-      "        e for i, e in enumerate(allowlist) if any((i, op) not in used for op in _operations(e))",
-      "        e for i, e in enumerate(allowlist) if all((i, op) not in used for op in _operations(e))",
+      "        if not is_pending(e) and any((i, op) not in used for op in _operations(e))",
+      "        if not is_pending(e) and all((i, op) not in used for op in _operations(e))",
       UAC, "list_operations"),
     # ------------------------------------------------------------------ download cut-off (M17 5b)
     m("download_never_rechecked", "m17-cutoff", DLS,
@@ -1737,9 +1743,7 @@ CATALOG: list[Mutation] = [
     m("install_permission_unchecked", "m17-installs", INR,
       '            await authorize(s, actor, P.CONNECTION_MANAGE, Scope("client", row.client_id))\n',
       "            pass\n", TIN, "lost_permission"),
-    m("microsoft_admin_unchecked", "m17-installs", INS,
-      "    if not isinstance(roles, list) or not ADMIN_ROLES & {r for r in roles if isinstance(r, str)}:\n",
-      "    if False:\n", TIN, "microsoft_cross_customer"),
+    # microsoft_admin_unchecked: superseded by m17-step6-fixes wids_non_admin_accepted (consent is the gate)
     m("microsoft_tid_from_query", "m17-installs", INR, "    return await install.complete(grant)\n",
       "    if request.query_params.get('tenant'):\n"
       "        import dataclasses as _dc\n"
@@ -1835,4 +1839,59 @@ CATALOG: list[Mutation] = [
       '            "ix_collection_jobs_tenant_created",\n            "tenant_id",\n            text("created_at DESC"),\n            text("id DESC"),\n',
       '            "ix_collection_jobs_tenant_created",\n            "tenant_id",\n            text("created_at DESC"),\n', MIG,
       "drift"),
+    # ------------------------------------------------------------------ m17-step6-fixes
+    m("pending_entry_ready", "m17-step6-fixes", "scripts/production_readiness.py",
+      "        for e in api_compat.pending_frontend(entries)\n", "        for e in []\n",
+      "tests/unit/test_production_readiness.py", "pending_entry_refuses"),
+    m("pending_entry_with_commit", "m17-step6-fixes", ACS,
+      '            if "frontend_commit" in e:\n', "            if False:\n", UAC, "well_formed"),
+    m("pending_tracking_unchecked", "m17-step6-fixes", ACS,
+      "        if not target.is_file() or marker not in target.read_text():\n",
+      "        if False:\n", UAC, "tracking_reference"),
+    m("pending_entry_goes_stale", "m17-step6-fixes", ACS,
+      "        if not is_pending(e) and any((i, op) not in used for op in _operations(e))\n",
+      "        if any((i, op) not in used for op in _operations(e))\n", UAC, "outlives"),
+    m("production_image_without_gate", "m17-step6-fixes", "deploy/report-image/Dockerfile",
+      "COPY --from=readiness /opt/edisc/production-ready /opt/edisc/production-ready\n", "",
+      "tests/unit/test_production_readiness.py", "cannot_be_built"),
+    m("readiness_job_never_blocks", "m17-step6-fixes", ".github/workflows/ci.yml",
+      "    continue-on-error: ${{ !startsWith(github.ref, 'refs/tags/v') }}\n",
+      "    continue-on-error: true\n", "tests/unit/test_production_readiness.py", "blocks_release"),
+    m("wids_required", "m17-step6-fixes", INS,
+      '    evidence = "consent_token"\n',
+      '    evidence = "consent_token"\n    if "wids" not in claims:\n'
+      '        raise InstallError("refused", "not_tenant_admin")\n', TIN,
+      "proven_by_the_consent_token"),
+    m("wids_skips_the_consent_token", "m17-step6-fixes", INS,
+      '        evidence = "consent_token+wids"\n',
+      '        evidence = "consent_token+wids"\n        return Grant(tid, None, (), (), None, None,'
+      ' None, "client_credentials", evidence)\n', TIN, "without_admin_consent"),
+    m("consent_roles_unchecked", "m17-step6-fixes", INS,
+      "    if not granted:\n        raise InstallError(\"refused\", \"admin_consent_missing\")\n",
+      "", TIN, "does_not_prove_consent"),
+    m("consent_token_tenant_unchecked", "m17-step6-fixes", INS,
+      '    if claims.get("tid") != tid:\n', "    if False:\n", TIN, "does_not_prove_consent"),
+    m("consent_token_app_unchecked", "m17-step6-fixes", INS,
+      '    if (claims.get("appid") or claims.get("azp")) != client_id:\n', "    if False:\n", TIN,
+      "does_not_prove_consent"),
+    m("wids_non_admin_accepted", "m17-step6-fixes", INS,
+      "        if not ADMIN_ROLES & set(wids):\n", "        if False:\n", TIN, "must_confirm"),
+    m("journal_entry_kept", "m17-step6-fixes", "packages/db/src/edisc_db/connection_tokens.py",
+      "        text(\"DELETE FROM token_refresh_journal WHERE id = :id AND state <> 'received'\"),\n",
+      "        text(\"SELECT 1 FROM token_refresh_journal WHERE id = :id AND state <> 'received'\"),\n",
+      "tests/integration/secrets/test_connection_tokens.py", "survives"),
+    m("journal_plaintext", "m17-step6-fixes", "packages/db/src/edisc_db/connection_tokens.py",
+      '             "a": sealed.access, "r": sealed.refresh, "e": sealed.expires_at, "k": sealed.key_id,\n'
+      '             "kv": sealed.key_version, "ins": json.dumps(install)},',
+      '             "a": tokens.access_token.get_secret_value().encode(), "r": sealed.refresh,'
+      ' "e": sealed.expires_at, "k": sealed.key_id,\n'
+      '             "kv": sealed.key_version, "ins": json.dumps(install)},', TIN, "survives_an_install"),
+    m("journal_install_facts_dropped", "m17-step6-fixes",
+      "packages/db/src/edisc_db/connection_tokens.py",
+      '"kv": sealed.key_version, "ins": json.dumps(install)},', '"kv": sealed.key_version, "ins": None},',
+      TIN, "repaired_exactly_once"),
+    m("reconcile_entry_not_closed", "m17-step6-fixes",
+      "packages/db/src/edisc_db/connection_tokens.py",
+      "                await _close_journal(session, entry.id, state)\n", "", TIN,
+      "repaired_exactly_once"),
 ]  # fmt: skip

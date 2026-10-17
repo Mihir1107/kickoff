@@ -15,7 +15,15 @@ from typing import Any
 
 import pytest
 from scripts import api_compat
-from scripts.api_compat import CompatError, compare, judge, load_allowlist, our_findings
+from scripts.api_compat import (
+    CompatError,
+    check_tracking,
+    compare,
+    judge,
+    load_allowlist,
+    our_findings,
+    summary,
+)
 
 from edisc_api import openapi_doc
 
@@ -200,7 +208,64 @@ def test_the_frontend_commit_must_be_a_commit_id(tmp_path: Path) -> None:
 
 
 def test_the_committed_allowlist_is_valid() -> None:
-    load_allowlist(api_compat.ALLOWLIST)
+    entries = load_allowlist(api_compat.ALLOWLIST)
+    check_tracking(entries, Path(__file__).parents[3])
+
+
+# a break the frontend has NOT absorbed: no commit id (a commit that does not absorb the change
+# would satisfy the rule while defeating it), a status and a tracking reference instead
+PENDING = {k: v for k, v in ENTRY.items() if k != "frontend_commit"} | {
+    "status": "pending_frontend", "tracking": "docs/REQS.md#thing-permission",
+}  # fmt: skip
+
+
+def test_a_pending_entry_allows_its_break_and_outlives_it(tmp_path: Path) -> None:
+    changed = _changed(BREAKING["x_permission_changed"][0])
+    verdict = compare(BASE, changed, _allow(tmp_path, [PENDING]))
+    assert verdict.ok and [f.id for f in verdict.allowed] == ["edisc-x-permission-changed"]
+    assert verdict.pending == [PENDING]
+    # the next change no longer shows the break: the pending record stays (not stale) and is
+    # still listed, while an absorbed entry matching nothing fails as before
+    later = judge([], _allow(tmp_path, [PENDING]))
+    assert later.ok and later.pending == [PENDING] and "production refused" in summary(later)
+    assert not judge([], _allow(tmp_path, [ENTRY])).ok
+
+
+@pytest.mark.parametrize(
+    ("change", "error"),
+    [
+        ({"frontend_commit": "0a1b2c3d"}, "no frontend_commit"),
+        ({"tracking": None}, "missing tracking"),
+        ({"tracking": "  "}, "missing tracking"),
+        ({"tracking": "aeee68e"}, "tracking must be"),
+        ({"tracking": "https://example.com/x"}, "tracking must be"),
+        ({"status": "absorbed"}, "status can only be"),
+        ({"rule": None}, "missing rule"),
+        ({"reason": None}, "missing reason"),
+    ],
+)
+def test_a_pending_entry_is_well_formed(tmp_path: Path, change: dict[str, Any], error: str) -> None:
+    entry = {k: v for k, v in (PENDING | change).items() if v is not None}
+    with pytest.raises(CompatError, match=error):
+        _allow(tmp_path, [entry])
+
+
+def test_tracking_belongs_to_a_pending_entry_only(tmp_path: Path) -> None:
+    with pytest.raises(CompatError, match="tracking belongs"):
+        _allow(tmp_path, [{**ENTRY, "tracking": PENDING["tracking"]}])
+
+
+def test_the_tracking_reference_must_name_an_existing_requirement(tmp_path: Path) -> None:
+    entries = _allow(tmp_path, [PENDING])
+    with pytest.raises(CompatError, match="no line"):
+        check_tracking(entries, tmp_path)  # no file
+    (tmp_path / "docs").mkdir()
+    reqs = tmp_path / "docs" / "REQS.md"
+    reqs.write_text("- <!-- pending-frontend: thing-permission-2 -->\n")  # another requirement
+    with pytest.raises(CompatError, match="no line"):
+        check_tracking(entries, tmp_path)
+    reqs.write_text("- <!-- pending-frontend: thing-permission -->\n  **The thing route**\n")
+    check_tracking(entries, tmp_path)
 
 
 # ------------------------------------------------------------------ the published document

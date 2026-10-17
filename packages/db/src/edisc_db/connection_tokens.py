@@ -12,6 +12,11 @@ Guarantees
 - If the provider call or the write fails, the transaction rolls back and the row is untouched.
 - Plaintext tokens exist only as ``SecretStr``, are registered with the log redactor on decrypt, and are
   never passed to Temporal, logged or included in exceptions.
+- **The journal** (``token_refresh_journal``) holds a provider's answer only until it is applied: the
+  same sealed blobs the connection row will hold (same tenant + connection + purpose context; the
+  database refuses anything but a sealed envelope, migration 0041), DELETED in the transaction that
+  applies or supersedes it. A ``received`` entry can never be deleted (trigger). An install's entry
+  also carries its completion facts (no secret): the reconciler then finishes the install too.
 
 Custody events for connection lifecycle (created, validated, refreshed, rotated) are appended by the
 calling service (API/worker), which owns the custody stream.
@@ -19,10 +24,12 @@ calling service (API/worker), which owns the custody stream.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
 from pydantic import SecretStr
 from sqlalchemy import text
@@ -225,13 +232,16 @@ async def install_tokens(
     connection_id: uuid.UUID,
     tokens: TokenSet,
     expected_version: int,
+    install: dict[str, Any],
     with_tokens: Callable[[AsyncSession], Awaitable[None]],
 ) -> int:
-    """An install's tokens (M17 step 6, plan §2.5): JOURNALED encrypted in their own transaction
-    first (the provider issued them; a crash from here on must never lose them:
-    ``reconcile_token_refreshes`` applies a journaled set at worker start), then applied in ONE
-    transaction with ``with_tokens`` (the connection's status and identity, the install's outcome,
-    the audit). Returns the new token_version."""
+    """An install's tokens (M17 step 6, plan §2.5): JOURNALED sealed in their own transaction first,
+    with ``install`` (the facts that complete the install: no secret), because the provider issued
+    them and a crash from here on must never lose them; then applied in ONE transaction with
+    ``with_tokens`` (the connection's status and identity, the install's outcome, the audit), which
+    also deletes the journal entry. After a crash in between, ``reconcile_token_refreshes`` applies
+    the tokens AND completes the install from ``install``, exactly once. Returns the new
+    token_version."""
     async with tenant_tx(sessions, tenant_id) as session:
         sealed = await _seal_set(
             session, box, tenant_id=tenant_id, connection_id=connection_id, tokens=tokens
@@ -242,18 +252,19 @@ async def install_tokens(
             text(
                 "INSERT INTO token_refresh_journal (id, tenant_id, connection_id, based_on_version,"
                 " encrypted_access_token, encrypted_refresh_token, token_expires_at, token_key_id,"
-                " token_key_version) VALUES (:id, :t, :c, :v, :a, :r, :e, :k, :kv)"
+                " token_key_version, install) VALUES (:id, :t, :c, :v, :a, :r, :e, :k, :kv,"
+                " CAST(:ins AS jsonb))"
             ),
             {"id": journal_id, "t": tenant_id, "c": connection_id, "v": expected_version,
              "a": sealed.access, "r": sealed.refresh, "e": sealed.expires_at, "k": sealed.key_id,
-             "kv": sealed.key_version},
+             "kv": sealed.key_version, "ins": json.dumps(install)},
         )  # fmt: skip
     await _before_apply_hook()
     async with tenant_tx(sessions, tenant_id) as session:
         version = await _apply(
             session, connection_id=connection_id, sealed=sealed, expected_version=expected_version
         )
-        await _resolve_journal(session, journal_id, "applied")
+        await _close_journal(session, journal_id, "applied")
         await with_tokens(session)
     return version
 
@@ -325,7 +336,7 @@ async def refresh_tokens(
         version = await _apply(
             session, connection_id=connection_id, sealed=sealed, expected_version=current.version
         )
-        await _resolve_journal(session, journal_id, "applied")
+        await _close_journal(session, journal_id, "applied")
         return TokenSet(fresh.access_token, fresh.refresh_token, fresh.expires_at, version)
 
 
@@ -397,7 +408,10 @@ async def _before_apply_hook() -> None:
     """Test seam: crash-injection point between journaling and applying a refresh (no-op in production)."""
 
 
-async def _resolve_journal(session: AsyncSession, journal_id: uuid.UUID, state: str) -> None:
+async def _close_journal(session: AsyncSession, journal_id: uuid.UUID, state: str) -> None:
+    """Resolve the entry and delete it, in the caller's transaction (the one that applied or
+    superseded it): no copy of a token outlives its purpose. Resolving first is what the delete
+    trigger requires; an entry another reconciler already closed is simply gone."""
     await session.execute(
         text(
             "UPDATE token_refresh_journal SET state = :s, resolved_at = now()"
@@ -405,6 +419,19 @@ async def _resolve_journal(session: AsyncSession, journal_id: uuid.UUID, state: 
         ),
         {"s": state, "id": journal_id},
     )
+    await session.execute(
+        text("DELETE FROM token_refresh_journal WHERE id = :id AND state <> 'received'"),
+        {"id": journal_id},
+    )
+
+
+# completes a journaled install inside the reconciler's transaction: (session, tenant id, the
+# entry's install facts, "applied" | "superseded")
+InstallFinisher = Callable[[AsyncSession, uuid.UUID, dict[str, Any], str], Awaitable[None]]
+
+
+class UnfinishedInstallError(RuntimeError):
+    """A journaled install found with no way to finish it (never skipped silently)."""
 
 
 async def reconcile_token_refreshes(
@@ -412,13 +439,18 @@ async def reconcile_token_refreshes(
     sessions: async_sessionmaker[AsyncSession],
     *,
     limit: int = 500,
+    finish_install: InstallFinisher | None = None,
 ) -> dict[str, int]:
     """Startup reconciler: apply journaled refresh responses that never reached their connection row.
 
     For each ``received`` entry (oldest first per connection), under the connection row lock:
     - row still at ``based_on_version``: copy the journaled ciphertext into the row (no decryption: the
-      context is identical), bump the version, mark ``applied``;
-    - row moved on (a later write succeeded): mark ``superseded``.
+      context is identical), bump the version;
+    - row moved on (a later write succeeded): nothing to apply (``superseded``).
+    Either way the entry is DELETED in that transaction, and an install's entry is finished there
+    too (``finish_install``: the connection's identity and status, the install's outcome, the
+    audit), so a second reconciler (or a rerun) finds nothing: exactly once. An install entry
+    without ``finish_install`` raises rather than being applied half.
     Cross-tenant discovery uses the sweeper login (ids only); all writes go through ``tenant_tx``.
     """
     async with sweeper_sessions() as s, s.begin():
@@ -428,7 +460,7 @@ async def reconcile_token_refreshes(
                 {"n": limit},
             )
         ).all()
-    counts = {"applied": 0, "superseded": 0}
+    counts = {"applied": 0, "superseded": 0, "installs": 0}
     for target in targets:
         async with tenant_tx(sessions, target.tenant_id) as session:
             row = (
@@ -448,6 +480,10 @@ async def reconcile_token_refreshes(
             ).all()
             version = row.token_version
             for entry in entries:
+                if entry.install is not None and finish_install is None:
+                    raise UnfinishedInstallError(
+                        f"journal entry {entry.id} completes an install: pass finish_install"
+                    )
                 if entry.based_on_version == version:
                     version = await _apply(
                         session,
@@ -461,9 +497,12 @@ async def reconcile_token_refreshes(
                         ),
                         expected_version=version,
                     )
-                    await _resolve_journal(session, entry.id, "applied")
-                    counts["applied"] += 1
+                    state = "applied"
                 else:
-                    await _resolve_journal(session, entry.id, "superseded")
-                    counts["superseded"] += 1
+                    state = "superseded"
+                await _close_journal(session, entry.id, state)
+                counts[state] += 1
+                if entry.install is not None and finish_install is not None:
+                    await finish_install(session, target.tenant_id, dict(entry.install), state)
+                    counts["installs"] += 1
     return counts

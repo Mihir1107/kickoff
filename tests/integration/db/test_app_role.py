@@ -109,11 +109,21 @@ async def test_app_cannot_truncate_or_delete(
     try:
         with pytest.raises(asyncpg.InsufficientPrivilegeError):
             await conn.execute(f"TRUNCATE {table} CASCADE")
+        if table in DELETES_RESOLVED:  # the one exception: its trigger refuses the seeded row
+            with pytest.raises(asyncpg.PostgresError, match="received entry is never deleted"):
+                async with tenant_ctx(conn, a.tenant_id):
+                    await conn.execute(f"DELETE FROM {table}")
+            return
         with pytest.raises(asyncpg.InsufficientPrivilegeError):
             async with tenant_ctx(conn, a.tenant_id):
                 await conn.execute(f"DELETE FROM {table}")
     finally:
         await conn.close()
+
+
+# Tables whose resolved rows the app deletes: the token journal holds a token only until it is
+# applied (migration 0041); a row still ``received`` is never deleted (its trigger), TRUNCATE never.
+DELETES_RESOLVED = {"token_refresh_journal"}
 
 
 @pytest.mark.parametrize("table", ["items", "custody_events", "job_items"])

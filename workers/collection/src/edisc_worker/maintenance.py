@@ -31,8 +31,8 @@ from edisc_core.settings import Settings
 from edisc_custody.recovery import sweep_stale_uploads
 from edisc_custody.retention_extension import extend_retention
 from edisc_custody.sweeper import sweep_anchors
-from edisc_db.connection_tokens import reconcile_token_refreshes
 from edisc_worker.contracts import MAINTENANCE_QUEUE
+from edisc_worker.install_recovery import reconcile_tokens
 from edisc_worker.render_routing import check_render_routing
 from edisc_worker.report_ops import ensure_job_reports
 from edisc_worker.workflows import MaintenanceWorkflow
@@ -102,7 +102,9 @@ class MaintenanceActivities:
 
     @activity.defn(name="reconcile_token_refreshes")
     async def reconcile_token_refreshes(self) -> dict[str, Any]:
-        return dict(await reconcile_token_refreshes(self.sweeper_sessions, self.sessions))
+        return dict(
+            await reconcile_tokens(self.sweeper_sessions, self.sessions, self.s3, self.settings)
+        )
 
     @activity.defn(name="sweep_stale_uploads")
     async def sweep_stale_uploads(self) -> dict[str, Any]:

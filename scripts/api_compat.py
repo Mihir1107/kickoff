@@ -27,9 +27,15 @@ Compares ``docs/api/openapi.json`` (or ``--new``) with the spec at ``--base-ref`
 3. **The allow-list** ``docs/api/breaking-allowlist.yaml``: an intended break needs an entry with
    ``rule`` (the finding's id), ``operation`` (the operationId, or ``"METHOD /path"``; or
    ``operations``: a list of them, for ONE change seen on several operations), ``reason`` and
-   ``frontend_commit`` (the frontend commit that absorbs it). An entry missing any of the four, or
-   one with an operation that matches nothing, FAILS: the list holds only live, explained
-   exceptions.
+   EITHER ``frontend_commit`` (the frontend commit that ABSORBED it) OR ``status:
+   pending_frontend`` with ``tracking`` (``<file>.md#<anchor>``; the file holds
+   ``<!-- pending-frontend: <anchor> -->`` at the requirement the frontend still has to meet).
+   A commit id is a fact, never a promise: an entry naming a frontend commit that does not absorb
+   the change is what ``pending_frontend`` replaces. An entry missing a field, or an absorbed entry
+   with an operation that matches nothing, FAILS: the list holds only live, explained exceptions.
+   A ``pending_frontend`` entry is a standing record: it outlives the change it allowed (later
+   diffs no longer show it) until the frontend absorbs it, and while ANY exists the production
+   readiness check (``scripts/production_readiness.py``) fails and production builds are refused.
 
 Exit 0 when nothing breaks; 1 otherwise. With ``GITHUB_STEP_SUMMARY`` set, a summary is appended.
 """
@@ -65,6 +71,8 @@ METHODS = ("get", "put", "post", "delete", "patch", "head", "options")
 ERR, WARN = 3, 2
 NOT_BREAKING = frozenset({"response-property-enum-value-added"})  # decision D9
 COMMIT = re.compile(r"^[0-9a-f]{7,40}$")
+PENDING = "pending_frontend"
+TRACKING = re.compile(r"^(?P<file>[\w./-]+\.md)#(?P<anchor>[a-z0-9][a-z0-9-]*)$")
 
 
 class CompatError(RuntimeError):
@@ -256,14 +264,49 @@ def load_allowlist(path: Path) -> list[dict[str, str]]:
                 raise CompatError(f"{path} entry {i}: operations must be a non-empty list of names")
             if len(set(ops)) != len(ops):
                 raise CompatError(f"{path} entry {i}: an operation listed twice")
-        missing = [k for k in ("rule", "operation", "reason", "frontend_commit")
+        pending = isinstance(e, dict) and "status" in e
+        absorbed = ("tracking",) if pending else ("frontend_commit",)
+        missing = [k for k in ("rule", "operation", "reason", *absorbed)
                    if not (isinstance(e, dict) and isinstance(e.get(k), str) and e[k].strip())
                    and not (k == "operation" and isinstance(e, dict) and "operations" in e)]  # fmt: skip
         if missing:
             raise CompatError(f"{path} entry {i}: missing {', '.join(missing)}")
-        if not COMMIT.match(e["frontend_commit"]):
+        if pending:
+            if e["status"] != PENDING:
+                raise CompatError(f"{path} entry {i}: status can only be {PENDING}")
+            if "frontend_commit" in e:
+                raise CompatError(
+                    f"{path} entry {i}: pending_frontend names no frontend_commit (not absorbed)"
+                )
+            if not TRACKING.match(e["tracking"]):
+                raise CompatError(f"{path} entry {i}: tracking must be <file>.md#<anchor>")
+        elif "tracking" in e:
+            raise CompatError(f"{path} entry {i}: tracking belongs to a pending_frontend entry")
+        elif not COMMIT.match(e["frontend_commit"]):
             raise CompatError(f"{path} entry {i}: frontend_commit must be a commit id")
     return entries
+
+
+def is_pending(entry: dict[str, Any]) -> bool:
+    return entry.get("status") == PENDING
+
+
+def pending_frontend(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The breaks the frontend has not absorbed: each refuses production (production_readiness)."""
+    return [e for e in entries if is_pending(e)]
+
+
+def check_tracking(entries: list[dict[str, Any]], root: Path) -> None:
+    """Each pending entry's tracking reference names a requirement that exists: ``<file>.md`` under
+    ``root`` holding ``<!-- pending-frontend: <anchor> -->``."""
+    for e in pending_frontend(entries):
+        ref = TRACKING.match(e["tracking"])
+        if ref is None:  # load_allowlist checked the form; a hand-built list may not have been
+            raise CompatError(f"tracking {e['tracking']}: must be <file>.md#<anchor>")
+        target = root / ref["file"]
+        marker = f"<!-- pending-frontend: {ref['anchor']} -->"
+        if not target.is_file() or marker not in target.read_text():
+            raise CompatError(f"tracking {e['tracking']}: no line {marker!r} in {ref['file']}")
 
 
 @dataclass
@@ -272,6 +315,7 @@ class Verdict:
     allowed: list[Finding]
     warnings: list[Finding]
     unused: list[dict[str, str]]
+    pending: list[dict[str, str]]
 
     @property
     def ok(self) -> bool:
@@ -295,11 +339,13 @@ def judge(findings: list[Finding], allowlist: list[dict[str, Any]]) -> Verdict:
         else:
             breaking.append(f)
     warnings = [f for f in findings if f.level == WARN]
-    # every operation an entry names must have matched: a stale name fails like a stale entry
+    # every operation an entry names must have matched: a stale name fails like a stale entry. A
+    # pending_frontend entry is a standing record until the frontend absorbs it (production gate)
     unused = [
-        e for i, e in enumerate(allowlist) if any((i, op) not in used for op in _operations(e))
-    ]
-    return Verdict(breaking, allowed, warnings, unused)
+        e for i, e in enumerate(allowlist)
+        if not is_pending(e) and any((i, op) not in used for op in _operations(e))
+    ]  # fmt: skip
+    return Verdict(breaking, allowed, warnings, unused, pending_frontend(allowlist))
 
 
 def compare(base: dict[str, Any], new: dict[str, Any], allowlist: list[dict[str, str]]) -> Verdict:
@@ -321,6 +367,11 @@ def summary(v: Verdict) -> str:
     if v.unused:
         lines.append(f"**Allow-list entries matching nothing (fail):** {len(v.unused)}")
         lines += [f"- `{e['rule']}` {', '.join(_operations(e))}" for e in v.unused]
+    if v.pending:
+        lines.append(f"**Not absorbed by the frontend (production refused):** {len(v.pending)}")
+        lines += [
+            f"- `{e['rule']}` {', '.join(_operations(e))}: {e['tracking']}" for e in v.pending
+        ]
     return "\n".join(lines) + "\n"
 
 
@@ -342,6 +393,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--new", type=Path, default=SPEC)
     parser.add_argument("--allowlist", type=Path, default=ALLOWLIST)
     args = parser.parse_args(argv)
+    allowlist = load_allowlist(args.allowlist)
+    check_tracking(allowlist, Path.cwd())
     if args.base_ref:
         base = _spec_at(args.base_ref)
         if base is None:
@@ -349,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
     else:
         base = json.loads(args.base.read_text())
-    verdict = compare(base, json.loads(args.new.read_text()), load_allowlist(args.allowlist))
+    verdict = compare(base, json.loads(args.new.read_text()), allowlist)
     text = summary(verdict)
     print(text)
     if os.environ.get("GITHUB_STEP_SUMMARY"):

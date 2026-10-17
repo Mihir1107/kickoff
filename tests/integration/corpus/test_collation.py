@@ -176,7 +176,10 @@ async def _checked(
     assert result["status"] == "completed", result
     st = await render_state(sessions, tenant_id, render_id)
     files = await stored(sessions, s3, settings, tenant_id, render_id)
-    check_golden(name, check_against_oracle(case, build(case), files, dict(st["row"].summary)))
+    manifests = await asyncio.to_thread(  # pure CPU: never on the loop (ADR 0015 §24.19)
+        check_against_oracle, case, build(case), files, dict(st["row"].summary)
+    )
+    await asyncio.to_thread(check_golden, name, manifests)
     report_files = Files()
     loader = ReportLoader(sessions, s3, settings, tenant_id=tenant_id, job_id=job_id)
     built = await loader.build(report_files)

@@ -1,27 +1,33 @@
-# Intended breaking API changes (scripts/api_compat.py, M17 plan §5). Each entry needs all four:
+# Intended breaking API changes (scripts/api_compat.py, M17 plan §5). Each entry needs:
 #   - rule: the finding id (oasdiff's or edisc-...)
 #     operation: the operationId, or "METHOD /path" (schema findings: the schema location);
 #       or operations: a list of them, for one change seen on several operations (each must match)
 #     reason: why the break is accepted
-#     frontend_commit: the feat/web-ui commit that absorbs it
-# An entry that matches no finding fails the check: remove it once its change has merged.
+#     and EITHER
+#     frontend_commit: the feat/web-ui commit that ABSORBED it (it no longer depends on what broke)
+#     OR
+#     status: pending_frontend
+#     tracking: <file>.md#<anchor>, a file holding "<!-- pending-frontend: <anchor> -->"
+# An absorbed entry that matches no finding fails the check: remove it once its change has merged.
+# A pending_frontend entry stays until the frontend absorbs the change; while ANY exists,
+# scripts/production_readiness.py fails and production builds are refused.
 - rule: api-removed-without-deprecation
   operation: create_connection
   reason: >-
     ADR 0016 A7 / decision D10 (M17 step 6): the generic credential routes exist only where the
     dummy connector does (local/test/ci); real sources connect through the install routes
-    (start_slack_install, start_teams_consent). They stay in local/test/ci builds. NOT absorbed
-    yet: the frontend at aeee68e still calls them from its live client (src/api/http.ts lines
-    114-115, createConnection and reauthConnection); it must move to the install routes before a
-    production build (recorded in docs/HANDOFF.md, frontend requirements).
-  frontend_commit: aeee68e
+    (start_slack_install, start_teams_consent). They stay in local/test/ci builds. The frontend
+    (feat/web-ui, last checked at aeee68e) still calls them from its live client
+    (src/api/http.ts createConnection and reauthConnection).
+  status: pending_frontend
+  tracking: docs/HANDOFF.md#install-routes
 - rule: api-path-removed-without-deprecation
   operation: reauthorize
   reason: >-
     ADR 0016 A7 / decision D10 (M17 step 6): the generic credential routes exist only where the
     dummy connector does (local/test/ci); real sources connect through the install routes
-    (start_slack_install, start_teams_consent). They stay in local/test/ci builds. NOT absorbed
-    yet: the frontend at aeee68e still calls them from its live client (src/api/http.ts lines
-    114-115, createConnection and reauthConnection); it must move to the install routes before a
-    production build (recorded in docs/HANDOFF.md, frontend requirements).
-  frontend_commit: aeee68e
+    (start_slack_install, start_teams_consent). They stay in local/test/ci builds. The frontend
+    (feat/web-ui, last checked at aeee68e) still calls them from its live client
+    (src/api/http.ts createConnection and reauthConnection).
+  status: pending_frontend
+  tracking: docs/HANDOFF.md#install-routes

@@ -160,7 +160,8 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
         )
         await conn.execute(
             "INSERT INTO token_refresh_journal (id, tenant_id, connection_id, based_on_version,"
-            " encrypted_access_token, token_key_id, token_key_version) VALUES ($1, $2, $3, 0, 'x', 'k', '1')",
+            " encrypted_access_token, token_key_id, token_key_version) VALUES ($1, $2, $3, 0,"
+            f" {SEALED_STUB}, 'k', '1')",
             new_id(),
             t,
             ids["conn"],
@@ -433,4 +434,12 @@ TENANT_TABLES = [
     "login_attempts",
     "oauth_installs",
 ]
+# the shape of a sealed SecretBox envelope (the journal refuses anything else, migration 0041)
+SEALED_STUB = (
+    'convert_to(\'{"alg":"a","ct":"c","key_id":"k","key_version":"1",'
+    '"nonce":"n","v":1,"wrapped_dek":"w"}\', \'UTF8\')'
+)
+SEALED_BYTES = (
+    b'{"alg":"a","ct":"c","key_id":"k","key_version":"1","nonce":"n","v":1,"wrapped_dek":"w"}'
+)
 ALL_TABLES = ["tenants", *TENANT_TABLES]

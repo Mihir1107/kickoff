@@ -13,3 +13,5 @@ apps/web
 test-stack-logs.txt
 spikes
 docs
+# the production-readiness gate's input (Dockerfile stage `readiness`)
+!docs/api/breaking-allowlist.yaml
