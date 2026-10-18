@@ -84,14 +84,13 @@ jobs:
           echo "base: $base"
           uv run python scripts/api_compat.py --base-ref "$base"
 
-  # Is the tree fit for a production build (scripts/production_readiness.py)? It FAILS while the
-  # allow-list holds a break the frontend has not absorbed (status pending_frontend). It blocks a
-  # release tag (v*); on main and branches the job shows red without failing the run, so the
-  # other results stay readable while the frontend catches up. The report image's production
-  # target runs the same check in its build and is refused too (Dockerfile stage `readiness`).
+  # Is the tree fit for a production build (scripts/production_readiness.py: a break the frontend
+  # has not absorbed, status pending_frontend, refuses it)? Release tags enforce: the job fails.
+  # Everywhere else the same findings are one warning annotation each plus a job summary, and the
+  # job is green, so red always means something (a malformed allow-list fails in both modes). The
+  # production report image enforces on its own (its `readiness` stage).
   production-readiness:
     runs-on: ubuntu-24.04
-    continue-on-error: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.2.0
@@ -99,7 +98,7 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
       - run: uv sync --all-packages --locked
-      - run: make production-readiness
+      - run: make production-readiness READINESS_MODE=${{ startsWith(github.ref, 'refs/tags/v') && 'enforce' || 'warn' }}
 
   integration:
     runs-on: ubuntu-24.04
@@ -131,8 +130,19 @@ jobs:
       - run: make test-integration MIN_FREE_GB=8
         env:
           EDISC_TEST_ARTIFACTS_DIR: ${{ runner.temp }}/test-artifacts
+          EDISC_TEST_PHASE_TIMINGS_DIR: ${{ runner.temp }}/phase-timings
           EDISC_CI_SHARDS: "4"
           EDISC_CI_SHARD: ${{ matrix.shard }}
+      # per-phase timings of the tests that record them (tests/integration/phase_timings.py), pass
+      # or fail: what a slow runner spent where (ADR 0015 §24.20)
+      - name: Upload phase timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: phase-timings-${{ github.run_id }}-${{ github.run_attempt }}-shard${{ matrix.shard }}
+          path: ${{ runner.temp }}/phase-timings
+          if-no-files-found: ignore
+          retention-days: 30
       - name: Upload failure artifacts
         if: failure()
         uses: actions/upload-artifact@v7

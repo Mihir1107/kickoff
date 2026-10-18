@@ -15,11 +15,13 @@ finding. Both steps are idempotent: a retry after a crash anywhere redoes or ski
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
+import time
 import uuid
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -80,6 +82,20 @@ def _duplicate(first: str, second: str) -> ArchiveError:
     return ArchiveError(ArchiveErrorCode.DUPLICATE_NAME, f"{first!r} and {second!r}")
 
 
+class _Phases:
+    """Wall time per phase of a lock or a validation, logged with its outcome (``phases_ms``): where
+    a slow ingestion spends its time, on any host (ADR 0015 §24.20)."""
+
+    def __init__(self) -> None:
+        self._last = time.monotonic()
+        self.ms: dict[str, int] = {}
+
+    def mark(self, name: str) -> None:
+        now = time.monotonic()
+        self.ms[name] = self.ms.get(name, 0) + round((now - self._last) * 1000)
+        self._last = now
+
+
 class ExportRejectedError(Exception):
     """The archive is not acceptable: recorded as a finding, the export becomes ``rejected``."""
 
@@ -128,6 +144,16 @@ class ExportIngest:
     ) -> None:
         self.sessions, self.s3, self.settings = sessions, s3, settings
         self.hooks = hooks or CrashHooks()  # crash-matrix seam (M14.7); no-op in production
+        self.db_write_ms = 0  # wall time inside the index inserts (entries, days, threads)
+        self.page_reads: list[int] = []  # wall ms of each day-file page read
+
+    @contextlib.contextmanager
+    def _db_write(self) -> Iterator[None]:
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            self.db_write_ms += round((time.monotonic() - started) * 1000)
 
     # ------------------------------------------------------------------ hash and lock
     async def lock(self, tenant_id: uuid.UUID, export_id: uuid.UUID) -> dict[str, Any]:
@@ -137,11 +163,14 @@ class ExportIngest:
             if row.status in ("validating", "ready", "rejected"):  # crash after the commit below
                 await self.s3.delete_object(Bucket=staging, Key=row.staging_key)
             return {"status": row.status}
+        phases = _Phases()
         problem = await self._complete_staged_upload(tenant_id, export_id, row)
+        phases.mark("complete_upload")
         if problem is not None:
             return await self._reopen(tenant_id, export_id, problem)
         await self.hooks.hit("lock:after_complete")
         sha256, size = await self._hash_staged(row.staging_key)
+        phases.mark("hash")
         await self.hooks.hit("lock:after_hash")
         if size != row.declared_size:  # the parts were checked against it: storage misbehaved
             raise ApplicationError(
@@ -152,6 +181,7 @@ class ExportIngest:
         written = await EvidenceWriter(self.sessions, self.s3, self.settings).lock_staged(
             tenant_id=tenant_id, staging_key=row.staging_key, sha256=sha256, size=size
         )
+        phases.mark("lock_evidence")
         await self.hooks.hit("lock:after_evidence")
         mismatch = row.declared_sha256 is not None and row.declared_sha256 != sha256
         detail = {"declared_sha256": row.declared_sha256, "sha256": sha256} if mismatch else None
@@ -188,7 +218,11 @@ class ExportIngest:
         )
         await self.s3.delete_object(Bucket=staging, Key=row.staging_key)
         status = (await self._row(tenant_id, export_id)).status
-        log.info("export locked", export_id=str(export_id), sha256=sha256, status=status)
+        phases.mark("commit")
+        log.info(
+            "export locked", export_id=str(export_id), sha256=sha256, status=status,
+            phases_ms=phases.ms,
+        )  # fmt: skip
         return {"status": status}
 
     async def _complete_staged_upload(
@@ -285,13 +319,17 @@ class ExportIngest:
             ),
             window=self.settings.export_read_window_bytes,
         )
+        phases = _Phases()
         try:
-            scan, tier, records = await self._inspect(tenant_id, export_id, row, src, limits)
+            scan, tier, records = await self._inspect(
+                tenant_id, export_id, row, src, limits, phases
+            )
         except ArchiveError as exc:
             return await self._reject(tenant_id, export_id, exc.code.value, exc.detail)
         except ExportRejectedError as exc:
             return await self._reject(tenant_id, export_id, exc.code, exc.detail)
         findings = await self._findings(tenant_id, export_id, scan, records)
+        phases.mark("findings")
         findings.update(
             tier_warnings=list(tier.warnings),
             blind_spots=list(tier.blind_spots),
@@ -335,7 +373,13 @@ class ExportIngest:
         await anchor_if_due(
             self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=tenant_id
         )
-        log.info("export validated", export_id=str(export_id), tier=tier.tier, entries=scan.entries)
+        phases.mark("ready_commit")
+        log.info(
+            "export validated", export_id=str(export_id), tier=tier.tier, entries=scan.entries,
+            range_requests=src.requests, phases_ms=phases.ms, db_write_ms=self.db_write_ms,
+            day_page_reads=len(self.page_reads), day_page_read_ms=sum(self.page_reads),
+            slowest_day_page_ms=max(self.page_reads, default=0),
+        )  # fmt: skip
         return {"status": "ready", "connection_id": str(connection_id)}
 
     async def _inspect(
@@ -345,6 +389,7 @@ class ExportIngest:
         row: Any,
         src: CoalescingSource,
         limits: ArchiveLimits,
+        phases: _Phases,
     ) -> tuple[_Scan, Tier, Counter[str]]:
         """Everything that can reject the archive (raises ``ArchiveError`` / ``ExportRejectedError``)."""
         if row.size_bytes > limits.max_archive_bytes:
@@ -352,6 +397,7 @@ class ExportIngest:
                 "archive_too_large", f"{row.size_bytes} bytes > {limits.max_archive_bytes}"
             )
         scan = await self._scan_directory(tenant_id, export_id, src, limits)
+        phases.mark("directory")
         tier = detect_tier(
             set(scan.metadata),
             nested_metadata_seen=scan.nested_metadata,
@@ -363,9 +409,12 @@ class ExportIngest:
                 "no channels.json, groups.json, dms.json or mpims.json at the top level",
             )
         await self._workspace(src, limits, scan)
+        phases.mark("workspace")
         records = await self._load_conversations(tenant_id, export_id, src, limits, scan)
+        phases.mark("conversations")
         await self.hooks.hit("validate:after_conversations")
         await self._index_day_files(tenant_id, export_id, src, limits, scan)
+        phases.mark("day_files")
         return scan, tier, records
 
     async def _workspace(self, src: CoalescingSource, limits: ArchiveLimits, scan: _Scan) -> None:
@@ -426,10 +475,12 @@ class ExportIngest:
         after = -1
         threads: list[dict[str, Any]] = []
         while True:
+            started = time.monotonic()
             async with tenant_tx(self.sessions, tenant_id) as s:
                 rows = (
                     await s.execute(text(DAY_FILES_PAGE), {"e": export_id, "after": after})
                 ).all()
+            self.page_reads.append(round((time.monotonic() - started) * 1000))
             if not rows:
                 break
             after = rows[-1].local_header_offset
@@ -515,32 +566,34 @@ class ExportIngest:
         if not rows:
             return
         cols = {k: [r[k] for r in rows] for k in rows[0]}
-        async with tenant_tx(self.sessions, tenant_id) as s:
-            await s.execute(
-                text(
-                    "INSERT INTO export_day_files (tenant_id, export_id, entry_idx, elements, anomalies,"
-                    " parse_error) SELECT CAST(:t AS uuid), CAST(:e AS uuid), * FROM unnest("
-                    " CAST(:entry AS bigint[]), CAST(:elements AS integer[]),"
-                    " CAST(:anomalies AS integer[]), CAST(:error AS text[])) ON CONFLICT DO NOTHING"
-                ),
-                {"t": tenant_id, "e": export_id, **cols},
-            )
+        with self._db_write():
+            async with tenant_tx(self.sessions, tenant_id) as s:
+                await s.execute(
+                    text(
+                        "INSERT INTO export_day_files (tenant_id, export_id, entry_idx, elements, anomalies,"
+                        " parse_error) SELECT CAST(:t AS uuid), CAST(:e AS uuid), * FROM unnest("
+                        " CAST(:entry AS bigint[]), CAST(:elements AS integer[]),"
+                        " CAST(:anomalies AS integer[]), CAST(:error AS text[])) ON CONFLICT DO NOTHING"
+                    ),
+                    {"t": tenant_id, "e": export_id, **cols},
+                )
 
     async def _insert_threads(
         self, tenant_id: uuid.UUID, export_id: uuid.UUID, rows: list[dict[str, Any]]
     ) -> None:
         cols = {k: [r[k] for r in rows] for k in rows[0]}
-        async with tenant_tx(self.sessions, tenant_id) as s:
-            await s.execute(
-                text(
-                    "INSERT INTO export_threads (tenant_id, export_id, entry_idx, element_idx,"
-                    " conversation_id, thread_ts, ts) SELECT CAST(:t AS uuid), CAST(:e AS uuid), *"
-                    " FROM unnest(CAST(:entry AS bigint[]), CAST(:element AS integer[]),"
-                    " CAST(:conv AS text[]), CAST(:thread AS text[]), CAST(:ts AS text[]))"
-                    " ON CONFLICT DO NOTHING"
-                ),
-                {"t": tenant_id, "e": export_id, **cols},
-            )
+        with self._db_write():
+            async with tenant_tx(self.sessions, tenant_id) as s:
+                await s.execute(
+                    text(
+                        "INSERT INTO export_threads (tenant_id, export_id, entry_idx, element_idx,"
+                        " conversation_id, thread_ts, ts) SELECT CAST(:t AS uuid), CAST(:e AS uuid), *"
+                        " FROM unnest(CAST(:entry AS bigint[]), CAST(:element AS integer[]),"
+                        " CAST(:conv AS text[]), CAST(:thread AS text[]), CAST(:ts AS text[]))"
+                        " ON CONFLICT DO NOTHING"
+                    ),
+                    {"t": tenant_id, "e": export_id, **cols},
+                )
 
     async def _scan_directory(
         self,
@@ -610,36 +663,37 @@ class ExportIngest:
                 raise _duplicate(seen[r["folded"]], r["name"])
             seen[r["folded"]] = r["name"]
         cols = {k: [r[k] for r in batch] for k in batch[0]}
-        try:
-            async with tenant_tx(self.sessions, tenant_id) as s:
-                await s.execute(
-                    text(
-                        "INSERT INTO export_entries (tenant_id, export_id, idx, name, folded_name, kind,"
-                        " folder, hint_day, method, crc32, compressed_size, uncompressed_size,"
-                        " local_header_offset, raw_name, name_encoding, flags)"
-                        " SELECT CAST(:t AS uuid), CAST(:e AS uuid), * FROM unnest(CAST(:idx AS bigint[]), CAST(:name AS text[]),"
-                        " CAST(:folded AS text[]), CAST(:kind AS text[]), CAST(:folder AS text[]),"
-                        " CAST(:day AS date[]), CAST(:method AS smallint[]), CAST(:crc AS bigint[]),"
-                        " CAST(:csize AS bigint[]), CAST(:usize AS bigint[]), CAST(:offset AS bigint[]),"
-                        " CAST(:raw AS bytea[]), CAST(:encoding AS text[]), CAST(:flags AS integer[]))"
-                        " ON CONFLICT (export_id, idx) DO NOTHING"
-                    ),
-                    {"t": tenant_id, "e": export_id, **cols},
-                )
-        except IntegrityError as exc:
-            if "uq_export_entries_export_id_folded_name" not in str(exc.orig):
-                raise
-            async with tenant_tx(self.sessions, tenant_id) as s:
-                clash = (
+        with self._db_write():
+            try:
+                async with tenant_tx(self.sessions, tenant_id) as s:
                     await s.execute(
                         text(
-                            "SELECT name, folded_name FROM export_entries WHERE export_id = :e"
-                            " AND folded_name = ANY(:f) LIMIT 1"
+                            "INSERT INTO export_entries (tenant_id, export_id, idx, name, folded_name, kind,"
+                            " folder, hint_day, method, crc32, compressed_size, uncompressed_size,"
+                            " local_header_offset, raw_name, name_encoding, flags)"
+                            " SELECT CAST(:t AS uuid), CAST(:e AS uuid), * FROM unnest(CAST(:idx AS bigint[]), CAST(:name AS text[]),"
+                            " CAST(:folded AS text[]), CAST(:kind AS text[]), CAST(:folder AS text[]),"
+                            " CAST(:day AS date[]), CAST(:method AS smallint[]), CAST(:crc AS bigint[]),"
+                            " CAST(:csize AS bigint[]), CAST(:usize AS bigint[]), CAST(:offset AS bigint[]),"
+                            " CAST(:raw AS bytea[]), CAST(:encoding AS text[]), CAST(:flags AS integer[]))"
+                            " ON CONFLICT (export_id, idx) DO NOTHING"
                         ),
-                        {"e": export_id, "f": cols["folded"]},
+                        {"t": tenant_id, "e": export_id, **cols},
                     )
-                ).one()
-            raise _duplicate(clash.name, seen[clash.folded_name]) from exc
+            except IntegrityError as exc:
+                if "uq_export_entries_export_id_folded_name" not in str(exc.orig):
+                    raise
+                async with tenant_tx(self.sessions, tenant_id) as s:
+                    clash = (
+                        await s.execute(
+                            text(
+                                "SELECT name, folded_name FROM export_entries WHERE export_id = :e"
+                                " AND folded_name = ANY(:f) LIMIT 1"
+                            ),
+                            {"e": export_id, "f": cols["folded"]},
+                        )
+                    ).one()
+                raise _duplicate(clash.name, seen[clash.folded_name]) from exc
 
     async def _check_overlaps(self, tenant_id: uuid.UUID, export_id: uuid.UUID) -> None:
         """Entries whose local header starts inside the previous entry's header and data (the classic

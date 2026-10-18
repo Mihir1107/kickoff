@@ -63,7 +63,7 @@ RUN UV_PROJECT_ENVIRONMENT=/opt/edisc/testenv uv sync --frozen --all-packages --
 FROM venv AS readiness
 COPY scripts/api_compat.py scripts/production_readiness.py scripts/
 COPY docs/api/breaking-allowlist.yaml docs/api/
-RUN /opt/edisc/testenv/bin/python scripts/production_readiness.py \
+RUN /opt/edisc/testenv/bin/python scripts/production_readiness.py --mode enforce \
  && touch /opt/edisc/production-ready
 
 # ---------------------------------------------------------------- runtime (production layers)

@@ -1,7 +1,7 @@
 """The production-readiness gate (`scripts/production_readiness.py`): a break the frontend has not
 absorbed (an allow-list entry with `status: pending_frontend`) refuses production. It fails the CI
-job `production-readiness` (blocking on release tags) and the `report` (production) target of the
-report image, whose `readiness` stage runs it."""
+job `production-readiness` on release tags (elsewhere the job warns: annotations and a summary,
+green) and the `report` (production) target of the report image, whose `readiness` stage runs it."""
 
 from __future__ import annotations
 
@@ -93,14 +93,104 @@ def test_the_production_image_cannot_be_built_without_the_gate() -> None:
     assert "!docs/api/breaking-allowlist.yaml" in ignore
 
 
-def test_ci_runs_the_gate_and_it_blocks_release_tags() -> None:
+def _mode_for(expression: str, ref: str) -> str:
+    """The subset of GitHub's expression language the job's step uses (startsWith, &&, ||)."""
+
+    def one(match: re.Match[str]) -> str:
+        body = match.group(1).strip().replace("github.ref", repr(ref))
+        body = re.sub(r"startsWith\(([^,]+), ([^)]+)\)", r"\1.startswith(\2)", body)
+        body = body.replace("&&", " and ").replace("||", " or ")
+        return str(eval(body, {"__builtins__": {}}))  # noqa: S307 (our workflow, a fixed subset)
+
+    return re.sub(r"\$\{\{(.*?)\}\}", one, expression)
+
+
+def _ci_step() -> tuple[dict[str, object], str]:
     workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text())
     job = workflow["jobs"]["production-readiness"]
-    assert any(step.get("run") == "make production-readiness" for step in job["steps"])
-    expression = str(job["continue-on-error"])
-    m = re.fullmatch(r"\$\{\{ !startsWith\(github\.ref, '([^']+)'\) \}\}", expression)
-    assert m, expression
-    assert "refs/tags/v1.0.0".startswith(m.group(1)), "a release tag must be blocking"
-    assert not "refs/heads/main".startswith(m.group(1))
+    runs = [s["run"] for s in job["steps"] if str(s.get("run", "")).startswith("make production-")]
+    assert len(runs) == 1, runs
+    return job, runs[0]
+
+
+def _make_command(run: str, ref: str) -> list[str]:
+    """What `make` would run for the CI step on this ref (dry run, so the Makefile is in the test)."""
+    m = re.fullmatch(r"make production-readiness READINESS_MODE=(\$\{\{.*\}\})", run)
+    assert m, run
+    mode = _mode_for(m.group(1), ref)
+    done = subprocess.run(
+        ["make", "-n", "production-readiness", f"READINESS_MODE={mode}"],
+        capture_output=True, text=True, check=True, cwd=ROOT,
+    )  # fmt: skip
+    (line,) = [x for x in done.stdout.splitlines() if "production_readiness.py" in x]
+    return line.split()
+
+
+@pytest.mark.parametrize(
+    ("ref", "blocking"),
+    [("refs/tags/v1.0.0", True), ("refs/heads/main", False), ("refs/heads/feat/x", False),
+     ("refs/pull/7/merge", False), ("refs/tags/nightly", False)],
+)  # fmt: skip
+def test_ci_warns_on_main_and_fails_only_release_tags(
+    tmp_path: Path, ref: str, blocking: bool
+) -> None:
+    """The job as configured, per ref: the mode the workflow picks, through the Makefile, run on a
+    list with a pending entry with GitHub's environment. A release tag fails; everywhere else the
+    job succeeds with one warning annotation per item and a summary naming them."""
+    job, run = _ci_step()
+    assert "continue-on-error" not in job, "red must mean something: the job's verdict is its own"
+    command = _make_command(run, ref)
+    assert command[:3] == ["uv", "run", "python"]
+    target = tmp_path / "summary.md"
+    done = subprocess.run(
+        [sys.executable, *command[3:], "--allowlist", str(_list(tmp_path, [ABSORBED, PENDING]))],
+        capture_output=True, text=True, check=False, cwd=ROOT,
+        env={"PATH": "/usr/bin:/bin", "GITHUB_ACTIONS": "true", "GITHUB_STEP_SUMMARY": str(target)},
+    )  # fmt: skip
+    assert done.returncode == (1 if blocking else 0), done.stdout + done.stderr
+    level = "error" if blocking else "warning"
+    annotations = [x for x in done.stdout.splitlines() if x.startswith("::")]
+    assert annotations == [
+        f"::{level} title=Not ready for production::pending_frontend: {PENDING['rule']} "
+        f"get_thing (tracking {PENDING['tracking']})"
+    ]
+    text = target.read_text()
+    assert "1 item(s) refuse a production build" in text and PENDING["tracking"] in text
+    assert ("Release blocked" in text) is blocking
+
+
+def test_nothing_pending_is_green_and_says_so(tmp_path: Path) -> None:
+    target = tmp_path / "summary.md"
+    for mode in ("enforce", "warn"):
+        done = subprocess.run(
+            [sys.executable, "scripts/production_readiness.py", "--mode", mode,
+             "--allowlist", str(_list(tmp_path, [ABSORBED]))],
+            capture_output=True, text=True, check=False, cwd=ROOT,
+            env={"PATH": "/usr/bin:/bin", "GITHUB_ACTIONS": "true",
+                 "GITHUB_STEP_SUMMARY": str(target)},
+        )  # fmt: skip
+        assert done.returncode == 0 and "::" not in done.stdout, done.stdout
+    assert target.read_text().count("Nothing refuses a production build") == 2
+
+
+def test_warn_mode_still_fails_a_malformed_list(tmp_path: Path) -> None:
+    """Warning mode reports pending items; it never turns a broken allow-list into green."""
+    with pytest.raises(api_compat.CompatError):
+        production_readiness.main(
+            ["--mode", "warn", "--allowlist", str(_list(tmp_path, [{"rule": "x"}]))]
+        )
+
+
+def test_make_and_the_image_enforce_by_default() -> None:
+    done = subprocess.run(
+        ["make", "-n", "production-readiness"], capture_output=True, text=True, check=True, cwd=ROOT
+    )
+    assert "--mode enforce" in done.stdout
+    _, body = _stages((ROOT / "deploy" / "report-image" / "Dockerfile").read_text())["readiness"]
+    assert "production_readiness.py --mode enforce" in body
+
+
+def test_release_tags_trigger_the_workflow() -> None:
+    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text())
     tags = workflow[True]["push"]["tags"]  # PyYAML reads the key `on` as True
     assert any(re.fullmatch(t.replace("*", ".*"), "v1.0.0") for t in tags)

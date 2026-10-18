@@ -42,7 +42,7 @@ make test               # unit tests
 make test-integration   # FRESH ephemeral stack (-p edisc-test, .env.test, other ports), tests, then down -v
 make test-env-up / test-integration-only / test-env-down   # keep the test stack up while iterating
                         # up/up-ci/test targets refuse below MIN_FREE_GB (15) free disk
-make production-readiness  # fails while anything refuses production (allow-list pending_frontend)
+make production-readiness  # fails while anything refuses production (allow-list pending_frontend); READINESS_MODE=warn reports only
 make test-report-pdf    # report image (amd64): in-image PDF tests, PDF goldens, veraPDF, worker OOM (needs test-env-up)
 make worker / api       # Temporal worker (+ maintenance queue, sweeper schedules, exports, renders) / API
 ```
@@ -74,8 +74,10 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   needs `/v2` or a `docs/api/breaking-allowlist.yaml` entry (rule, operation, reason, and EITHER the
   frontend commit that ABSORBED it OR `status: pending_frontend` + `tracking: <file>.md#<anchor>`;
   never a commit that does not absorb it). While any `pending_frontend` entry exists,
-  `make production-readiness` fails (CI job `production-readiness`, blocking on `v*` tags) and the
-  report image's production target (`report`) cannot be built.
+  `make production-readiness` fails (enforce mode) and so do release tags (`v*`, CI job
+  `production-readiness`) and the report image's production target (`report`); on main, branches
+  and PRs the job WARNS (one annotation per item + a job summary) and stays green: red always
+  means something.
   A new response enum value is not breaking (D9). Error bodies are published as sent (422:
   `ValidationErrorOut` / `UnprocessableOut`) and validated against the document at test time.
 - Job streams (M17 step 5, `edisc_api.stream`): only the models of `edisc_api.stream_events`, only

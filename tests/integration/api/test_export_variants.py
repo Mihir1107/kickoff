@@ -5,16 +5,20 @@ irregularity is reported, nothing is mangled silently."""
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 from typing import Any
 
+import httpx
 import pytest
 
 from edisc_connector_dummy.dataset import Dataset
 from edisc_connector_dummy.dialects.slack_export import ExportManifest, ExportOptions, write_export
 from edisc_connector_dummy.spec import DatasetSpec
 from edisc_connector_dummy.zipwriter import ZipWriter
+from tests.integration.phase_timings import phase_clock
+from tests.logcapture import captured_logs
 
 from .conftest import Api, TenantCtx
 from .test_exports import settled, upload
@@ -114,10 +118,53 @@ async def test_ambiguous_names_are_reported_never_silently_mapped(
 
 
 async def test_zip64_by_entry_count(exp_batched: Api, tenant: TenantCtx) -> None:
-    """Over 65,535 entries: the end record overflows and the ZIP64 records carry the count."""
-    data, manifest = generate(
-        ExportOptions(tier="public_only", padding_days=66_000, directory_entries=False)
-    )
-    assert manifest.entries > 65_535
-    out = await ingest(exp_batched, tenant, data)
-    assert_complete_mapping(out, manifest)
+    """Over 65,535 entries: the end record overflows and the ZIP64 records carry the count.
+
+    Its time on CI varied 4-6x across runners (ADR 0015 §24.20), so every phase is timed with what
+    the host did meanwhile (`phase_timings`) and the worker's own phases are read from its log line."""
+    async with phase_clock("test_export_variants::test_zip64_by_entry_count") as clock:
+        with captured_logs() as logs:
+            async with clock.phase("generation"):
+                data, manifest = await asyncio.to_thread(
+                    generate,
+                    ExportOptions(tier="public_only", padding_days=66_000, directory_entries=False),
+                )
+            assert manifest.entries > 65_535
+            clock.extra["zip_bytes"] = len(data)
+            async with exp_batched.client(
+                tenant.subdomain, tenant.token(exp_batched.settings)
+            ) as c:
+                async with clock.phase("upload"):
+                    export_id, done = await upload(c, tenant.default_client_id, data)
+                    assert done.status_code == 202, done.text
+                async with clock.phase("lock"):
+                    await _left(c, export_id, "locking")
+                async with clock.phase("validation"):
+                    out = await settled(c, export_id)
+            clock.extra["worker_phases"] = {
+                e["event"]: {
+                    k: e.get(k)
+                    for k in (
+                        "phases_ms",
+                        "db_write_ms",
+                        "range_requests",
+                        "day_page_reads",
+                        "day_page_read_ms",
+                        "slowest_day_page_ms",
+                    )
+                }
+                for e in logs.events()
+                if e.get("event") in ("export locked", "export validated")
+                and e.get("export_id") == export_id
+            }
+        # the test ends at `ready`: collecting from this export is not part of it (no phase to time)
+        assert_complete_mapping(out, manifest)
+
+
+async def _left(c: httpx.AsyncClient, export_id: str, status: str) -> None:
+    """Until the export has left ``status`` (inside ``settled``'s own bound, which follows)."""
+    async with asyncio.timeout(60):
+        while True:
+            if (await c.get(f"/v1/exports/{export_id}")).json()["status"] != status:
+                return
+            await asyncio.sleep(0.05)
