@@ -21,7 +21,7 @@ import os
 import platform
 import resource
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -57,15 +57,22 @@ def _calibrate() -> float:
     return time.perf_counter() - started
 
 
+Probe = Callable[[], Awaitable[dict[str, int]]]
+
+
 class PhaseClock:
-    def __init__(self, test: str) -> None:
+    def __init__(self, test: str, probe: Probe | None = None) -> None:
+        """``probe``: counters read before and after each phase (e.g. the database's WAL
+        statistics); the phase records their differences."""
         self.test = test
+        self.probe = probe
         self.phases: list[dict[str, Any]] = []
         self.extra: dict[str, Any] = {}
         self.outcome = "unfinished"
 
     @contextlib.asynccontextmanager
     async def phase(self, name: str) -> AsyncIterator[None]:
+        counters0 = await self.probe() if self.probe is not None else None
         cpu0, host0, wall0 = _process_cpu_s(), _host_cpu(), time.monotonic()
         try:
             yield
@@ -82,6 +89,9 @@ class PhaseClock:
                 delta = {k: host1[k] - host0[k] for k in _STAT_FIELDS}
                 total = sum(delta.values()) or 1
                 row["host_pct"] = {k: round(100 * v / total, 1) for k, v in delta.items() if v}
+            if counters0 is not None and self.probe is not None:
+                counters1 = await self.probe()
+                row["counters"] = {k: counters1[k] - counters0[k] for k in counters0}
             self.phases.append(row)
 
     async def calibrate(self, label: str) -> None:
@@ -110,11 +120,11 @@ class PhaseClock:
         if summary:
             lines = [
                 f"### Phase timings: `{self.test}` ({self.outcome})\n",
-                "| phase | wall s | process CPU s | load 1m | host CPU % |",
-                "|---|---|---|---|---|",
+                "| phase | wall s | process CPU s | load 1m | host CPU % | counters |",
+                "|---|---|---|---|---|---|",
                 *(
                     f"| {p['phase']} | {p['wall_s']} | {p['process_cpu_s']} | {p['load_avg_1m']} "
-                    f"| {p.get('host_pct', '')} |"
+                    f"| {p.get('host_pct', '')} | {p.get('counters', '')} |"
                     for p in self.phases
                 ),
                 "",
@@ -127,8 +137,8 @@ class PhaseClock:
 
 
 @contextlib.asynccontextmanager
-async def phase_clock(test: str) -> AsyncIterator[PhaseClock]:
-    clock = PhaseClock(test)
+async def phase_clock(test: str, probe: Probe | None = None) -> AsyncIterator[PhaseClock]:
+    clock = PhaseClock(test, probe)
     await clock.calibrate("before")
     try:
         yield clock

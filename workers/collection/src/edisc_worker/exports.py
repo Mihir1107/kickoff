@@ -144,16 +144,19 @@ class ExportIngest:
     ) -> None:
         self.sessions, self.s3, self.settings = sessions, s3, settings
         self.hooks = hooks or CrashHooks()  # crash-matrix seam (M14.7); no-op in production
-        self.db_write_ms = 0  # wall time inside the index inserts (entries, days, threads)
+        # wall time and statements of the index inserts, per table (entries, days, threads)
+        self.db_writes: dict[str, dict[str, int]] = {}
         self.page_reads: list[int] = []  # wall ms of each day-file page read
 
     @contextlib.contextmanager
-    def _db_write(self) -> Iterator[None]:
+    def _db_write(self, table: str) -> Iterator[None]:
         started = time.monotonic()
         try:
             yield
         finally:
-            self.db_write_ms += round((time.monotonic() - started) * 1000)
+            row = self.db_writes.setdefault(table, {"ms": 0, "statements": 0})
+            row["ms"] += round((time.monotonic() - started) * 1000)
+            row["statements"] += 1
 
     # ------------------------------------------------------------------ hash and lock
     async def lock(self, tenant_id: uuid.UUID, export_id: uuid.UUID) -> dict[str, Any]:
@@ -376,7 +379,7 @@ class ExportIngest:
         phases.mark("ready_commit")
         log.info(
             "export validated", export_id=str(export_id), tier=tier.tier, entries=scan.entries,
-            range_requests=src.requests, phases_ms=phases.ms, db_write_ms=self.db_write_ms,
+            range_requests=src.requests, phases_ms=phases.ms, db_writes=self.db_writes,
             day_page_reads=len(self.page_reads), day_page_read_ms=sum(self.page_reads),
             slowest_day_page_ms=max(self.page_reads, default=0),
         )  # fmt: skip
@@ -566,7 +569,7 @@ class ExportIngest:
         if not rows:
             return
         cols = {k: [r[k] for r in rows] for k in rows[0]}
-        with self._db_write():
+        with self._db_write("export_day_files"):
             async with tenant_tx(self.sessions, tenant_id) as s:
                 await s.execute(
                     text(
@@ -582,7 +585,7 @@ class ExportIngest:
         self, tenant_id: uuid.UUID, export_id: uuid.UUID, rows: list[dict[str, Any]]
     ) -> None:
         cols = {k: [r[k] for r in rows] for k in rows[0]}
-        with self._db_write():
+        with self._db_write("export_threads"):
             async with tenant_tx(self.sessions, tenant_id) as s:
                 await s.execute(
                     text(
@@ -663,7 +666,7 @@ class ExportIngest:
                 raise _duplicate(seen[r["folded"]], r["name"])
             seen[r["folded"]] = r["name"]
         cols = {k: [r[k] for r in batch] for k in batch[0]}
-        with self._db_write():
+        with self._db_write("export_entries"):
             try:
                 async with tenant_tx(self.sessions, tenant_id) as s:
                     await s.execute(

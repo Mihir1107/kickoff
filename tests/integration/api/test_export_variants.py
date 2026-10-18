@@ -20,6 +20,7 @@ from edisc_connector_dummy.zipwriter import ZipWriter
 from tests.integration.phase_timings import phase_clock
 from tests.logcapture import captured_logs
 
+from ..custody.conftest import superuser
 from .conftest import Api, TenantCtx
 from .test_exports import settled, upload
 
@@ -122,7 +123,32 @@ async def test_zip64_by_entry_count(exp_batched: Api, tenant: TenantCtx) -> None
 
     Its time on CI varied 4-6x across runners (ADR 0015 §24.20), so every phase is timed with what
     the host did meanwhile (`phase_timings`) and the worker's own phases are read from its log line."""
-    async with phase_clock("test_export_variants::test_zip64_by_entry_count") as clock:
+
+    async def wal() -> dict[str, int]:
+        """The cluster's WAL counters (PostgreSQL 16 ``pg_stat_wal``): what a phase wrote."""
+        conn = await superuser(exp_batched.settings)
+        try:
+            row = await conn.fetchrow(
+                "SELECT wal_records, wal_fpi, wal_bytes::bigint AS wal_bytes, wal_write, wal_sync"
+                " FROM pg_stat_wal"
+            )
+            # how the index tables were read: a plan that turned into sequential scans (stale
+            # statistics mid-load) shows here as seq_tup_read in the millions
+            tables = await conn.fetch(
+                "SELECT relname, seq_scan, seq_tup_read, idx_scan, n_live_tup,"
+                " autoanalyze_count + analyze_count AS analyzes FROM pg_stat_user_tables"
+                " WHERE relname IN ('export_entries', 'export_day_files')"
+            )
+        finally:
+            await conn.close()
+        assert row is not None
+        out = {k: int(v) for k, v in row.items()}
+        for t in tables:
+            for k in ("seq_scan", "seq_tup_read", "idx_scan", "n_live_tup", "analyzes"):
+                out[f"{t['relname']}.{k}"] = int(t[k] or 0)
+        return out
+
+    async with phase_clock("test_export_variants::test_zip64_by_entry_count", wal) as clock:
         with captured_logs() as logs:
             async with clock.phase("generation"):
                 data, manifest = await asyncio.to_thread(
@@ -146,7 +172,7 @@ async def test_zip64_by_entry_count(exp_batched: Api, tenant: TenantCtx) -> None
                     k: e.get(k)
                     for k in (
                         "phases_ms",
-                        "db_write_ms",
+                        "db_writes",
                         "range_requests",
                         "day_page_reads",
                         "day_page_read_ms",
