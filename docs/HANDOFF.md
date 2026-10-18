@@ -20,7 +20,7 @@ normalizer **0.3.0**, report renderer **1.6.0**, preview renderer **1.0.0**. CI 
 `test_a_grid_sized_directory_pages_on_its_index`, diagnosed as a test bug (its "no Sort" plan
 assertion at the last full page; the planner sorted the ~500 remaining rows after a bitmap read of
 the index range, on cost; ADR 0016 "closing M17" note 3); the test now measures bounded work per
-page at three depths. Not re-run to green. The next commit's run is the verdict (below, "CI"). Full local integration suite on
+page at three depths. Not re-run to green. Run 39127913175 on `e437be5`: **green, every job**. Full local integration suite on
 `72038ad`'s tree: 1,447 passed.
 
 ## Done: closing M17 (2026-10-18; round `m17-close`, 42 breaks, all caught)
@@ -60,6 +60,8 @@ each with a foreign key to `export_entries`), their page reads:
 | 39120935270 | 0.15 s | 30.2 s | (24.0 s all inserts) | 3.9 s |
 | 39121279530 | 0.21 s | 33.7 s | 20.8 s | 5.4 s |
 | 39123189226 | 0.18 s | 11.9 s | 4.5 s | 1.2 s |
+| 39126275352 | 0.19 s | 12.5 s | 5.0 s (statement 4.0 s) | 1.8 s |
+| 39127913175 | 0.17 s | 23.4 s | 14.5 s (statement 14.2 s) | 3.5 s |
 
 **Conclusion so far: not CPU throughput, and one phase spikes.** Runs with the same calibration
 (0.15 vs 0.18 s) differ 2.5x in validation and ~5x in the day-file inserts; on the slow runs the
@@ -71,11 +73,16 @@ CPU spread, which this is not) and **the 60 s bound is unchanged**. Open: which 
 is slow on a slow runner. Since `597d5f2` each insert's statement time is recorded apart from its
 commit and the test probes the foreign-key check's work alone (`fk_lock_probe`: 20 x 500 rows read,
 locked FOR KEY SHARE, committed); run 39123189226 (fast) gave select 10.5 ms, lock 13.6 ms, commit
-33 ms. Needed: the same numbers from a SLOW run (download the `phase-timings-<run>-*-shard0`
-artifact of each main run until one is slow), then: statement time up with the probe's lock time
-=> the FK row locks (consider validating day files against the entries in the batch instead of
-a row-locking FK, a schema decision for the user); commit time up => WAL flush latency of the
-runner's disk.
+33 ms. **Narrowed by run 39127913175 (slow-ish):** of 14.5 s in the day-file inserts, 14.2 s is the
+statements themselves and ~0.3 s the 133 commits: NOT the WAL flush / disk. The probe (the same FK
+row locks, alone, right after validation) was fast (8 / 11.6 / 5.5 ms): NOT the row locks in
+themselves. So the statements are slow only DURING validation. One correlate: every CI run's
+counters show an ANALYZE of `export_entries` inside the validation window (`analyzes` +1), the
+laptop's never do. Next: sample `pg_stat_activity` (wait_event_type/wait_event of the worker's
+backend, and any autovacuum worker on `export_entries`) every 100 ms during validation and record
+the histogram in the timings; if the inserts wait on buffer pins/locks held by autovacuum or
+autoanalyze, that is the cause (a fix to decide with the user: e.g. disable autovacuum on the
+export index tables during ingestion, or one statement per batch without the row-locking FK).
 
 ## Done: the fixes to step 6, then M17 step 8 (2026-10-17)
 **CI:** run 39030431440 on `3d8bebc` (the fixes): **success**; `production-readiness` red by

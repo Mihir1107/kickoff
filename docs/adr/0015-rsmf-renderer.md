@@ -1379,6 +1379,11 @@ what was done and why.
     unchanged. Next: the statement/commit split and the FK lock probe (`fk_lock_probe`, since
     `597d5f2`) from a SLOW run; the fast run 39123189226 gave statement 3.3 s of 4.5 s and probe
     select 10.5 / lock 13.6 / commit 33 ms. HANDOFF "The zip64 test on CI" has the table.
+    Run 39127913175 (validation 23.4 s, calibration 0.17 s): of 14.5 s in the day-file inserts,
+    14.2 s is statement execution, 0.3 s the commits (not the disk); the probe of the same FK
+    locks alone afterwards was fast (8 / 11.6 / 5.5 ms). The statements are slow only during
+    validation; every CI run shows an ANALYZE of `export_entries` in that window, the laptop none.
+    Next: sample the backend's wait events (and autovacuum workers) during validation.
 
 21. **`test_a_crash_after_the_journal_is_repaired_exactly_once[False]` failed once locally
     (2026-10-18, NOT diagnosed, output lost).** One run of five files (`test_no_echo`,
