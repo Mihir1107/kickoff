@@ -382,7 +382,7 @@ def report_html(doc: Mapping[str, Any]) -> bytes:
         _h2("Conversations", conv.get("source")),
         el("p", "Per conversation (worst status first):"),
         _capped(conv, conv_cols, "conversations.jsonl"),
-        _section_pairs("Pauses", doc["pauses"], skip=("pauses",)),
+        _pauses(doc["pauses"]),
         _section_pairs("Versions", doc["versions"]),
         _section_pairs("Custody verification", doc["custody_verification"]),
         _section_pairs("Evidence store", doc["evidence_store"], skip=("retention_gaps", "lock")),
@@ -409,6 +409,26 @@ def _page_identity(doc: Mapping[str, Any]) -> str:
     the document, so the footer starts on page 1."""
     job, digest = doc["job"].get("id"), doc.get("integrity", {}).get("snapshot_digest")
     return el("p", f"job {user(job)} · snapshot {user(digest)}", **{"class": "pageid src"})
+
+
+PAUSE_COLUMNS = (
+    ("paused at", "paused_at"), ("reason class", "reason_class"), ("deadline", "deadline_at"),
+    ("ended", "ended_how"), ("ended at", "ended_at"), ("ended by", "ended_by"),
+    ("reason given", "end_reason"), ("duration ms", "duration_ms"), ("connection", "connection_id"),
+)  # fmt: skip
+
+
+def _pauses(section: Mapping[str, Any]) -> str:
+    """Every pause and how it ended (re-authorized, the deadline, finished without access: who,
+    when, the reason given), then the counts by ending, zeros included."""
+    pauses = section.get("pauses", [])
+    rows = [[_value(p.get(key)) for _, key in PAUSE_COLUMNS] for p in pauses]
+    return (
+        _h2("Pauses", section.get("source"))
+        + (table([h for h, _ in PAUSE_COLUMNS], rows) if rows else el("p", "None."))
+        + el("p", "Pauses by how they ended:")
+        + _counts_table(section.get("by_end", []))
+    )
 
 
 def _divergences(divs: Sequence[Mapping[str, Any]]) -> str:

@@ -21,8 +21,12 @@
   ``end`` with the reason and closes. The stream authenticates PASSIVELY (decision D6): it never
   moves the session's activity, so the idle and absolute limits still end it.
 - **Never evidence content:** this module reads only the statements in :data:`STATEMENTS` (job
-  status, the custody head, settled-unit chain events' sequence numbers and unit keys, unit rows'
-  status columns, open pauses) and imports nothing that reads evidence (both checked by tests).
+  status, the custody head, the job's connection's status, settled-unit chain events' sequence
+  numbers and unit keys, unit rows' status columns, open pauses) and imports nothing that reads
+  evidence (both checked by tests).
+- **The connection:** its status is part of each poll's compared state and of the snapshot's
+  digest; a writer starts from ``active`` and sends ``connection`` before any snapshot whose
+  connection status differs from the last one the client knows (``stream_events``).
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from edisc_api.auth import Caller
 from edisc_api.stream_events import (
     MAX_UNITS,
+    ConnectionEvent,
     EndEvent,
     EndReason,
     JobEvent,
@@ -58,7 +63,8 @@ log = get_logger(__name__)
 
 SETTLED = ("unit_reconciled", "unit_failed")  # chain events that settle a unit
 HEAD = (
-    "SELECT j.status, j.sealed_at IS NOT NULL AS sealed,"
+    "SELECT j.status, j.sealed_at IS NOT NULL AS sealed, j.connection_id,"
+    " (SELECT c.status FROM connections c WHERE c.id = j.connection_id) AS connection_status,"
     " (SELECT max(e.seq) FROM custody_events e WHERE e.stream_id = j.id) AS head"
     " FROM collection_jobs j WHERE j.id = :j"
 )
@@ -84,6 +90,7 @@ SESSION = (
 )
 PRINCIPAL = "SELECT active FROM principals WHERE id = :p"
 STATEMENTS = (HEAD, SETTLED_SINCE, UNITS, COUNTS, PAUSED, SESSION, PRINCIPAL)
+ACTIVE = "active"
 CLEAN = {JobStatus.COMPLETED.value: "source", JobStatus.COMPLETED_AGAINST_ARCHIVE.value: "archive"}
 
 Sessions = async_sessionmaker[AsyncSession]
@@ -98,11 +105,18 @@ class Sent:
     model: Strict
     seq: int  # the chain position it covers (unit events: their last; snapshots: the head)
     final: bool = False
+    connection: ConnectionEvent | None = None  # snapshots: the job's connection at the head
 
     def wire(self) -> bytes:
         return (
             f"id: {self.id}\nevent: {self.name}\ndata: {self.model.model_dump_json()}\n\n".encode()
         )
+
+
+def connection_wire(connection: ConnectionEvent) -> bytes:
+    """The ``connection`` event that goes before a snapshot: no ``id:``, so the client's
+    ``Last-Event-ID`` stays the previous event's until the snapshot arrives."""
+    return f"event: connection\ndata: {connection.model_dump_json()}\n\n".encode()
 
 
 def parse_last_event_id(value: str | None) -> tuple[int, str | None]:
@@ -186,10 +200,18 @@ async def read_changes(
         units_by_status=dict(sorted(by_status.items())),
         units_by_recon_status=dict(sorted(by_recon.items())),
     )  # fmt: skip
-    digest = hashlib.sha256(canonical_json(snapshot.model_dump(mode="json"))).hexdigest()[:12]
+    connection = ConnectionEvent(
+        connection_id=row.connection_id, status=row.connection_status,
+        needs_reauthorization=row.connection_status == "reauth_required",
+    )  # fmt: skip
+    digest = hashlib.sha256(
+        canonical_json({"job": snapshot.model_dump(mode="json"),
+                        "connection": connection.model_dump(mode="json")})
+    ).hexdigest()[:12]  # fmt: skip
     if reset is not None:
         events = [Sent(str(head), "reset", ResetEvent(reason=reset), head)]
-    return events, Sent(f"{head}.{digest}", "job", snapshot, head, final=bool(row.sealed))
+    return events, Sent(f"{head}.{digest}", "job", snapshot, head, final=bool(row.sealed),
+                        connection=connection)  # fmt: skip
 
 
 # ------------------------------------------------------------------ fan-out
@@ -206,8 +228,9 @@ class JobFeed:
     sessions: Sessions
     poll_seconds: float
     subscribers: set[Subscriber] = field(default_factory=set)
-    # (status, sealed, head) of the last poll: sealing moves neither the status nor the chain head
-    last: tuple[str, bool, int] | None = None
+    # (status, sealed, head, connection status) of the last poll: sealing moves neither the status
+    # nor the chain head; a connection's status moves neither either
+    last: tuple[str, bool, int, str | None] | None = None
     after: int | None = None  # the head the feed has published up to
     task: asyncio.Task[None] | None = None
     polls: int = 0
@@ -244,8 +267,9 @@ class JobFeed:
                 raise
             if self.after is None:
                 self.after = snapshot.seq
-                model = snapshot.model
-                self.last = (model.status, model.sealed, snapshot.seq)  # type: ignore[attr-defined]
+                model, conn = snapshot.model, snapshot.connection
+                self.last = (model.status, model.sealed, snapshot.seq,  # type: ignore[attr-defined]
+                             conn.status if conn is not None else None)  # fmt: skip
             return sub, events, snapshot
 
     async def poll_once(self) -> None:
@@ -255,7 +279,7 @@ class JobFeed:
             # (found by CI run 38897021941: a "head 5" snapshot showing unit 6, sent before it)
             async with tenant_tx(self.sessions, self.tenant_id, repeatable_read=True) as s:
                 row = (await s.execute(text(HEAD), {"j": self.job_id})).one()
-                state = (row.status, bool(row.sealed), int(row.head or 0))
+                state = (row.status, bool(row.sealed), int(row.head or 0), row.connection_status)
                 if state == self.last or self.after is None:
                     return
                 events, snapshot = await read_changes(s, self.job_id, self.after)
@@ -375,7 +399,20 @@ async def stream_body(
     feed = feeds.feed(caller.tenant_id, job_id)
     started = time.monotonic()
     last_seq, last_snapshot = parse_last_event_id(last_event_id)
+    # the connection status this client knows: a stream starts from `active` (the normal state,
+    # nothing to say), so `connection` goes out when the connection is anything else at the start,
+    # and on every change after
+    last_connection = ACTIVE
     sub: Subscriber | None = None
+
+    def with_connection(event: Sent) -> bytes:
+        """A snapshot, preceded by ``connection`` when the client has not had that status."""
+        nonlocal last_connection
+        out = event.wire()
+        if event.connection is not None and event.connection.status != last_connection:
+            out = connection_wire(event.connection) + out
+            last_connection = event.connection.status
+        return out
 
     def fresh(event: Sent) -> Sent | None:
         """The part of ``event`` this client has not had: a feed's event may overlap its catch-up
@@ -399,10 +436,12 @@ async def stream_body(
         )
         sub = joined
         feeds.start(feed)
+        if snapshot.id == last_snapshot and snapshot.connection is not None:
+            last_connection = snapshot.connection.status  # its digest covers the connection
         for caught in [*events, snapshot]:
             event = fresh(caught)
             if event is not None:
-                yield event.wire()
+                yield with_connection(event)
                 if event.name == "reset":  # the client reloads: positions restart at the head
                     last_seq, last_snapshot = event.seq, None
                     continue
@@ -427,7 +466,7 @@ async def stream_body(
                 live = None
             live = fresh(live) if live is not None else None
             if live is not None:
-                yield live.wire()
+                yield with_connection(live)
                 last_seq = max(last_seq, live.seq)
                 if live.name == "job":
                     last_snapshot = live.id

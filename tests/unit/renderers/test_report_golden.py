@@ -24,7 +24,7 @@ import os
 import pathlib
 import unicodedata
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -97,10 +97,13 @@ def _digest(name: str, rows: int) -> m.JsonlDigest:
 def _inputs(*, units: int, conversations: int, status: str = "completed", live: bool = True,
             failed_every: int = 0, gap_every: int = 0, hard: bool = False,
             custody_ok: bool = True, divergences: int = 0,
-            retention_gaps: int = 0, export: bool = False) -> m.ReportInputs:  # fmt: skip
+            retention_gaps: int = 0, export: bool = False,
+            pauses: str | None = None) -> m.ReportInputs:  # fmt: skip
     """Fixed report inputs (no randomness, no clock): ``units`` units spread over
     ``conversations`` conversations, every ``failed_every``-th unit failed and every
-    ``gap_every``-th one with a gap; ``hard`` puts the hard strings in names and error texts."""
+    ``gap_every``-th one with a gap; ``hard`` puts the hard strings in names and error texts;
+    ``pauses`` adds pauses and how they ended (ADR 0016 A6): ``finished`` (re-authorized once, then
+    paused again and finished without access, with a hard-string reason) or ``deadline``."""
     chain = m.ChainFold()
     started: dict[str, Any] = {"connector": "dummy", "connector_version": "0.4.0",
                                "connection_id": "conn-1", "scopes": [{"type": "channel",
@@ -111,6 +114,8 @@ def _inputs(*, units: int, conversations: int, status: str = "completed", live: 
     if export:  # a free-plan export: public channels only (§32)
         started |= {"plan_tier": "public_only", "export": EXPORT}
     chain.add(m.ChainEvent(1, "job_started", "user:alice", T0, started))
+    for event in _pause_events(pauses):
+        chain.add(event)
     capped, conv_capped, fold = m.Capped(), m.Capped(), m.ConversationFold()
     status_counts: dict[str, int] = {}
     recon_counts: dict[str, int] = {}
@@ -186,6 +191,39 @@ def _inputs(*, units: int, conversations: int, status: str = "completed", live: 
     )  # fmt: skip
 
 
+def _pause_events(kind: str | None) -> list[m.ChainEvent]:
+    def paused(seq: int, hours: int) -> m.ChainEvent:
+        at = T0 + timedelta(hours=hours)
+        return m.ChainEvent(seq, "job_paused", "system", at, {
+            "reason": "invalid_auth (credentials_revoked)", "connection_id": "conn-1",
+            "reason_class": "credentials_revoked",
+            "deadline_at": (at + timedelta(hours=168)).isoformat()})  # fmt: skip
+
+    def ended(seq: int, hours: int, how: str, actor: str, reason: str | None) -> m.ChainEvent:
+        return m.ChainEvent(seq, "job_pause_ended", actor, T0 + timedelta(hours=hours), {
+            "ended_how": how, "reason_class": "credentials_revoked",
+            **({"reason": reason} if reason is not None else {})})  # fmt: skip
+
+    if kind == "finished":
+        return [
+            paused(10, 1),
+            m.ChainEvent(
+                11, "job_resumed", "user:dana", T0 + timedelta(hours=3), {"connection_id": "conn-1"}
+            ),
+            paused(12, 5),
+            ended(
+                13,
+                9,
+                "finished_without_access",
+                "user:sam",
+                f"custodian left the firm {HARD[12]} {HARD[5]}",
+            ),
+        ]
+    if kind == "deadline":
+        return [paused(10, 1), ended(11, 169, "deadline", "system:access-lost", None)]
+    return []
+
+
 CASES: dict[str, Callable[[], m.ReportInputs]] = {
     "clean": lambda: _inputs(units=12, conversations=3),
     "gaps_and_failures_hard_strings": lambda: _inputs(
@@ -197,6 +235,11 @@ CASES: dict[str, Callable[[], m.ReportInputs]] = {
     "custody_failed_divergent": lambda: _inputs(
         units=4, conversations=1, custody_ok=False, divergences=2, retention_gaps=1),
     # at the caps: 1,205 unit exceptions and 1,001 conversations, the remainders named by file
+    # how pauses ended (ADR 0016 A6, report renderer 1.6.0)
+    "pauses_reauthorized_then_finished": lambda: _inputs(
+        units=6, conversations=2, status="completed_with_gaps", pauses="finished"),
+    "pause_deadline": lambda: _inputs(
+        units=4, conversations=1, status="completed_with_gaps", pauses="deadline"),
     "at_the_cap": lambda: _inputs(
         units=2_002, conversations=1_001, status="failed", failed_every=2, gap_every=3, hard=True),
 }  # fmt: skip

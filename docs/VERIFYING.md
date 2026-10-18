@@ -140,7 +140,7 @@ fails.
 | Job: who started it, its final status, the unit day zone | From `job_started` and the final event |
 | Scopes, access facts (connector and version, connection, plan tier, granted scopes, blind spots, export hash) | As `job_started` recorded them |
 | For a job read from a Slack export: the export's size, entry count, declared plan, detected tier, whether the tier is confirmed, its blind spots (what the export cannot contain), tier warnings and validation findings | As `job_started.export` recorded them (jobs started since ADR 0018 §32). For older jobs the report prints UNKNOWN for these and the recomputation expects exactly that |
-| Pauses (with who re-authorized) and how many were never resumed | From `job_paused` / `job_resumed` |
+| Pauses: each pause's reason, reason class, deadline and **how it ended** (`reauthorized` with who re-authorized; `deadline` when the re-authorization deadline passed; `finished_without_access` with who decided it and the reason they gave; `not_ended` when the chain records no end), when, its duration, and the counts by ending | From `job_paused`, `job_resumed` and `job_pause_ended` (reports of renderer 1.6.0 and later). A report of an earlier renderer stated who re-authorized and how many pauses were never resumed: it is recomputed in that shape |
 | Custody actors by event type | Every event's actor |
 | Normalizer versions | From `job_started` and each batch, for jobs started since they were recorded (ADR 0018 §30). Older jobs: checked by digest only, and the output says so |
 | **The clean verdict, one way** | See below |

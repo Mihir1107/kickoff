@@ -351,25 +351,66 @@ class ChainEvent:
     payload: Mapping[str, Any]
 
 
+# how a pause ended, from the chain (ADR 0016 A6): `job_resumed` (re-authorized), or
+# `job_pause_ended` with `ended_how` (the deadline passed, or someone finished the job without
+# access); a pause the chain never ends is `not_ended`
+PAUSE_ENDS = ("reauthorized", "deadline", "finished_without_access", "not_ended")
+
+
 @dataclass
 class Pause:
     reason: str | None
     connection_id: str | None
     paused_at: datetime
-    resumed_at: datetime | None = None
-    resumed_by: str | None = None
+    reason_class: str | None = None  # recorded since M17 step 8
+    deadline_at: str | None = None  # recorded since M17 step 8 (as written in the event)
+    ended_how: str | None = None
+    ended_at: datetime | None = None
+    ended_by: str | None = None
+    end_reason: str | None = None  # the reason given to finish without access
+
+    def end(self, how: str, at: datetime, by: str, reason: str | None = None) -> None:
+        self.ended_how, self.ended_at, self.ended_by, self.end_reason = how, at, by, reason
 
     def record(self) -> dict[str, Any]:
         duration = (
             None
-            if self.resumed_at is None
-            else round((self.resumed_at - self.paused_at).total_seconds() * 1000)
+            if self.ended_at is None
+            else round((self.ended_at - self.paused_at).total_seconds() * 1000)
+        )
+        return {
+            "reason": self.reason, "reason_class": or_unknown(self.reason_class),
+            "connection_id": self.connection_id, "paused_at": iso(self.paused_at),
+            "deadline_at": or_unknown(self.deadline_at),
+            "ended_how": self.ended_how or "not_ended", "ended_at": iso(self.ended_at),
+            "ended_by": self.ended_by, "end_reason": self.end_reason, "duration_ms": duration,
+        }  # fmt: skip
+
+    def legacy_record(self) -> dict[str, Any]:
+        """The record of report renderers before 1.6.0 (only a re-authorization ended a pause), for
+        the offline recomputation of those reports."""
+        resumed = self.ended_at if self.ended_how == "reauthorized" else None
+        duration = (
+            None if resumed is None else round((resumed - self.paused_at).total_seconds() * 1000)
         )
         return {
             "reason": self.reason, "connection_id": self.connection_id,
-            "paused_at": iso(self.paused_at), "resumed_at": iso(self.resumed_at),
-            "duration_ms": duration, "resumed_by": self.resumed_by,
+            "paused_at": iso(self.paused_at), "resumed_at": iso(resumed), "duration_ms": duration,
+            "resumed_by": self.ended_by if resumed is not None else None,
         }  # fmt: skip
+
+
+def pauses_section(pauses: Sequence[Pause]) -> dict[str, Any]:
+    """Every pause of the job and how it ended, from the chain alone (the verifier recomputes it)."""
+    ends = Counter(p.ended_how or "not_ended" for p in pauses)
+    return {"pauses": [p.record() for p in pauses], "by_end": zero_rows(PAUSE_ENDS, ends)}
+
+
+def legacy_pauses_section(pauses: Sequence[Pause]) -> dict[str, Any]:
+    return {
+        "pauses": [p.legacy_record() for p in pauses],
+        "never_resumed": sum(1 for p in pauses if p.ended_how != "reauthorized"),
+    }
 
 
 @dataclass
@@ -412,12 +453,21 @@ class ChainFold:
             self.stops.append(e)
         elif e.event_type == "job_paused":
             self.pauses.append(
-                Pause(e.payload.get("reason"), e.payload.get("connection_id"), e.created_at)
-            )
+                Pause(
+                    e.payload.get("reason"), e.payload.get("connection_id"), e.created_at,
+                    reason_class=e.payload.get("reason_class"),
+                    deadline_at=e.payload.get("deadline_at"),
+                )
+            )  # fmt: skip
         elif e.event_type == "job_resumed":
             for p in self.pauses:
-                if p.resumed_at is None:
-                    p.resumed_at, p.resumed_by = e.created_at, e.actor
+                if p.ended_how is None:
+                    p.end("reauthorized", e.created_at, e.actor)
+        elif e.event_type == "job_pause_ended":
+            for p in self.pauses:
+                if p.ended_how is None:
+                    p.end(str(e.payload.get("ended_how")), e.created_at, e.actor,
+                          e.payload.get("reason"))  # fmt: skip
         elif e.event_type == "items_collected":
             self.batches += 1
             if e.payload.get("normalizer_version"):
@@ -838,11 +888,7 @@ def report_document(inp: ReportInputs) -> dict[str, Any]:
         },
         "conversations": dict(inp.conversations)
         or {"source": "job_chain", "rows": [], "total": 0, "more": 0, "more_in": None},
-        "pauses": {
-            "source": "job_chain",
-            "pauses": [p.record() for p in inp.chain.pauses],
-            "never_resumed": sum(1 for p in inp.chain.pauses if p.resumed_at is None),
-        },
+        "pauses": {"source": "job_chain", **pauses_section(inp.chain.pauses)},
         "versions": {
             "source": "job_chain",
             "connector_version": or_unknown(sp.get("connector_version")),

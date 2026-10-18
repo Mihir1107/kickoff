@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy import text
 
 from edisc_api.auth import Caller
+from edisc_api.routes.jobs import _pipeline
 from edisc_api.stream import SessionWatch
 from edisc_api.stream_events import EndReason, ResetReason
 from edisc_core.ids import new_id
@@ -189,6 +190,112 @@ async def test_a_seal_that_moves_neither_status_nor_chain_ends_the_stream(
             await conn.close()
         events = await sse.until("end", within=5)
     assert events[-1].data == {"reason": "sealed"} and events[-2].data["sealed"]
+
+
+# ------------------------------------------------------------------ the connection
+async def _connection_of(api: Api, t: TenantCtx, job: Job) -> uuid.UUID:
+    async with tenant_tx(api.sessions, t.tenant_id) as s:
+        return uuid.UUID(str((await s.execute(
+            text("SELECT connection_id FROM collection_jobs WHERE id = :j"), {"j": job.id}
+        )).scalar_one()))  # fmt: skip
+
+
+async def test_the_connection_event_follows_the_connections_status(
+    api: Api, tenant: TenantCtx
+) -> None:
+    """Plan §4: the job's connection turning ``reauth_required`` (credentials refused: the
+    pipeline's own pause) is a ``connection`` event, right before the snapshot that shows the
+    pause; re-authorized, ``active`` again. An active connection at the start says nothing."""
+    api = tuned(api)
+    job = await new_job(api, tenant)
+    connection = await _connection_of(api, tenant, job)
+    pipeline = _pipeline(api.resources)
+    async with stream(api, tenant, job) as sse:
+        first = await sse.next()
+        assert first.name == "job" and not first.data["paused"]  # active: no connection event
+        assert await pipeline.pause_connection(
+            tenant_id=tenant.tenant_id, connection_id=connection,
+            reason="source rejected credentials (credentials_revoked): token_revoked",
+        ) == [job.id]  # fmt: skip
+        changed, paused = await sse.next(), await sse.next()
+        assert (changed.name, changed.id) == ("connection", None)  # no id: Last-Event-ID stays
+        assert changed.data == {"connection_id": str(connection), "status": "reauth_required",
+                                "needs_reauthorization": True}  # fmt: skip
+        assert paused.name == "job" and paused.data["paused"] and paused.id
+        await pipeline.resume_connection(
+            tenant_id=tenant.tenant_id, connection_id=connection, actor="user:dana"
+        )
+        back = [await sse.next(), await sse.next()]
+        assert [e.name for e in back] == ["connection", "job"]
+        assert back[0].data["status"] == "active" and not back[0].data["needs_reauthorization"]
+        assert not back[1].data["paused"]
+        await seal(api, tenant, job)
+        await sse.until("end")
+    names = [e.name for e in sse.all_events]
+    assert names.count("connection") == 2  # one per change, never repeated with later snapshots
+
+
+async def test_a_stream_opened_on_a_refused_connection_says_so_first_and_once(
+    api: Api, tenant: TenantCtx
+) -> None:
+    """A fresh stream while the connection is ``reauth_required``: ``connection`` first. A
+    reconnect whose Last-Event-ID is the snapshot after it gets neither again (its digest covers
+    the connection); one from before the pause gets both."""
+    api = tuned(api)
+    job = await new_job(api, tenant)
+    async with stream(api, tenant, job) as before:
+        before_id = (await before.next()).id
+    await _pipeline(api.resources).pause_connection(
+        tenant_id=tenant.tenant_id, connection_id=await _connection_of(api, tenant, job),
+        reason="source rejected credentials (credentials_revoked): token_revoked",
+    )  # fmt: skip
+    async with stream(api, tenant, job) as fresh:
+        got = [await fresh.next(), await fresh.next()]
+    assert [e.name for e in got] == ["connection", "job"]
+    assert got[0].data["needs_reauthorization"] and got[1].data["paused"]
+    snapshot_id = got[1].id
+    assert snapshot_id is not None and before_id is not None and snapshot_id != before_id
+    async with stream(api, tenant, job, **{"Last-Event-ID": snapshot_id}) as again:
+        await settle(api, tenant, job, job.units[0])
+        nxt = [await again.next(), await again.next()]
+    # nothing repeated: neither the connection nor that snapshot; the unit, then the snapshot at
+    # its head, with no connection event before it (the client knows the connection's status)
+    assert [e.name for e in nxt] == ["units", "job"] and nxt[1].data["paused"]
+    async with stream(api, tenant, job, **{"Last-Event-ID": before_id}) as older:
+        got = [await older.next() for _ in range(3)]
+    # the unit settled since, then the connection's change and the snapshot showing it
+    assert [e.name for e in got] == ["units", "connection", "job"]
+    assert got[1].data["status"] == "reauth_required" and got[2].data["paused"]
+
+
+async def test_a_change_of_the_connection_alone_is_seen_live_and_across_a_reconnect(
+    api: Api, tenant: TenantCtx
+) -> None:
+    """Only the connection moves (disabled while the job runs: neither the job's status nor its
+    chain changes). The poll compares the connection's status, so a live stream gets it; a client
+    that reconnects with the snapshot id from BEFORE the change gets it too, because the snapshot's
+    digest covers the connection (otherwise its id would be unchanged and nothing re-sent)."""
+    api = tuned(api)
+    job = await new_job(api, tenant)
+    connection = await _connection_of(api, tenant, job)
+    async with stream(api, tenant, job) as live:
+        before = await live.next()
+        conn = await superuser(api.settings)
+        try:
+            await conn.execute(
+                "UPDATE connections SET status = 'revoked' WHERE id = $1", connection
+            )
+        finally:
+            await conn.close()
+        changed, snapshot = await live.next(), await live.next()
+    assert (changed.name, changed.data["status"]) == ("connection", "revoked")
+    assert snapshot.name == "job" and snapshot.data == before.data  # the job itself did not move
+    assert before.id is not None and snapshot.id != before.id
+    async with stream(api, tenant, job, **{"Last-Event-ID": before.id}) as again:
+        got = [await again.next(), await again.next()]
+    assert [(e.name, e.data.get("status")) for e in got] == [
+        ("connection", "revoked"), ("job", "running")]  # fmt: skip
+    assert got[1].id == snapshot.id
 
 
 # ------------------------------------------------------------------ reconnection
@@ -566,9 +673,12 @@ def test_the_end_reasons_are_the_published_ones() -> None:
     assert schemas["ResetEvent"]["properties"]["reason"] == {
         "$ref": "#/components/schemas/ResetReason"
     }
+    assert set(schemas["ConnectionEvent"]["required"]) == {
+        "connection_id", "status", "needs_reauthorization"}  # fmt: skip
     op = doc["paths"]["/v1/jobs/{job_id}/stream"]["get"]
     assert op["x-sse-events"] == sorted(
         [
+            "ConnectionEvent",
             "EndEvent",
             "EndReason",
             "JobEvent",

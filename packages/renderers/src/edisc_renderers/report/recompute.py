@@ -18,8 +18,10 @@ own model (`ChainFold`, `unit_row`, `jsonl_line`) and rebuilds, then byte-compar
 - from those rows, exactly as the loader derives them: the unit counts by status and recon status,
   the totals, the capped unit exceptions, the conversations section and ``conversations.jsonl``;
 - ``job``: who started it, the final status (when the chain has a final event), the unit day zone;
-  ``scopes``, ``access`` as `job_started` recorded them; ``pauses`` (with who re-authorized) and the
-  count never resumed; ``actors``: every custody event's actor by type; ``versions``: the normalizer
+  ``scopes``, ``access`` as `job_started` recorded them; ``pauses``: each pause's reason class,
+  deadline and how it ended (re-authorized, the deadline, finished without access: when, by whom,
+  the reason given) and the counts by ending (reports before renderer 1.6.0: who re-authorized and
+  the count never resumed); ``actors``: every custody event's actor by type; ``versions``: the normalizer
   versions `job_started` and each batch recorded (jobs started since ADR 0018 §30; older jobs: not
   recomputed);
 - the clean VERDICT from the chain alone (`chain_verdict`, §30): the report may never state clean
@@ -60,7 +62,9 @@ from edisc_renderers.report.model import (
     export_section,
     jsonl_line,
     kind_of,
+    legacy_pauses_section,
     or_unknown,
+    pauses_section,
     unit_order,
     unit_row,
     unit_severity,
@@ -211,7 +215,16 @@ def _access(sp: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _job_sections(fold: ChainFold) -> dict[str, Any]:
+def _legacy_pauses(doc: Mapping[str, Any]) -> bool:
+    """A report written before renderer 1.6.0 states pauses in the older shape."""
+    try:
+        version = tuple(int(x) for x in str(doc.get("renderer_version")).split("."))
+    except ValueError:
+        return False  # not a version we know: compared in the current shape (and differs)
+    return version < (1, 6, 0)
+
+
+def _job_sections(fold: ChainFold, *, legacy_pauses: bool = False) -> dict[str, Any]:
     started = fold.started
     sp = dict(started.payload) if started is not None else {}
     return {
@@ -222,10 +235,7 @@ def _job_sections(fold: ChainFold) -> dict[str, Any]:
         },
         "scopes": list(sp.get("scopes", [])),
         "access": _access(sp),
-        "pauses": {
-            "pauses": [p.record() for p in fold.pauses],
-            "never_resumed": sum(1 for p in fold.pauses if p.resumed_at is None),
-        },
+        "pauses": (legacy_pauses_section if legacy_pauses else pauses_section)(fold.pauses),
         "actors": [
             {"event_type": t, "actor": a, "events": n} for (t, a), n in sorted(fold.actors.items())
         ],
@@ -259,10 +269,7 @@ def _stated_job_sections(doc: Mapping[str, Any], *, recorded: bool) -> dict[str,
         },
         "scopes": list(doc.get("scopes", {}).get("scopes", [])),
         "access": {k: access.get(k) for k in _access({})},
-        "pauses": {
-            "pauses": list(pauses.get("pauses", [])),
-            "never_resumed": pauses.get("never_resumed"),
-        },
+        "pauses": {k: v for k, v in pauses.items() if k != "source"},
         "actors": list(doc.get("actors", {}).get("custody", [])),
         "versions": _stated_versions(versions, recorded),
     }
@@ -362,7 +369,7 @@ def recompute(
 
     # what the report derives from the rows, and the chain's job sections
     derived, conv_file = _rows_sections(rows, units_file)
-    mine = {**_job_sections(fold), **derived}
+    mine = {**_job_sections(fold, legacy_pauses=_legacy_pauses(doc)), **derived}
     stated = {
         **_stated_job_sections(doc, recorded=fold.normalizer_versions is not None),
         "counts": doc.get("counts"),

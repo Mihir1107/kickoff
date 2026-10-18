@@ -133,7 +133,10 @@ async def test_a_pause_records_who_reauthorized_and_for_how_long(harness: Harnes
     assert status == JobStatus.COMPLETED.value
     built, files = await _report(harness, t.tenant_id, job_id)
     (pause,) = built.document["pauses"]["pauses"]
-    assert pause["resumed_by"] == "user:dana" and pause["reason"]
-    assert pause["duration_ms"] > 0 and built.document["pauses"]["never_resumed"] == 0
+    assert (pause["ended_how"], pause["ended_by"]) == ("reauthorized", "user:dana")
+    assert pause["reason"] and pause["end_reason"] is None and pause["duration_ms"] > 0
+    ends = {r["value"]: r["count"] for r in built.document["pauses"]["by_end"]}
+    assert ends == {"reauthorized": 1, "deadline": 0, "finished_without_access": 0, "not_ended": 0}
+    assert not built.document["divergences"]["divergences"]  # the database agrees on the end
     oracle.check(built.document, files["units.jsonl"], oracle.units(Dataset(sp), 0), status)
     assert built.clean  # a pause that was resolved leaves a clean job clean

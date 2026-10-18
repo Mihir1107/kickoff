@@ -612,12 +612,16 @@ class ReportLoader:
                 {
                     "reason": p.reason,
                     "connection_id": str(p.connection_id),
-                    "resumed": p.resumed_at is not None,
+                    # rows before migration 0042 record a re-authorization as resumed_at only; a
+                    # pause ended without access has resumed_at too (its units closed): the end
+                    # says how
+                    "ended_how": p.ended_how
+                    or ("reauthorized" if p.resumed_at is not None else "not_ended"),
                 }
                 for p in (
                     await s.execute(
                         text(
-                            "SELECT reason, connection_id, resumed_at FROM job_pauses"
+                            "SELECT reason, connection_id, resumed_at, ended_how FROM job_pauses"
                             " WHERE job_id = :j ORDER BY paused_at, id"
                         ),
                         {"j": self._job_id},
@@ -811,7 +815,7 @@ class ReportLoader:
             {
                 "reason": p.reason,
                 "connection_id": p.connection_id,
-                "resumed": p.resumed_at is not None,
+                "ended_how": p.ended_how or "not_ended",
             }
             for p in chain.pauses
         ]

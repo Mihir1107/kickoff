@@ -151,6 +151,14 @@ async def test_past_its_deadline_a_paused_job_closes_every_remaining_unit_access
     built = await ReportLoader(h.sessions, h.s3, h.settings, tenant_id=t.tenant_id,
                                job_id=job_id).build(sink)  # fmt: skip
     assert not built.clean
+    # how the pause ended, from the chain, and the database agreeing (no pauses_differ)
+    (stated,) = built.document["pauses"]["pauses"]
+    assert (stated["ended_how"], stated["ended_by"]) == ("deadline", access_lost.DEADLINE_ACTOR)
+    assert stated["reason_class"] == "credentials_revoked" and stated["end_reason"] is None
+    assert stated["deadline_at"] == events[kinds.index("job_paused")].payload["deadline_at"]
+    assert stated["duration_ms"] > 0
+    assert not [d for d in built.document["divergences"]["divergences"]
+                if d["kind"] == "pauses_differ"]  # fmt: skip
     pkg = await export_package(h.sessions, h.s3, h.settings, tenant_id=t.tenant_id,
                                job_id=job_id, dest=tmp_path / "job", include_objects=False)  # fmt: skip
     chain = [json.loads(line) for line in (pkg / "events.jsonl").read_bytes().splitlines()]

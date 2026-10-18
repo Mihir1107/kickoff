@@ -2,7 +2,7 @@
 
 REPORT_FORMAT = "edisc-collection-report/1"
 
-REPORT_RENDERER_VERSION = "1.5.0"
+REPORT_RENDERER_VERSION = "1.6.0"
 """Byte-identical `report.json`, JSONL files and `report.html` are promised for the same inputs AND
 this version. Any change to their bytes needs a bump; the report goldens
 (`tests/golden/report/<version>_unicode-<unicode>/`) are keyed by it.
@@ -18,4 +18,8 @@ from the chain (UNKNOWN for jobs recorded before §28), units unsettled at the e
 access-lost reason in the HTML exception table (§28). 1.5.0: for a job read from a Slack export, the
 export's declared plan, detected tier, blind spots, tier warnings and validation findings from the
 chain (`job_started.export`, UNKNOWN where an older job did not record them) and an Export section
-in the HTML (§32)."""
+in the HTML (§32). 1.6.0: every pause states how it ended from the chain (`ended_how`
+`reauthorized` / `deadline` / `finished_without_access` / `not_ended`, when, by whom, the reason
+given to finish without access), its reason class and deadline, counts by ending (`by_end`, which
+replaces `never_resumed`), and a pause table in the HTML (ADR 0016 A6); the pause divergence
+compares how each pause ended."""

@@ -21,7 +21,8 @@ FORBIDDEN_IMPORTS = (
     "edisc_evidence", "edisc_normalizer", "edisc_renderers", "edisc_custody", "edisc_connector",
     "edisc_worker", "types_aiobotocore", "aiobotocore", "boto", "edisc_api.routes",
 )  # fmt: skip
-TABLES = {"collection_jobs", "custody_events", "work_units", "job_pauses", "sessions", "principals"}
+TABLES = {"collection_jobs", "custody_events", "work_units", "job_pauses", "sessions", "principals",
+          "connections"}  # fmt: skip
 
 
 def test_the_stream_imports_nothing_that_reads_evidence() -> None:
@@ -50,6 +51,10 @@ def test_the_statements_read_only_status_tables_and_unit_keys_of_the_chain() -> 
         for use in re.findall(r"payload\S*", sql):
             assert use.startswith("payload->>'unit_key'"), sql
         assert "derived" not in sql and "items" not in sql.replace("work_units", "")
+        # the connection: its status only (no config, no external ids, no token columns)
+        if "connections" in tables:
+            used = set(re.findall(r"\bc\.([a-z_]+)", sql))
+            assert used <= {"id", "status"}, (used, sql)
 
 
 def _schemas(doc: dict[str, object]) -> dict[str, dict[str, object]]:
@@ -59,7 +64,14 @@ def _schemas(doc: dict[str, object]) -> dict[str, dict[str, object]]:
 def test_a_change_to_a_published_event_schema_is_breaking() -> None:
     """`edisc-sse-event-changed` on REAL input: the published stream operation's events."""
     doc = openapi_doc.document()
-    for name in ("JobEvent", "UnitState", "ResetEvent", "ResetReason", "EndReason"):
+    for name in (
+        "JobEvent",
+        "UnitState",
+        "ConnectionEvent",
+        "ResetEvent",
+        "ResetReason",
+        "EndReason",
+    ):
         new = copy.deepcopy(doc)
         schema = _schemas(new)[name]
         if "enum" in schema:

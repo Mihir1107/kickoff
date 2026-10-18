@@ -171,3 +171,97 @@ def test_the_recomputation_names_what_differs() -> None:
     # a row missing from units.jsonl
     done = recompute(events, report_json, b"".join(units.splitlines(keepends=True)[1:]))
     assert any("units.jsonl: the file is not what the chain gives" in d for d in done.differences)
+
+
+def _with_pauses(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A pause re-authorized by a user, then a second one finished without access (ADR 0016 A6),
+    before the job's final event."""
+    pause = {"reason": "invalid_auth (credentials_revoked)", "connection_id": "conn-1",
+             "reason_class": "credentials_revoked", "deadline_at": "2026-01-12T09:00:00+00:00"}  # fmt: skip
+    added = [
+        ("job_paused", "system", pause),
+        ("job_resumed", "user:dana", {"connection_id": "conn-1"}),
+        ("job_paused", "system", pause),
+        (
+            "job_pause_ended",
+            "user:sam",
+            {
+                "ended_how": "finished_without_access",
+                "reason_class": "credentials_revoked",
+                "reason": "the custodian left",
+            },
+        ),
+    ]
+    body = [e["fields"] for e in events[:-1]]
+    body += [{"seq": 0, "event_type": t, "actor": a, "created_at": T0.isoformat(), "payload": p}
+             for t, a, p in added]  # fmt: skip
+    body.append(events[-1]["fields"])
+    return [{"fields": {**f, "seq": i + 1}} for i, f in enumerate(body)]
+
+
+def _actor_report(events: list[dict[str, Any]]) -> bytes:
+    """`_report` folds every event as `system`: fold with the events' own actors here."""
+    fold = m.ChainFold()
+    for rec in events:
+        f = rec["fields"]
+        fold.add(m.ChainEvent(f["seq"], f["event_type"], f["actor"], T0, f["payload"]))
+    report_json, _ = _report(events)
+    doc = json.loads(report_json)
+    doc["pauses"] = {"source": "job_chain", **m.pauses_section(fold.pauses)}
+    doc["actors"]["custody"] = [{"event_type": t, "actor": a, "events": n}
+                                for (t, a), n in sorted(fold.actors.items())]  # fmt: skip
+    return canonical_json(doc)
+
+
+def test_how_each_pause_ended_is_stated_and_recomputed() -> None:
+    events = _with_pauses(_events())
+    report_json = _actor_report(events)
+    _, units = _report(events)
+    done = recompute(events, report_json, units)
+    assert done.ok, done.differences
+    pauses = json.loads(report_json)["pauses"]
+    assert [(p["ended_how"], p["ended_by"], p["end_reason"]) for p in pauses["pauses"]] == [
+        ("reauthorized", "user:dana", None),
+        ("finished_without_access", "user:sam", "the custodian left"),
+    ]
+    assert {r["value"]: r["count"] for r in pauses["by_end"]} == {
+        "reauthorized": 1, "deadline": 0, "finished_without_access": 1, "not_ended": 0,
+    }  # fmt: skip
+
+
+def test_a_forged_pause_ending_fails_the_recomputation() -> None:
+    events = _with_pauses(_events())
+    report_json = _actor_report(events)
+    _, units = _report(events)
+    for field, value in [("ended_how", "reauthorized"), ("ended_by", "user:dana"),
+                         ("end_reason", "a better story"), ("reason_class", "consent_withdrawn"),
+                         ("deadline_at", "2026-02-01T00:00:00+00:00")]:  # fmt: skip
+        doc = json.loads(report_json)
+        doc["pauses"]["pauses"][1][field] = value
+        done = recompute(events, canonical_json(doc), units)
+        assert any(d.startswith("pauses:") for d in done.differences), (field, done.differences)
+    doc = json.loads(report_json)
+    doc["pauses"]["by_end"][1]["count"] = 1  # a deadline that never ended a pause
+    assert any(
+        d.startswith("pauses:") for d in recompute(events, canonical_json(doc), units).differences
+    )
+
+
+def test_a_report_before_1_6_0_recomputes_in_its_own_shape() -> None:
+    """Reports written by renderers before 1.6.0 stated who re-authorized and the count never
+    resumed; they still verify, and only in that shape."""
+    events = _with_pauses(_events())
+    _, units = _report(events)
+    fold = m.ChainFold()
+    for rec in events:
+        f = rec["fields"]
+        fold.add(m.ChainEvent(f["seq"], f["event_type"], f["actor"], T0, f["payload"]))
+    doc = json.loads(_actor_report(events))
+    doc["renderer_version"] = "1.5.0"
+    doc["pauses"] = {"source": "job_chain", **m.legacy_pauses_section(fold.pauses)}
+    assert doc["pauses"]["never_resumed"] == 1
+    assert doc["pauses"]["pauses"][0]["resumed_by"] == "user:dana"
+    done = recompute(events, canonical_json(doc), units)
+    assert done.ok, done.differences
+    doc["pauses"] = {"source": "job_chain", **m.pauses_section(fold.pauses)}
+    assert not recompute(events, canonical_json(doc), units).ok

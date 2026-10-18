@@ -1,0 +1,86 @@
+{
+  "pdfs": {
+    "archive": {
+      "a4": {
+        "sha256": "b0262f20706521f94662e27862bb9967a67c161780b71c231d0414ca743e97f1",
+        "size": 35013
+      },
+      "letter": {
+        "sha256": "f386626d2818e6f2053696e32df571bf060d317cff80b4f7a995e335b1ddda8e",
+        "size": 35035
+      }
+    },
+    "at_the_cap": {
+      "a4": {
+        "sha256": "95ba00b051c4bef9d88396895f6379631d3f518c817afaaa5c26606831cdd492",
+        "size": 812333
+      },
+      "letter": {
+        "sha256": "f4e63417cef5173db2fa33551f4a1b37c5c4623ee5e7519c856eb61ea0d4ce50",
+        "size": 822569
+      }
+    },
+    "clean": {
+      "a4": {
+        "sha256": "6c9a08cfd19de784ed8dacb031ed2ce86153c98c32769f9a24aecbd5abfd85bd",
+        "size": 29165
+      },
+      "letter": {
+        "sha256": "35a6461fdff3cfe1088f532e629eae861514d69ded8ce7edb4a62819b625ae35",
+        "size": 29070
+      }
+    },
+    "custody_failed_divergent": {
+      "a4": {
+        "sha256": "5ae0d7dd33b9063f86edc1c46560c9bb70af3ecf3679b401dd0c5f30f6f87fa7",
+        "size": 30515
+      },
+      "letter": {
+        "sha256": "3de8aef5aaf99f26a638eb43f69ff04611332a461d44a26f571a45f9d634669f",
+        "size": 30487
+      }
+    },
+    "gaps_and_failures_hard_strings": {
+      "a4": {
+        "sha256": "954c7de6c68a5191dae8f10c14ccb5362c973702eddb0f34f1e670241da23615",
+        "size": 56095
+      },
+      "letter": {
+        "sha256": "d97f9e1fa39697bdca15a505a25ad8352c138cd7744a6d0d3f77fa4abc606ff4",
+        "size": 55952
+      }
+    },
+    "pause_deadline": {
+      "a4": {
+        "sha256": "58306d73ff146cddf7248bf0420a760414a6ed9986375e8e91a7fbe7afb83302",
+        "size": 30122
+      },
+      "letter": {
+        "sha256": "072eb16483395aaa0b929b0bb2cd76e5e0f0fe664c51e9ad01b3f5de49a0d53d",
+        "size": 30034
+      }
+    },
+    "pauses_reauthorized_then_finished": {
+      "a4": {
+        "sha256": "e3b6f39b8bb5c979c58fef1e709485c0b4427bb73486d91a13475e6fa270bd52",
+        "size": 34295
+      },
+      "letter": {
+        "sha256": "8bc3d3d66f94e2f473295d4b4c979556d8808b71493d576089d9385a725e0a6e",
+        "size": 34282
+      }
+    },
+    "pre_change_unknown": {
+      "a4": {
+        "sha256": "c06ec11813ee6319bbfc7c90672a015a3aa34085481664f6ca86556889ca5843",
+        "size": 29454
+      },
+      "letter": {
+        "sha256": "a7bd0b7247538636484072c2fe037087b790413449fd918a72bde2a2df59a5c2",
+        "size": 29399
+      }
+    }
+  },
+  "report_key": "1.6.0_unicode-15.0.0_glyphs-4831f454680d",
+  "toolchain_id": "e24aecbb3dd4b6170461ee24e64bf9c73b5c2f3a2ed3279160b57b74085b96a3"
+}

@@ -15,6 +15,7 @@ from edisc_api.routes.jobs import _pipeline
 from edisc_connector_dummy.spec import DatasetSpec
 from edisc_core.ids import new_id
 from edisc_db.session import tenant_tx
+from edisc_renderers.report import model as m
 from edisc_worker import access_lost
 
 from .conftest import Api, TenantCtx, add_principal, secret
@@ -150,6 +151,15 @@ async def test_finish_without_access_is_audited_recorded_and_closes_the_units(
     assert {tuple(u) for u in units} == {("done", "access_lost", "credentials_expired")}
     (j,) = await _rows(api, t, "SELECT stop_reason FROM collection_jobs WHERE id = :j", j=job)
     assert j.stop_reason == "access_lost"
+    # what the report states of this pause, folded from the job's chain as the report does
+    fold = m.ChainFold()
+    for e in await _rows(api, t, "SELECT seq, event_type, actor, created_at, payload FROM"
+                         " custody_events WHERE stream_id = :j ORDER BY seq", j=job):  # fmt: skip
+        fold.add(m.ChainEvent(e.seq, e.event_type, e.actor, e.created_at, e.payload))
+    (stated,) = m.pauses_section(fold.pauses)["pauses"]
+    assert (stated["ended_how"], stated["ended_by"], stated["end_reason"]) == (
+        "finished_without_access", audit.actor, "the customer left the workspace")  # fmt: skip
+    assert stated["reason_class"] == "credentials_expired" and stated["ended_at"]
 
 
 async def test_finish_without_access_needs_a_paused_job_and_the_permission(

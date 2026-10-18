@@ -222,6 +222,32 @@
         "title": "ClientOut",
         "type": "object"
       },
+      "ConnectionEvent": {
+        "additionalProperties": false,
+        "description": "``event: connection`` -- the job's connection now (M17 plan §4): at the start of a stream\nwhen it is not ``active``, then on every change of its status, e.g. to ``reauth_required``\nwhen the source refused its credentials (the job pauses; ADR 0016 A6) and back to ``active``\nonce re-authorized.",
+        "properties": {
+          "connection_id": {
+            "format": "uuid",
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "needs_reauthorization": {
+            "title": "Needs Reauthorization",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection_id",
+          "status",
+          "needs_reauthorization"
+        ],
+        "title": "ConnectionEvent",
+        "type": "object"
+      },
       "ConnectionOut": {
         "additionalProperties": false,
         "properties": {
@@ -10427,6 +10453,7 @@
         ],
         "x-permission": "job.read",
         "x-sse-events": [
+          "ConnectionEvent",
           "EndEvent",
           "EndReason",
           "JobEvent",

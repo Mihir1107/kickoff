@@ -12,6 +12,15 @@ a ``units`` event's id is the sequence number of the last chain event it reports
 A reconnect with ``Last-Event-ID`` gets exactly the unit events after that sequence number, and the
 snapshot only if it differs from the one the client last saw: nothing missed, nothing twice.
 
+``connection`` (the job's connection: its status, and whether it needs re-authorization) is sent
+when the connection is not ``active`` at the start of a stream, and whenever its status changes
+after that (``reauth_required`` when the source refused its credentials, ``active`` again once
+re-authorized), immediately BEFORE the snapshot that reflects it: a client that has seen no
+``connection`` event knows the connection is active. It carries no ``id:`` (the client's ``Last-Event-ID`` stays
+the previous event's), and a snapshot's digest covers the connection's status: a reconnect after a
+``connection`` event whose snapshot never arrived gets both again; one whose last id IS that
+snapshot gets neither.
+
 The replay is bounded (``EDISC_SSE_REPLAY_MAX`` unit events, and for a reconnect
 ``EDISC_SSE_REPLAY_MAX_AGE_SECONDS``): beyond it the stream sends ONE ``reset`` (id = the head),
 the snapshot, then continues live. A client receiving ``reset`` reloads the job and its units from
@@ -20,6 +29,7 @@ the list endpoints (``GET /v1/jobs/{id}``, ``GET /v1/jobs/{id}/units``) and keep
 
 from __future__ import annotations
 
+import uuid
 from datetime import date
 from enum import StrEnum
 from typing import Any
@@ -62,6 +72,17 @@ class UnitsEvent(Strict):
     units: list[UnitState]
 
 
+class ConnectionEvent(Strict):
+    """``event: connection`` -- the job's connection now (M17 plan §4): at the start of a stream
+    when it is not ``active``, then on every change of its status, e.g. to ``reauth_required``
+    when the source refused its credentials (the job pauses; ADR 0016 A6) and back to ``active``
+    once re-authorized."""
+
+    connection_id: uuid.UUID
+    status: str  # the connection's status verbatim (pending, active, reauth_required, ...)
+    needs_reauthorization: bool  # status == reauth_required: someone must re-authorize it
+
+
 class EndReason(StrEnum):
     SEALED = "sealed"  # the job's chain is sealed: nothing more will change
     SESSION_REVOKED = "session_revoked"
@@ -93,17 +114,19 @@ class EndEvent(Strict):
 
 MAX_UNITS = 500
 EVENTS: dict[str, type[Strict]] = {
-    "job": JobEvent, "units": UnitsEvent, "reset": ResetEvent, "end": EndEvent,
+    "job": JobEvent, "units": UnitsEvent, "connection": ConnectionEvent, "reset": ResetEvent,
+    "end": EndEvent,
 }  # fmt: skip
 SCHEMAS = (
-    "JobEvent", "UnitsEvent", "UnitState", "ResetEvent", "ResetReason", "EndEvent", "EndReason",
+    "JobEvent", "UnitsEvent", "UnitState", "ConnectionEvent", "ResetEvent", "ResetReason",
+    "EndEvent", "EndReason",
 )  # fmt: skip
 
 
 def add_schemas(doc: dict[str, Any]) -> dict[str, Any]:
     """Publish the event models as components (the route's ``x-sse-events`` names them)."""
     schemas = doc.setdefault("components", {}).setdefault("schemas", {})
-    for model in (JobEvent, UnitsEvent, ResetEvent, EndEvent):
+    for model in (JobEvent, UnitsEvent, ConnectionEvent, ResetEvent, EndEvent):
         generated = model.model_json_schema(ref_template="#/components/schemas/{model}")
         for name, sub in generated.pop("$defs", {}).items():
             schemas[name] = sub

@@ -22,7 +22,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from edisc_renderers.report import html as rhtml
-from edisc_renderers.report.model import UNKNOWN
+from edisc_renderers.report.model import PAUSE_ENDS, UNKNOWN
 from edisc_renderers.report.version import REPORT_RENDERER_VERSION
 
 # every hard case spike S1 names (names and error texts), §5.10
@@ -125,7 +125,8 @@ def _sec(rows: Sequence[Mapping[str, Any]], *, total: int | None = None, more: i
 def doc(*, clean: bool = True, status: str = "completed", banner: Sequence[str] = (),
         unit_rows: Sequence[Mapping[str, Any]] = (), units_total: int | None = None,
         units_more: int = 0, obs_rows: Sequence[Mapping[str, Any]] = (),
-        access: Mapping[str, Any] | None = None) -> dict[str, Any]:  # fmt: skip
+        access: Mapping[str, Any] | None = None,
+        pauses: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:  # fmt: skip
     return {
         "banner": list(banner)
         or (
@@ -169,7 +170,14 @@ def doc(*, clean: bool = True, status: str = "completed", banner: Sequence[str] 
                 {"value": "gap", "count": 0},
             ],
         },
-        "pauses": {"source": "job_chain", "never_resumed": 0, "pauses": []},
+        "pauses": {
+            "source": "job_chain",
+            "pauses": list(pauses),
+            "by_end": [
+                {"value": v, "count": sum(1 for p in pauses if p["ended_how"] == v)}
+                for v in PAUSE_ENDS
+            ],
+        },
         "versions": {
             "source": "job_chain",
             "report_renderer": REPORT_RENDERER_VERSION,
@@ -241,6 +249,58 @@ def test_every_enum_value_has_a_row_and_unknown_is_shown() -> None:
     ).decode()
     assert UNKNOWN in out
     assert "<bdi>failed</bdi></td><td>0</td>" in out  # a zero row is present, not hidden
+
+
+def _pause(how: str, *, by: str | None = "user:dana", reason: str | None = None) -> dict[str, Any]:
+    ended = how != "not_ended"
+    return {"reason": "invalid_auth (credentials_revoked)", "reason_class": "credentials_revoked",
+            "connection_id": "c-1", "paused_at": "2026-10-01T10:00:00Z",
+            "deadline_at": "2026-10-08T10:00:00+00:00", "ended_how": how,
+            "ended_at": "2026-10-02T10:00:00Z" if ended else None, "ended_by": by if ended else None,
+            "end_reason": reason, "duration_ms": 86_400_000 if ended else None}  # fmt: skip
+
+
+def _pause_rows(out: bytes) -> list[list[str]]:
+    """The pause table's rows (cell text, markers removed), from the strict parse."""
+    tree = strict_tree(out)
+    heading = next(h for h in tree.iter(f"{_NS}h2") if (h.text or "").startswith("Pauses"))
+    body = tree.find(f"{_NS}body")
+    assert body is not None
+    children = list(body)
+    table = children[children.index(heading) + 1]
+    assert table.tag == f"{_NS}table", "the pause table follows its heading"
+    return [[plain(c).strip() for c in tr] for tr in table.iter(f"{_NS}tr")][1:]
+
+
+def test_every_pause_states_how_it_ended_who_when_and_why() -> None:
+    """ADR 0016 A6: re-authorized (who), the deadline, finished without access (who, the reason),
+    and a pause the chain never ends, each a row; the counts by ending list every value."""
+    out = rhtml.report_html(doc(clean=False, status="completed_with_gaps", pauses=[
+        _pause("reauthorized", by="user:dana"),
+        _pause("deadline", by="system:access-lost"),
+        _pause("finished_without_access", by="user:sam", reason="custodian left; access gone"),
+        _pause("not_ended"),
+    ]))  # fmt: skip
+    rows = _pause_rows(out)
+    cols = [h for h, _ in rhtml.PAUSE_COLUMNS]
+    by = {r[cols.index("ended")]: dict(zip(cols, r, strict=True)) for r in rows}
+    assert set(by) == {"reauthorized", "deadline", "finished_without_access", "not_ended"}
+    assert by["reauthorized"]["ended by"] == "user:dana"
+    assert by["deadline"]["ended by"] == "system:access-lost"
+    assert by["finished_without_access"]["ended by"] == "user:sam"
+    assert by["finished_without_access"]["reason given"] == "custodian left; access gone"
+    assert by["deadline"]["deadline"] == "2026-10-08T10:00:00+00:00"
+    assert by["not_ended"]["ended at"] == "none" and by["not_ended"]["ended by"] == "none"
+    assert all(r["reason class"] == "credentials_revoked" for r in by.values())
+    text = out.decode()
+    assert "Pauses by how they ended:" in text
+    for value in PAUSE_ENDS:
+        assert f"<td><bdi>{value}</bdi></td><td>1</td>" in text, value
+
+
+def test_no_pause_says_none() -> None:
+    text = rhtml.report_html(doc()).decode()
+    assert "</h2><p>None.</p><p>Pauses by how they ended:</p>" in text
 
 
 def test_deterministic_bytes() -> None:
@@ -350,6 +410,7 @@ def test_a_report_with_each_hard_string_class_is_safe(name: str) -> None:
                     "reason": s,
                 }
             ],
+            pauses=[_pause("finished_without_access", by=s, reason=s)],
         )
     )
     c = parse(out)  # well-formed for both parsers
