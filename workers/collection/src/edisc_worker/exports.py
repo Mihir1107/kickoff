@@ -154,9 +154,21 @@ class ExportIngest:
         try:
             yield
         finally:
-            row = self.db_writes.setdefault(table, {"ms": 0, "statements": 0})
+            row = self.db_writes.setdefault(table, {"ms": 0, "statement_ms": 0, "statements": 0})
             row["ms"] += round((time.monotonic() - started) * 1000)
             row["statements"] += 1
+
+    async def _execute(
+        self, table: str, s: AsyncSession, statement: Any, params: dict[str, Any]
+    ) -> None:
+        """The insert itself, timed apart from its transaction's begin and commit (``ms`` minus
+        ``statement_ms`` is the round trips and the commit's WAL flush)."""
+        started = time.monotonic()
+        try:
+            await s.execute(statement, params)
+        finally:
+            row = self.db_writes.setdefault(table, {"ms": 0, "statement_ms": 0, "statements": 0})
+            row["statement_ms"] += round((time.monotonic() - started) * 1000)
 
     # ------------------------------------------------------------------ hash and lock
     async def lock(self, tenant_id: uuid.UUID, export_id: uuid.UUID) -> dict[str, Any]:
@@ -571,7 +583,9 @@ class ExportIngest:
         cols = {k: [r[k] for r in rows] for k in rows[0]}
         with self._db_write("export_day_files"):
             async with tenant_tx(self.sessions, tenant_id) as s:
-                await s.execute(
+                await self._execute(
+                    "export_day_files",
+                    s,
                     text(
                         "INSERT INTO export_day_files (tenant_id, export_id, entry_idx, elements, anomalies,"
                         " parse_error) SELECT CAST(:t AS uuid), CAST(:e AS uuid), * FROM unnest("
@@ -587,7 +601,9 @@ class ExportIngest:
         cols = {k: [r[k] for r in rows] for k in rows[0]}
         with self._db_write("export_threads"):
             async with tenant_tx(self.sessions, tenant_id) as s:
-                await s.execute(
+                await self._execute(
+                    "export_threads",
+                    s,
                     text(
                         "INSERT INTO export_threads (tenant_id, export_id, entry_idx, element_idx,"
                         " conversation_id, thread_ts, ts) SELECT CAST(:t AS uuid), CAST(:e AS uuid), *"
@@ -669,7 +685,9 @@ class ExportIngest:
         with self._db_write("export_entries"):
             try:
                 async with tenant_tx(self.sessions, tenant_id) as s:
-                    await s.execute(
+                    await self._execute(
+                        "export_entries",
+                        s,
                         text(
                             "INSERT INTO export_entries (tenant_id, export_id, idx, name, folded_name, kind,"
                             " folder, hint_day, method, crc32, compressed_size, uncompressed_size,"

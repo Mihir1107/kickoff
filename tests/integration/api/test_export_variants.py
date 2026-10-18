@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import time
+import uuid
 from typing import Any
 
 import httpx
@@ -183,8 +185,37 @@ async def test_zip64_by_entry_count(exp_batched: Api, tenant: TenantCtx) -> None
                 if e.get("event") in ("export locked", "export validated")
                 and e.get("export_id") == export_id
             }
+        clock.extra["fk_lock_probe"] = await _fk_lock_probe(exp_batched, export_id)
         # the test ends at `ready`: collecting from this export is not part of it (no phase to time)
         assert_complete_mapping(out, manifest)
+
+
+async def _fk_lock_probe(api: Api, export_id: str) -> dict[str, float]:
+    """What each day-file insert's foreign-key checks do, alone: 20 transactions that each read
+    500 existing ``export_entries`` rows, lock them FOR KEY SHARE (as the RI check does), and
+    commit; wall ms summed per step. Tells statement CPU (the lock writes each row's xmax) from
+    the commit's WAL flush (ADR 0015 §24.20)."""
+    conn = await superuser(api.settings)
+    out = {"select_ms": 0.0, "lock_ms": 0.0, "commit_ms": 0.0}
+    try:
+        for k in range(20):
+            args = (uuid.UUID(export_id), k * 500, (k + 1) * 500)
+            sql = "SELECT idx FROM export_entries WHERE export_id = $1 AND idx >= $2 AND idx < $3"
+            t0 = time.monotonic()
+            await conn.fetch(sql, *args)
+            t1 = time.monotonic()
+            tx = conn.transaction()
+            await tx.start()
+            await conn.fetch(sql + " FOR KEY SHARE", *args)
+            t2 = time.monotonic()
+            await tx.commit()
+            t3 = time.monotonic()
+            out["select_ms"] += (t1 - t0) * 1000
+            out["lock_ms"] += (t2 - t1) * 1000
+            out["commit_ms"] += (t3 - t2) * 1000
+    finally:
+        await conn.close()
+    return {k: round(v, 1) for k, v in out.items()}
 
 
 async def _left(c: httpx.AsyncClient, export_id: str, status: str) -> None:
