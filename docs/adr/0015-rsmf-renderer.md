@@ -1361,3 +1361,15 @@ what was done and why.
     export (where its 8.6 s go: zip directory parsing, per-entry rows, range reads) and make it
     cheaper, or show where the runner loses the time (the job's CPU steal and disk wait during the
     test window).
+
+21. **`test_a_crash_after_the_journal_is_repaired_exactly_once[False]` failed once locally
+    (2026-10-18, NOT diagnosed, output lost).** One run of five files (`test_no_echo`,
+    `test_error_bodies`, `test_authz`, `test_installs`, `test_schedules`) on the up test stack,
+    right after `test_directory` ran in an earlier process. Its output was not saved (my mistake:
+    every run is now written to a file). Not reproduced in 10 runs: the same five files 3 times,
+    four files 3 times, `test_installs` alone 4 times under 8-core contention. Hypothesis, not
+    proven: the test counts what `reconcile_tokens` did ACROSS ALL TENANTS (`installs`,
+    `applied`), so any journal entry another test left in the shared database would add to it.
+    If it recurs: read the failing assertion first; if a count is over by one, list
+    `token_refresh_journal` rows by tenant at the failure (the CI artifact holds the custody
+    streams) before changing anything.

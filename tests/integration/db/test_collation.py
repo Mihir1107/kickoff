@@ -30,6 +30,7 @@ ORDER_BY = re.compile(r"\bORDER BY\b(.*?)(?=\bLIMIT\b|\bOFFSET\b|\bFOR\b|;|$)", 
 # ordered expressions that are not text (each with the reason)
 NOT_TEXT = {
     "string_to_array(normalizer_version, '.')::int[]": "an integer array",
+    "(last.status = 'capturing')": "a boolean (directories_due: generations still capturing first)",
 }
 
 

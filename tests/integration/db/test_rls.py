@@ -31,6 +31,8 @@ COPY_OVERRIDES = {
     "sessions": "'id', gen_random_uuid(), 'id_hash', sha256(gen_random_uuid()::text::bytea)",
     "login_attempts": "'id', gen_random_uuid(), 'state_hash', sha256(gen_random_uuid()::text::bytea)",
     "oauth_installs": "'id', gen_random_uuid()",
+    "directory_snapshots": "'id', gen_random_uuid(), 'generation', 99",
+    "directory_entries": "'external_id', gen_random_uuid()::text",
 }
 UPDATABLE = {
     "matters": "name",
@@ -45,6 +47,7 @@ UPDATABLE = {
     "export_upload_parts": "updated_at",
     "renders": "updated_at",
     "sessions": "last_seen_at",
+    "directory_snapshots": "updated_at",
 }
 
 

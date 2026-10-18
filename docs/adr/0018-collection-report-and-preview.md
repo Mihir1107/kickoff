@@ -1197,6 +1197,34 @@ messages are not in it.
    its blind spots missing from the HTML; the export entries' folder order left to the database's
    collation (migration 0035).
 
+## 33. How a pause ended (2026-10-18; report renderer 1.6.0; ADR 0016 A6)
+Since M17 step 8 a pause ends three ways, each recorded in the job chain: re-authorized
+(`job_resumed`, actor = who re-authorized), the deadline passed (`job_pause_ended`
+`ended_how: deadline`, actor `system:access-lost`), or someone finished the job without access
+(`job_pause_ended` `ended_how: finished_without_access`, actor = that user, `reason` = the reason
+they gave). Before 1.6.0 the report stated only who re-authorized and counted every other pause as
+"never resumed", which was true and said nothing about the decision.
+1. **The pauses section** (`model.pauses_section`, from the chain alone): per pause its reason,
+   reason class and deadline (as `job_paused` recorded them; UNKNOWN for pauses before step 8),
+   `ended_how` (`reauthorized` / `deadline` / `finished_without_access` / `not_ended`), `ended_at`,
+   `ended_by`, `end_reason` (only for finished without access) and `duration_ms`; `by_end` counts
+   every ending, zeros included (it replaces `never_resumed`). The HTML has a pause table (every
+   value through `user()`: the reason is user text) and the counts.
+2. **Recomputed offline**: `recompute` folds the same events with the same model. A report of a
+   renderer before 1.6.0 is recomputed in its own shape (`legacy_pauses_section`: who
+   re-authorized, the count never resumed), so older packages still verify, and only in that shape.
+3. **Found: a false divergence.** The loader compared the chain's "resumed" (a `job_resumed`)
+   with the database's `resumed_at`, which a pause ended without access also has (set when its
+   units are closed): every job that reached its deadline or was finished without access would
+   have reported `pauses_differ`. The comparison is now how each pause ended (`ended_how`; rows
+   before migration 0042 read as `reauthorized` when resumed). Its break is in round `m17-close`.
+4. Goldens: report `1.6.0_unicode-15.0.0_glyphs-4831f454680d` (two new cases:
+   `pauses_reauthorized_then_finished` with a hard-string reason, `pause_deadline`) and PDF
+   `..._toolchain-e24aecbb3dd4`, recorded in the report image under emulation (`make
+   test-report-pdf EDISC_RECORD_REPORT_PDF=1`): veraPDF 16/16 PASS, the four image breaks caught,
+   the worker OOM and heartbeat tests passed. CI's `report-pdf` job then admitted the image
+   natively (run 39120935270).
+
 ## 31. Built vs decided: every deviation, in one place (2026-10-12)
 The decision sections (§1-§18) are kept as written; where the build differs, this is the list. Each
 line names the section it amends and the implementation note that records why.

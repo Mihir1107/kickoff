@@ -86,7 +86,10 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   session), re-checked <= 15 s as two halves (`SessionWatch.interval`: ask every bound/2, answers at
   most bound/2 old); bounded per-subscriber queues (overflow ends with `slow_consumer`); the replay
   is bounded (`EDISC_SSE_REPLAY_MAX`, `..._MAX_AGE_SECONDS`; beyond: ONE `reset` event).
-  A change to an event schema breaks `api_compat` (`x-sse-events`).
+  `connection` (the job's connection's status) goes out when it is not `active` at the start and
+  on every change, right before the snapshot showing it, WITHOUT an id; the snapshot digest covers
+  the connection's status (a reconnect neither misses nor repeats it). The stream reads only the
+  connection's `status` (a unit test). A change to an event schema breaks `api_compat` (`x-sse-events`).
 - Downloads (M17 step 5b, `edisc_api.downloads`): every content route passes its body through
   `guarded(...)` with a `Download(operationId, ids, size, read.seq)` and declares an exact
   `Content-Length`; the session (or a bearer principal) is re-checked between pieces, a cut is
@@ -169,6 +172,31 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   active connection with tokens; a source without a connector in the worker is `unchecked`, never
   fine. A new connector implements `check_credentials`.
 - Test stacks shorten the deadline with `EDISC_REAUTH_DEADLINE_OVERRIDE_SECONDS` (test/ci only).
+- The report states how each pause ended FROM THE CHAIN (`job_resumed` = `reauthorized` and who;
+  `job_pause_ended` = `deadline` / `finished_without_access`, who, the reason given; else
+  `not_ended`), report renderer 1.6.0; `edisc-verify --job-package` recomputes it (older reports
+  in their own shape). The loader's `pauses_differ` compares how each pause ended.
+
+## Directory snapshots (M17 plan §3.3; migration 0043; D12, D14)
+- `GET /v1/connections/{id}/directory?kind=conversation|user&q=` NEVER calls the source: it serves
+  the current COMPLETE generation (`directory_snapshots`, `directory_entries`). Not captured yet is
+  `status: not_captured` with `items: null`, never an empty list. Pages <= 500 (D14), keyset on
+  `(search_key, external_id)` (COLLATE "C", the search index; `q` is a range on the NFKC-folded
+  prefix); the cursor names its generation, so paging stays in it after newer ones complete.
+- Who (D12, the default pending the mentor): `connection.read` on the client, or `job.start` on the
+  client or one of its matters; anyone else gets `connection.read`'s 404/403. Never reviewers or
+  auditors (names of a workspace's users are personal data).
+- Captured only by `edisc_worker.directory` (`refresh-directories` every 15 min over
+  `directories_due`, and `edisc_api.directory_refresh.start` after an install; off in the API test
+  settings): pages through `Connector.fetch_directory` (the limiter), parses with the PURE
+  `edisc_normalizer.directory` (in a thread: `parse_page` is in `OFF_LOOP`), stores each page in ONE
+  transaction with the checkpoint (`source_cursor` + `pages` must be what this executor read);
+  the last page completes the generation in that transaction and supersedes all but the current and
+  the previous one. Budgeted runs (`EDISC_DIRECTORY_REFRESH_BUDGET_SECONDS`) resume from the
+  checkpoint. Refused credentials or an unreadable page: the generation `failed`, the previous stays
+  served. Exports make no source call: conversations from `export_conversations`, users from the
+  locked `users.json`. Names keep lone surrogates as replacement + code units; ids become stand-in
+  keys (§28), never dropped.
 
 ## Slack exports (M14, ADR 0014)
 - Upload: `POST /v1/clients/{c}/exports` → `PUT /v1/exports/{id}/parts/{n}` (Content-Digest sha-256) →

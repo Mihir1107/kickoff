@@ -114,6 +114,14 @@ Rounds (ADR 0015):
   finish-without-access action (paused jobs only, recent sign-in), the setting's bounds,
   check-connections (revocations acted on, unchecked sources never reported fine), reason classes,
   a refusal of replaced credentials never pausing a resumed job.
+- ``m17-close``: closing M17 (ADR 0016 "closing M17", ADR 0018 §33): the production-readiness
+  gate warns on main and enforces on release tags and the production image; the report states how
+  each pause ended (chain-only, recomputed, legacy shape for older reports, the HTML table, the
+  pause divergence); the SSE ``connection`` event (polled, in the snapshot digest, never repeated
+  across a reconnect, published, reading only the status); directory snapshots (never served
+  partial, the checkpoint guard, entries and checkpoint in one transaction under a real SIGKILL,
+  generations and their supersession, D12, the budget, refused credentials, prefix ranges, D14,
+  exports from their rows, parsing off the loop, lone surrogates, the sweep).
 - ``m17-host-cookie``: the session cookie is host-only (``__Host-``, no ``Domain``) and a same-site
   request from a neighbouring subdomain is refused, both in real browsers (ADR 0016 §2).
 - ``s24-loop``: the event-loop guard (timing and the OFF_LOOP registry in ``tests/conftest.py``,
@@ -2052,4 +2060,59 @@ CATALOG: list[Mutation] = [
       '    " (SELECT c.status FROM connections c WHERE c.id = j.connection_id) AS connection_status,"\n'
       '    " (SELECT c.config FROM connections c WHERE c.id = j.connection_id) AS connection_config,"\n',
       "tests/unit/api/test_stream_module.py", "read_only_status_tables"),
+    m("directory_served_partial", "m17-close", "apps/api/src/edisc_api/routes/directory.py",
+      "    \" WHERE connection_id = :c AND status = 'complete' ORDER BY generation DESC LIMIT 1\"\n",
+      "    \" WHERE connection_id = :c AND status IN ('complete', 'capturing') ORDER BY generation DESC LIMIT 1\"\n",
+      "tests/integration/api/test_directory.py", "killed_mid_way"),
+    m("directory_checkpoint_unchecked", "m17-close", "workers/collection/src/edisc_worker/directory.py",
+      '        if row.status != "capturing" or row.source_cursor != snap.cursor or row.pages != snap.pages:\n',
+      '        if row.status != "capturing":\n', "tests/integration/api/test_directory.py", "stored_twice"),
+    m("directory_counts_lost", "m17-close", "workers/collection/src/edisc_worker/directory.py",
+      "            added.update(kinds.scalars())\n", "            pass\n", "tests/integration/api/test_directory.py", "exactly_once"),
+    m("directory_never_completes", "m17-close", "workers/collection/src/edisc_worker/directory.py",
+      "        done = next_cursor is None\n", "        done = False\n", "tests/integration/api/test_directory.py", "exactly_once"),
+    m("directory_supersedes_the_previous", "m17-close", "workers/collection/src/edisc_worker/directory.py",
+      '                    " WHERE connection_id = :c AND status = \'complete\' AND generation < ("\n',
+      '                    " WHERE connection_id = :c AND status = \'complete\' AND generation < :g AND 0 < ("\n',
+      "tests/integration/api/test_directory.py", "continues_in_its_generation"),
+    m("directory_cursor_ignores_generation", "m17-close", "apps/api/src/edisc_api/routes/directory.py",
+      "        if position is None:\n            snap = ", "        if True:\n            snap = ",
+      "tests/integration/api/test_directory.py", "continues_in_its_generation"),
+    m("directory_names_to_everyone", "m17-close", "apps/api/src/edisc_api/routes/directory.py",
+      "        if not await _may_pick(s, caller, client):\n", "        if False:\n", "tests/integration/api/test_directory.py",
+      "who_sees_directory_names"),
+    m("directory_matter_pickers_refused", "m17-close", "apps/api/src/edisc_api/routes/directory.py",
+      "    return bool(found)\n", "    return False\n", "tests/integration/api/test_directory.py", "who_sees_directory_names"),
+    m("directory_budget_ignored", "m17-close", "workers/collection/src/edisc_worker/directory.py",
+      "                if time.monotonic() >= deadline:\n                    return \"partial\", pages\n",
+      "", "tests/integration/api/test_directory.py", "budget_stops"),
+    m("directory_refusal_not_failed", "m17-close", "workers/collection/src/edisc_worker/directory.py",
+      "            await _fail(sessions, tenant_id, snap, exc)\n", "", "tests/integration/api/test_directory.py", "refused_credentials"),
+    m("directory_prefix_unbounded", "m17-close", "apps/api/src/edisc_api/routes/directory.py",
+      '    " AND (CAST(:hi AS text) IS NULL OR search_key < CAST(:hi AS text))"\n', "",
+      "tests/integration/api/test_directory.py", "prefix_search_matches"),
+    m("directory_parsed_on_loop", "m17-close", "workers/collection/src/edisc_worker/directory.py",
+      "                found = await asyncio.to_thread(parse_page, batch.body, method, connector.dialect)\n",
+      "                found = parse_page(batch.body, method, connector.dialect)\n", "tests/integration/api/test_directory.py", "exactly_once"),
+    m("directory_export_rows_skipped", "m17-close", "workers/collection/src/edisc_worker/directory.py",
+      "    if conn.source == EXPORT_SOURCE and snap.pages == 0:\n", "    if False:\n", "tests/integration/api/test_directory.py",
+      "exports_directory"),
+    m("directory_page_unbounded", "m17-close", "apps/api/src/edisc_api/routes/directory.py",
+      "DirLimitQ = Annotated[int, Query(ge=1, le=MAX_PAGE)]\n",
+      "DirLimitQ = Annotated[int, Query(ge=1, le=10_000)]\n", "tests/integration/api/test_directory.py", "never_an_empty_list"),
+    m("directory_name_units_dropped", "m17-close", "packages/normalizer/src/edisc_normalizer/directory.py",
+      "        return replacement(value), utf16_units(value)\n", "        return replacement(value), None\n",
+      "tests/unit/normalizer/test_directory.py", "lone_surrogate"),
+    m("directory_lone_id_dropped", "m17-close", "packages/normalizer/src/edisc_normalizer/directory.py",
+      "    return substitute_key(value) if has_lone(value) else value\n", "    return value\n",
+      "tests/unit/normalizer/test_directory.py", "lone_surrogate"),
+    m("directory_sweep_unscheduled", "m17-close", "workers/collection/src/edisc_worker/maintenance.py",
+      '    Sweep("refresh-directories", "refresh_directories", timedelta(minutes=15)),\n', "",
+      "tests/integration/worker/test_schedules.py", "sane_interval"),
+    m("directory_entries_before_checkpoint", "m17-close", "workers/collection/src/edisc_worker/directory.py",
+      '            await hooks.hit("directory_page_tx")  # entries written, checkpoint not yet moved\n',
+      '            await s.commit()\n            await s.execute(text("SELECT set_config(\'app.tenant_id\', :t, true)"),'
+      ' {"t": str(tenant_id)})\n'
+      '            await hooks.hit("directory_page_tx")  # entries written, checkpoint not yet moved\n',
+      "tests/integration/api/test_directory.py", "sigkill_mid_capture"),
 ]  # fmt: skip

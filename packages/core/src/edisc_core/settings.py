@@ -215,6 +215,23 @@ class Settings(BaseSettings):
         ge=1,
         description="Seconds-level cap for EPHEMERAL TEST stacks only (env test/ci); refused anywhere else.",
     )
+    # directory snapshots for the scope picker (M17 plan §3.3): refreshed in the background only
+    directory_refresh_max_age_hours: int = Field(
+        default=24, ge=1, le=24 * 30,
+        description="A connection's directory is captured again once its current generation is"
+        " this old (and at once after a re-authorization).",
+    )  # fmt: skip
+    directory_refresh_on_connect: bool = Field(
+        default=True,
+        description="Start a directory capture as soon as an install completes (the 15-minute"
+        " sweep captures it otherwise).",
+    )
+    directory_refresh_budget_seconds: float = Field(
+        default=1200, ge=1, le=1700,
+        description="Wall time one refresh-directories run spends paging sources before it stops"
+        " at a page boundary (the next run resumes from the checkpoint): under the maintenance"
+        " activity's 30-minute limit.",
+    )  # fmt: skip
     reauth_deadline_override_seconds: int | None = Field(
         default=None,
         ge=2,

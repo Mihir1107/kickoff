@@ -36,7 +36,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.service import RPCError, RPCStatusCode
 
-from edisc_api import audit, installs
+from edisc_api import audit, directory_refresh, installs
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import AuthError, Caller, caller_of_session_row
 from edisc_api.authz import P, Scope, authorize, perm, public
@@ -442,6 +442,8 @@ class _Install:
         await audit.anchor(res.sessions, res.s3, res.settings, self.tenant_id)
         if r.reauth:
             await self._resume()
+        if res.settings.directory_refresh_on_connect:
+            await directory_refresh.start(res.temporal, r.connection_id)
         log.info("install ended", provider=r.provider, outcome="completed")
         return self.land(None)
 

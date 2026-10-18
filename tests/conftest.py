@@ -54,6 +54,7 @@ OFF_LOOP = (
     "edisc_renderers.rsmf.reconcile:Reconciler.add_slice",
     "edisc_worker.pipeline:normalize_messages_page",
     "edisc_worker.pipeline:normalize_directory_page",
+    "edisc_worker.directory:parse_page",
     "edisc_worker.pipeline:message_page_subjects",
     "edisc_worker.pipeline:directory_page_subjects",
     "edisc_worker.pipeline:messages_fragment_hash",

@@ -234,6 +234,22 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
             principal,
             secrets.token_bytes(32),
         )
+        # directory snapshots (migration 0043): the same external id in both tenants
+        snapshot = new_id()
+        await conn.execute(
+            "INSERT INTO directory_snapshots (id, tenant_id, connection_id, generation, status,"
+            " connector_version, completed_at) VALUES ($1, $2, $3, 1, 'complete', '0', now())",
+            snapshot,
+            t,
+            ids["conn"],
+        )
+        await conn.execute(
+            "INSERT INTO directory_entries (tenant_id, snapshot_id, kind, external_id, name,"
+            " entry_type, archived, search_key) VALUES ($1, $2, 'user', 'U1', 'Dana', 'user',"
+            " false, 'dana')",
+            t,
+            snapshot,
+        )
         await conn.execute(
             "INSERT INTO groups (id, tenant_id, name) VALUES ($1, $2, 'G')", group, t
         )
@@ -433,6 +449,8 @@ TENANT_TABLES = [
     "sessions",
     "login_attempts",
     "oauth_installs",
+    "directory_snapshots",
+    "directory_entries",
 ]
 # the shape of a sealed SecretBox envelope (the journal refuses anything else, migration 0041)
 SEALED_STUB = (

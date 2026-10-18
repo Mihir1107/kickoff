@@ -8,6 +8,9 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
 - Re-run WORM acceptance tests against real AWS S3 Object Lock before production.
 - Archive ended `sessions` and `login_attempts` rows after a retention period (no-delete rule:
   an owner-run archiving job, like the other insert-only tables; ADR 0016 step-2 note 9).
+- Archive superseded directory generations (`directory_snapshots` status `superseded` and their
+  `directory_entries`) after a retention period: kept by the no-delete rule, they grow with every
+  refresh (one generation per connection per day by default; ADR 0016 "closing M17" note 3).
 - **[required before production]** IdP-side deprovisioning reaches sessions without waiting for
   the 12 h absolute lifetime (ADR 0016 A2.6, M17 decision D8): SCIM deprovisioning (a principal
   deactivated by the IdP ends its sessions in the deactivation's transaction, like an admin

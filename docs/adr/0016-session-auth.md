@@ -6,7 +6,9 @@ access-lost bounds, operator-only moves, Slack's terms). Implemented so far: A8 
 echoes a request value: M17 step 0) and §1-§4 with A1 (browser sessions: M17 step 2, notes at the
 end), the UI's reads (step 3) and `private_key_jwt` client authentication (step 3b, notes at the end;
 real-tenant confirmation pending), live job streams and the download cut-off (steps 5, 5b), install
-flows (step 6) and access lost (step 8, A6; notes at the end). Step 7 (A2.10) is on hold. Builds on ADR 0013 (tenant from the
+flows (step 6), access lost (step 8, A6) and, closing M17 (2026-10-18), the directory snapshots,
+the SSE `connection` event and the report's pause endings (notes at the end). Step 7 (A2.10) is on
+hold. Builds on ADR 0013 (tenant from the
 host, OIDC, scoped roles) and decision 7 of `docs/plans/phase-2.md` (server-side sessions, httpOnly
 cookies, CSRF, revocation, no tokens in the browser). It fixes the details the frontend
 (`feat/web-ui`, `apps/web/src/api/pending.ts`) had to assume, adopting its assumptions.
@@ -1138,3 +1140,68 @@ units, refused for a job not paused or a caller without `job.resume`, a decided 
 `test_workflows` (one alert per paused job besides the connection's). Round `m17-access-lost`: 20
 breaks, all caught (the first run left `warning_repeated` uncaught: the sweep's own selection already
 excludes a warned pause, so the re-check matters only for two sweeps at once; the test now races two).
+
+## Implementation notes: closing M17 (2026-10-18)
+
+Built: the directory snapshots (plan §3.3, the rest of step 8; migration 0043), the SSE
+`connection` event (plan §4), the report stating how each pause ended (ADR 0018 §33), and the
+production-readiness gate's two modes. Round `m17-close`.
+1. **Production readiness warns on main.** `scripts/production_readiness.py --mode enforce|warn`:
+   `enforce` (the default, `make production-readiness`, the report image's `readiness` stage, CI on
+   `v*` tags) exits 1 while a `pending_frontend` entry exists; `warn` (CI on main, branches and pull
+   requests) prints one `::warning` annotation per item and writes a job summary, exit 0. The CI
+   job has no `continue-on-error` any more: its verdict is its own, so red always means something.
+   A malformed allow-list fails in both modes. Tested by evaluating the job's expression per ref
+   and running the script through the Makefile with GitHub's environment.
+2. **The `connection` event.** `ConnectionEvent` (connection id, status verbatim,
+   `needs_reauthorization`) is sent when the job's connection is not `active` at a stream's start
+   and on every change of its status, immediately before the snapshot that shows it, WITHOUT an
+   `id:` (the client's `Last-Event-ID` stays the previous event's until that snapshot arrives).
+   The snapshot's digest covers the connection's status, so a reconnect whose last id is that
+   snapshot gets neither again, and one from before the change gets both (tested live, across a
+   reconnect, and for a change of the connection ALONE: disabled while the job runs, where neither
+   the job's status nor its chain moves). The plan's "sent with the first snapshot" became "when not
+   active": a healthy job's stream is unchanged and a client that saw no `connection` event knows
+   the connection is active. The stream reads only `connections.status` (the statement test checks
+   the columns). In `x-sse-events`: adding it is not breaking, changing it is (tested).
+3. **Directory snapshots, as built** (where they differ from §3.3):
+   - **One generation covers the whole directory** (conversations and users): the connector's
+     `fetch_directory` already pages users then conversations behind ONE resumable cursor (the
+     job's directory unit uses it), so one checkpoint serves both. Entries carry their `kind`;
+     the route takes `kind=conversation|user`.
+   - **The checkpoint** is `source_cursor` + `pages` on the generation's row, moved in the page's
+     own transaction with its entries (insert-only, unique per kind and external id); a second
+     executor whose checkpoint moved under it stores nothing and reloads. The last page completes
+     the generation in that same transaction (no window where all pages are stored but the
+     generation is not complete) and supersedes every complete generation but the current and the
+     previous one. Tested with REAL SIGKILLs of a capture process inside a page's transaction and
+     right after a commit (`directory_kill_target`), plus a crash hook, two executors, a budget
+     stop, refused credentials (`failed`, the previous generation stays served).
+   - **Due** (`directories_due`, SECURITY DEFINER for the sweeper): an active connection with a
+     generation still capturing, none complete, the current older than
+     `EDISC_DIRECTORY_REFRESH_MAX_AGE_HOURS` (24), or credentials replaced since it started
+     (`token_updated_at`: a re-authorization). `refresh-directories` runs every 15 minutes, each
+     run bounded by `EDISC_DIRECTORY_REFRESH_BUDGET_SECONDS` (1,200, under the maintenance
+     activity's 30 minutes): a Grid directory spans several runs. An install starts a run at once
+     (`edisc_api.directory_refresh.start`, best effort; `EDISC_DIRECTORY_REFRESH_ON_CONNECT`, off in
+     the API test settings so tests never leave maintenance runs on the shared queue); the dummy's
+     credential routes (local/test/ci only) rely on the sweep.
+   - **Who** (D12's default): `connection.read` on the client, or `job.start` at the client, the
+     tenant or on a matter of the client. Anyone else gets what `connection.read` answers: 404 when
+     the client is invisible to them (reviewers and auditors hold their roles at matters, so the
+     client is invisible: 404, where the plan's table said 403; `authorize`'s rule decides), 403
+     when it is visible. Tested per role.
+   - **Serving**: `status: not_captured` with `items: null` until a generation completes;
+     `approximate_total` is the generation's count of that kind (exact for it); `q` is a prefix of
+     the NFKC case-folded name, served as a `[q, successor)` range on the C-collated search index,
+     never `LIKE` (a bind-parameter pattern defeats the index). Grid scale tested: 30,000 users in
+     1,000-entry source pages, 60 served pages of 500, each user once, a deep page an index range
+     read (EXPLAIN: no sort, no sequential scan).
+   - **Exports**: no source call. Conversations from the validated `export_conversations` rows
+     (stand-in ids and exact names kept), users from the locked archive's `users.json` through
+     the export connector.
+   - Tenant isolation: the RLS seed and copy tests cover both tables; two tenants with colliding
+     external ids each see only their own generation; A's connection on B's host is 404; A's cursor
+     on B's connection is `cursor_mismatch` (bound to A's path).
+4. **Not built:** a directory refresh route (none was planned; re-authorizing triggers one);
+   archiving superseded generations (BACKLOG: no-delete rule).

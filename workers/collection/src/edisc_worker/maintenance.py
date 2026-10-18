@@ -32,7 +32,7 @@ from edisc_core.settings import Settings
 from edisc_custody.recovery import sweep_stale_uploads
 from edisc_custody.retention_extension import extend_retention
 from edisc_custody.sweeper import sweep_anchors
-from edisc_worker import access_lost
+from edisc_worker import access_lost, directory
 from edisc_worker.contracts import MAINTENANCE_QUEUE
 from edisc_worker.install_recovery import reconcile_tokens
 from edisc_worker.pipeline import Pipeline
@@ -58,6 +58,9 @@ SWEEPS = (
     Sweep("check-reauth-deadlines", "check_reauth_deadlines", timedelta(minutes=5)),
     # every 6 hours (the plan said daily; sooner costs one limited call per connection)
     Sweep("check-connections", "check_connections", timedelta(hours=6)),
+    # directory snapshots for the scope picker (M17 plan §3.3): due connections, budgeted runs that
+    # resume from the checkpoint
+    Sweep("refresh-directories", "refresh_directories", timedelta(minutes=15)),
 )
 
 
@@ -95,6 +98,15 @@ class MaintenanceActivities:
             tenant_id=self.tenant_id,
         )  # fmt: skip
         return {"ok": result.ok, "revoked": result.revoked, "unchecked": result.unchecked}
+
+    @activity.defn(name="refresh_directories")
+    async def refresh_directories(self) -> dict[str, Any]:
+        result = await directory.refresh_directories(
+            self.sweeper_sessions, self.sessions, self.settings, dict(self.connectors),
+            tenant_id=self.tenant_id,
+        )  # fmt: skip
+        return {"completed": result.completed, "partial": result.partial, "failed": result.failed,
+                "pages": result.pages, "unchecked": result.unchecked}  # fmt: skip
 
     @activity.defn(name="check_render_routing")
     async def check_render_routing(self) -> dict[str, Any]:
@@ -177,6 +189,7 @@ class MaintenanceActivities:
             self.ensure_job_reports,
             self.check_reauth_deadlines,
             self.check_connections,
+            self.refresh_directories,
         ]
 
 

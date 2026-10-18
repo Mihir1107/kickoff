@@ -1197,3 +1197,66 @@ class ReportFile(Base):
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     rows: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+
+
+class DirectorySnapshot(Base):
+    """``directory_snapshots`` (migration 0043): one generation of a connection's directory."""
+
+    __tablename__ = "directory_snapshots"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        UniqueConstraint("connection_id", "generation"),
+        ForeignKeyConstraint(
+            ["tenant_id", "connection_id"], ["connections.tenant_id", "connections.id"]
+        ),
+        Index(
+            "uq_directory_snapshots_capturing",
+            "connection_id",
+            unique=True,
+            postgresql_where=text("status = 'capturing'::text"),
+        ),
+        Index(
+            "ix_directory_snapshots_complete",
+            "connection_id",
+            text("generation DESC"),
+            postgresql_where=text("status = 'complete'::text"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    connection_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    generation: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'capturing'::text"))
+    connector_version: Mapped[str] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    completed_at: Mapped[datetime | None] = mapped_column(TZ)
+    failed_reason: Mapped[str | None] = mapped_column(Text)
+    source_cursor: Mapped[str | None] = mapped_column(Text)
+    pages: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    conversations: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    users: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    updated_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+
+
+class DirectoryEntry(Base):
+    """``directory_entries`` (migration 0043): insert-only entries of one generation."""
+
+    __tablename__ = "directory_entries"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "snapshot_id"],
+            ["directory_snapshots.tenant_id", "directory_snapshots.id"],
+        ),
+        Index("ix_directory_entries_search", "snapshot_id", "kind", "search_key", "external_id"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    external_id: Mapped[str] = mapped_column(Text(collation="C"), primary_key=True)
+    name: Mapped[str | None] = mapped_column(Text)
+    name_units: Mapped[list[int] | None] = mapped_column(ARRAY(Integer))
+    entry_type: Mapped[str] = mapped_column(Text)
+    archived: Mapped[bool] = mapped_column(Boolean)
+    search_key: Mapped[str] = mapped_column(Text(collation="C"))

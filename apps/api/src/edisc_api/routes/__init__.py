@@ -17,6 +17,7 @@ def register(app: FastAPI, settings: Settings) -> list[Any]:
         admin,
         auth,
         connections,
+        directory,
         exports,
         hierarchy,
         installs,
@@ -33,7 +34,7 @@ def register(app: FastAPI, settings: Settings) -> list[Any]:
     routers = [
         me.router, auth.router, hierarchy.router, admin.router, connections.router, jobs.router, exports.router,
         renders.router, reports.router, job_package.router, preview.router, wellknown.router,
-        installs.router,
+        installs.router, directory.router,
     ]  # fmt: skip
     if dummy_permitted(settings.env):
         routers.append(connections.credential_router)

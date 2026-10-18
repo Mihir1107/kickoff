@@ -87,6 +87,9 @@ def api_settings(settings: Settings, tmp_path_factory: pytest.TempPathFactory) -
             "slack_client_id": "edisc-test-slack-app",
             "slack_client_secret": SecretStr("test-slack-client-secret"),
             "microsoft_client_id": "edisc-test-ms-app",
+            # no maintenance run per install: tests share the maintenance queue's Temporal
+            # namespace (test_directory proves the start with it on)
+            "directory_refresh_on_connect": False,
         }
     )
 
