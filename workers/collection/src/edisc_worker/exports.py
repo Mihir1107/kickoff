@@ -76,6 +76,7 @@ log = get_logger(__name__)
 
 ACTOR = "system:export-ingest"
 SAMPLE = 100  # names listed per finding; the full lists stay queryable in export_entries
+SERIES_MAX = 4096  # statements timed one by one per table (all are counted in ``db_writes``)
 
 
 def _duplicate(first: str, second: str) -> ArchiveError:
@@ -147,6 +148,10 @@ class ExportIngest:
         # wall time and statements of the index inserts, per table (entries, days, threads)
         self.db_writes: dict[str, dict[str, int]] = {}
         self.page_reads: list[int] = []  # wall ms of each day-file page read
+        # each statement's (start ms since this object was made, statement ms), per table, the first
+        # SERIES_MAX of each: flat or rising per-insert time across a phase (ADR 0015 §24.20)
+        self.started = time.monotonic()
+        self.series: dict[str, list[tuple[int, int]]] = {}
 
     @contextlib.contextmanager
     def _db_write(self, table: str) -> Iterator[None]:
@@ -167,8 +172,12 @@ class ExportIngest:
         try:
             await s.execute(statement, params)
         finally:
+            ms = round((time.monotonic() - started) * 1000)
             row = self.db_writes.setdefault(table, {"ms": 0, "statement_ms": 0, "statements": 0})
-            row["statement_ms"] += round((time.monotonic() - started) * 1000)
+            row["statement_ms"] += ms
+            series = self.series.setdefault(table, [])
+            if len(series) < SERIES_MAX:
+                series.append((round((started - self.started) * 1000), ms))
 
     # ------------------------------------------------------------------ hash and lock
     async def lock(self, tenant_id: uuid.UUID, export_id: uuid.UUID) -> dict[str, Any]:
@@ -496,6 +505,9 @@ class ExportIngest:
                     await s.execute(text(DAY_FILES_PAGE), {"e": export_id, "after": after})
                 ).all()
             self.page_reads.append(round((time.monotonic() - started) * 1000))
+            pages = self.series.setdefault("day_file_pages", [])
+            if len(pages) < SERIES_MAX:
+                pages.append((round((started - self.started) * 1000), self.page_reads[-1]))
             if not rows:
                 break
             after = rows[-1].local_header_offset

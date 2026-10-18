@@ -21,6 +21,10 @@ INTEGRATION_MARKERS ?= not elasticsearch and not production_install
 # Exclusive lock on the one edisc-test stack: a second run fails fast instead of sharing it (ADR 0015 §24.6)
 TEST_LOCK := $(or $(EDISC_TEST_STACK_LOCK),$(or $(TMPDIR),/tmp)/edisc-test-stack.lock)
 STACK_LOCK := uv run python scripts/stack_lock.py
+# Every test target saves its full output (+ failure artifacts, phase timings, the stack's logs on a
+# failure) under test-runs/<UTC time>-<label>/ (scripts/test_log.py; test-runs/latest = the newest)
+TEST_LOG := uv run python scripts/test_log.py
+STACK_LOGS_CMD := $(TEST_COMPOSE) logs --no-color --timestamps --tail=5000
 
 .DEFAULT_GOAL := help
 .PHONY: production-readiness help hooks sync disk-guard test-env-up test-env-down up up-search up-ci down nuke ps logs migrate lint fmt typecheck test test-integration test-all worker api check test-report-pdf test-production-install test-real-idp openapi openapi-check api-compat
@@ -102,7 +106,7 @@ typecheck: ## mypy --strict
 	uv run mypy $(TYPED_SRC)
 
 test: ## Unit tests (no services required); the real-IdP tests skip visibly without credentials
-	uv run pytest tests/unit tests/real_idp
+	$(TEST_LOG) --label unit -- uv run pytest tests/unit tests/real_idp $(PYTEST_ARGS)
 
 openapi: ## Regenerate docs/api/openapi.json (commit it with the API change)
 	uv run python -m edisc_api.openapi_doc
@@ -117,13 +121,14 @@ production-readiness: ## Fail while anything refuses a production build (allow-l
 	uv run python scripts/production_readiness.py --mode $(or $(READINESS_MODE),enforce)
 
 test-real-idp: ## private_key_jwt against a real Entra/Okta developer tenant (EDISC_REAL_IDP_*: tests/real_idp)
-	uv run pytest tests/real_idp -rs -s -p no:randomly
+	$(TEST_LOG) --label real-idp -- uv run pytest tests/real_idp -rs -s -p no:randomly
 
 test-integration: disk-guard ## Integration tests on a FRESH ephemeral stack, destroyed afterwards (never the dev stack)
 	@rm -rf $(TEST_TMP) && mkdir -p $(TEST_TMP)
 	@status=0; \
 	if $(MAKE) test-env-up LOCK_LABEL=test-integration; then \
-	  $(TEST_RUN) pytest $(TESTS) -m "$(INTEGRATION_MARKERS)" --basetemp=$(TEST_TMP)/pytest $(PYTEST_ARGS) || status=$$?; \
+	  $(TEST_LOG) --label integration --on-failure "$(STACK_LOGS_CMD)" -- env $(TEST_RUN) \
+	    pytest $(TESTS) -m "$(INTEGRATION_MARKERS)" --basetemp=$(TEST_TMP)/pytest $(PYTEST_ARGS) || status=$$?; \
 	  if [ $$status -ne 0 ]; then $(TEST_COMPOSE) logs --no-color --tail=200 > $(TEST_LOGS) 2>&1 || true; \
 	    echo "test stack logs saved to $(TEST_LOGS)" >&2; fi; \
 	  $(MAKE) test-env-down; \
@@ -139,7 +144,8 @@ test-production-install: ## The API and every worker type start from a no-dev, n
 test-report-pdf: ## M16 PDF in the pinned linux/amd64 report image (needs make test-env-up): toolchain, PDF goldens (admission), font isolation, veraPDF, image mutation breaks, worker OOM + heartbeats
 	docker buildx build --platform linux/amd64 -f deploy/report-image/Dockerfile --target report-test -t $(REPORT_IMAGE) --load .
 	@mkdir -p $(REPORT_PDF_OUT)
-	docker run --rm --platform linux/amd64 -e EDISC_REPORT_PDF_OUT=/out -e EDISC_RECORD_REPORT_PDF -e CI \
+	$(TEST_LOG) --label report-image -- \
+	  docker run --rm --platform linux/amd64 -e EDISC_REPORT_PDF_OUT=/out -e EDISC_RECORD_REPORT_PDF -e CI \
 	  -v $(REPORT_PDF_OUT):/out -v $(CURDIR)/tests/golden:/src/tests/golden $(REPORT_IMAGE) \
 	  python -m pytest tests/unit/report_image -p no:randomly -p no:cacheprovider -rs --timeout 1800
 	docker run --rm --platform linux/amd64 -v $(REPORT_PDF_OUT):/data $(VERAPDF) --flavour 2u --format text /data \
@@ -156,7 +162,8 @@ test-report-pdf: ## M16 PDF in the pinned linux/amd64 report image (needs make t
 test-integration-only: ## Run integration tests on an ALREADY RUNNING test stack (make test-env-up); keeps it
 	@$(STACK_LOCK) require $(TEST_LOCK)
 	@# one run at a time on the stack: each wipes the shared --basetemp (scripts/stack_lock.py, run)
-	$(STACK_LOCK) run $(TEST_LOCK).run --fresh-dir $(TEST_TMP) -- env $(TEST_RUN) \
+	$(STACK_LOCK) run $(TEST_LOCK).run --fresh-dir $(TEST_TMP) -- \
+	  $(TEST_LOG) --label integration-only --on-failure "$(STACK_LOGS_CMD)" -- env $(TEST_RUN) \
 	  pytest $(TESTS) -m "$(INTEGRATION_MARKERS)" --basetemp=$(TEST_TMP)/pytest $(PYTEST_ARGS)
 
 check: lint typecheck test ## Everything CI runs without services

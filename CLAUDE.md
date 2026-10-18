@@ -46,6 +46,13 @@ make production-readiness  # fails while anything refuses production (allow-list
 make test-report-pdf    # report image (amd64): in-image PDF tests, PDF goldens, veraPDF, worker OOM (needs test-env-up)
 make worker / api       # Temporal worker (+ maintenance queue, sweeper schedules, exports, renders) / API
 ```
+- **Every test run leaves its full output on disk.** Every make test target runs through
+  `scripts/test_log.py`: `test-runs/<UTC time>-<label>/output.log` (everything printed, colour
+  stripped, exit status), `artifacts/` (per failed integration test: worker logs, Temporal histories,
+  custody streams, exactly as CI uploads), `phase-timings/`, and `on-failure.log` (the test stack's
+  logs) when it failed; `test-runs/latest` is the newest, 30 are kept (`TEST_RUNS_KEEP`). Run tests
+  through make (or the wrapper), never a bare `pytest` whose output only the terminal sees: a one-off
+  failure must be diagnosable from what it left.
 
 ## API (M13, ADR 0013)
 - `apps/api` (`edisc_api`): tenant from the Host subdomain (`tenant_id_for_subdomain`) + the token's IdP

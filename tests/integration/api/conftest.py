@@ -10,7 +10,7 @@ import secrets
 import socket
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +38,7 @@ from edisc_core.settings import Settings
 from edisc_db.session import tenant_tx
 from edisc_worker.activities import Activities
 from edisc_worker.contracts import EXPORTS_QUEUE, task_queue
-from edisc_worker.exports import ExportActivities
+from edisc_worker.exports import ExportActivities, ExportIngest
 from edisc_worker.workflows import CollectionJobWorkflow, CollectUnitWorkflow, ExportIngestWorkflow
 
 from . import error_check
@@ -113,6 +113,8 @@ class Api:
     app: FastAPI | None = None
     app_settings: Settings | None = None
     errors: ErrorCodeCheck | None = None
+    # every ExportIngest the export worker made, in order (their per-statement timing series)
+    export_ingests: list[ExportIngest] = field(default_factory=list)
 
     def client(self, subdomain: str, token: str | None = None) -> httpx.AsyncClient:
         headers = {"authorization": f"Bearer {token}"} if token else {}
@@ -292,13 +294,23 @@ def export_settings(api: Api, **overrides: Any) -> Settings:
     )
 
 
+@dataclass
+class _RecordingExportActivities(ExportActivities):
+    made: list[ExportIngest] = field(default_factory=list)
+
+    def _ingest(self) -> ExportIngest:
+        ingest = super()._ingest()
+        self.made.append(ingest)
+        return ingest
+
+
 @contextlib.asynccontextmanager
 async def export_worker(api: Api, **overrides: Any) -> AsyncIterator[Api]:
     """The API with export settings, and the ``exports`` worker those settings drive."""
     settings = export_settings(api, **overrides)
     api.resources.settings = settings
     tuned = Api(settings, api.sessions, api.s3, api.temporal, api.resources, api.http)
-    acts = ExportActivities(api.sessions, api.s3, settings)
+    acts = _RecordingExportActivities(api.sessions, api.s3, settings, tuned.export_ingests)
     async with Worker(
         api.temporal,
         task_queue=EXPORTS_QUEUE,

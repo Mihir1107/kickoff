@@ -15,7 +15,10 @@ services:
       POSTGRES_DB: ${EDISC_PG_DB}
       TEMPORAL_DB_PASSWORD: ${TEMPORAL_DB_PASSWORD}
     # wal_compression: full-page writes dominate WAL volume (docs/runs/2026-10-01-storage-throughput-breakdown.md)
-    command: ["postgres", "-c", "max_connections=300", "-c", "wal_compression=lz4"]
+    # auto_explain is preloaded and INERT (log_min_duration -1) until a test enables it with ALTER
+    # SYSTEM to see the plans backends actually execute (tests/integration/pg_diagnostics.py)
+    command: ["postgres", "-c", "max_connections=300", "-c", "wal_compression=lz4",
+              "-c", "shared_preload_libraries=auto_explain"]
     ports: ["${EDISC_PG_PORT:-5432}:5432"]
     volumes:
       - pgdata:/var/lib/postgresql/data

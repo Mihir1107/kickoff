@@ -128,7 +128,11 @@ class PhaseClock:
                     for p in self.phases
                 ),
                 "",
-                *(f"- {k}: {v}" for k, v in self.extra.items() if k != "worker_phases"),
+                *(
+                    f"- {k}: `{json.dumps(v)}`"
+                    for k, v in self.extra.items()
+                    if k != "worker_phases" and not k.startswith("raw_")
+                ),
                 f"- worker phases: `{json.dumps(self.extra.get('worker_phases'))}`",
                 "",
             ]

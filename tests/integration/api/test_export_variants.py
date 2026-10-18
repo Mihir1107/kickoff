@@ -14,11 +14,13 @@ from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from edisc_connector_dummy.dataset import Dataset
 from edisc_connector_dummy.dialects.slack_export import ExportManifest, ExportOptions, write_export
 from edisc_connector_dummy.spec import DatasetSpec
 from edisc_connector_dummy.zipwriter import ZipWriter
+from tests.integration.pg_diagnostics import AutoExplain, WaitSampler, series_summary
 from tests.integration.phase_timings import phase_clock
 from tests.logcapture import captured_logs
 
@@ -137,16 +139,18 @@ async def test_zip64_by_entry_count(exp_batched: Api, tenant: TenantCtx) -> None
             # how the index tables were read: a plan that turned into sequential scans (stale
             # statistics mid-load) shows here as seq_tup_read in the millions
             tables = await conn.fetch(
-                "SELECT relname, seq_scan, seq_tup_read, idx_scan, n_live_tup,"
-                " autoanalyze_count + analyze_count AS analyzes FROM pg_stat_user_tables"
-                " WHERE relname IN ('export_entries', 'export_day_files')"
+                "SELECT relname, seq_scan, seq_tup_read, idx_scan, idx_tup_fetch, n_live_tup,"
+                " autoanalyze_count + analyze_count AS analyzes,"
+                " autovacuum_count + vacuum_count AS vacuums FROM pg_stat_user_tables"
+                " WHERE relname IN ('export_entries', 'export_day_files', 'export_threads',"
+                " 'slack_exports')"
             )
         finally:
             await conn.close()
         assert row is not None
         out = {k: int(v) for k, v in row.items()}
         for t in tables:
-            for k in ("seq_scan", "seq_tup_read", "idx_scan", "n_live_tup", "analyzes"):
+            for k in TABLE_COUNTERS:
                 out[f"{t['relname']}.{k}"] = int(t[k] or 0)
         return out
 
@@ -167,7 +171,11 @@ async def test_zip64_by_entry_count(exp_batched: Api, tenant: TenantCtx) -> None
                     assert done.status_code == 202, done.text
                 async with clock.phase("lock"):
                     await _left(c, export_id, "locking")
-                async with clock.phase("validation"):
+                sampler = WaitSampler(lambda: superuser(exp_batched.settings))
+                explain = AutoExplain(
+                    lambda: superuser(exp_batched.settings), _engine(exp_batched), sample_rate=0.05
+                )
+                async with clock.phase("validation"), sampler.running(), explain.enabled():
                     out = await settled(c, export_id)
             clock.extra["worker_phases"] = {
                 e["event"]: {
@@ -185,9 +193,30 @@ async def test_zip64_by_entry_count(exp_batched: Api, tenant: TenantCtx) -> None
                 if e.get("event") in ("export locked", "export validated")
                 and e.get("export_id") == export_id
             }
+        # the validating ExportIngest (the lock activity made the one before it)
+        ingest = exp_batched.export_ingests[-1]
+        clock.extra["statement_series"] = {
+            t: series_summary(v) for t, v in sorted(ingest.series.items())
+        }
+        clock.extra["raw_statement_series"] = ingest.series
+        clock.extra["wait_events"] = sampler.record(ingest.started)
+        plans = explain.record(ingest.started)
+        clock.extra["raw_plan_examples"] = plans.pop("examples")
+        clock.extra["plans"] = plans
         clock.extra["fk_lock_probe"] = await _fk_lock_probe(exp_batched, export_id)
         # the test ends at `ready`: collecting from this export is not part of it (no phase to time)
         assert_complete_mapping(out, manifest)
+
+
+TABLE_COUNTERS = (
+    "seq_scan", "seq_tup_read", "idx_scan", "idx_tup_fetch", "n_live_tup", "analyzes", "vacuums",
+)  # fmt: skip
+
+
+def _engine(api: Api) -> AsyncEngine:
+    bind = api.sessions.kw["bind"]
+    assert isinstance(bind, AsyncEngine)
+    return bind
 
 
 async def _fk_lock_probe(api: Api, export_id: str) -> dict[str, float]:
