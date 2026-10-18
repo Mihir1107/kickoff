@@ -63,9 +63,9 @@ broken next to a `<name>.mutation-backup` copy: the runner refuses to start unti
 | `m17-openapi` | the published contract: drift check, operationIds, every compatibility rule (oasdiff ERR, D9 downgrade, our rules), the allow-list, the pinned oasdiff checksum (M17 step 4) | 20 |
 | `m17-error-codes` | every route declares its codes from one registry; the test-time check (undeclared code, wrong status, no code); framework refusals coded; the compat rule on the real document | 8 |
 | `m17-stream` | the job stream: re-checks (session, principal, permission), passive authentication, Last-Event-ID without misses or repeats, the bounded queue and slow_consumer, sealed and lifetime ends, the per-principal cap, import and SQL boundaries, no evidence content, the SSE compat rule, the signing key loaded off the loop, no subscriber or connection left by a disconnect (M17 step 5) | 16 |
-| `m17-close` | closing M17: the production-readiness gate's modes (warn on main, enforce on tags and the production image), the report's pause endings (stated, recomputed, in the HTML, the divergence), the SSE `connection` event (polled, in the digest, never repeated, published, status only), the directory snapshots (never partial, checkpoint, real SIGKILLs, generations, D12, budget, failures, prefix, D14, exports, off the loop, lone surrogates, the sweep) | 42 |
+| `m17-close` | closing M17: the production-readiness gate's modes (warn on main, enforce on tags and the production image), the report's pause endings (stated, recomputed, in the HTML, the divergence), the SSE `connection` event (polled, in the digest, never repeated, published, status only), the directory snapshots (never partial, checkpoint, real SIGKILLs, generations, D12, budget, failures, prefix, D14, exports, off the loop, lone surrogates, the sweep, bounded work per page at any depth) | 43 |
 
-599 entries: 222 unit, 373 integration, 4 image.
+600 entries: 222 unit, 374 integration, 4 image.
 
 The `s19-*` rounds were run by hand when they were built and only their categories were written
 down; the entries here re-create them against the current code.

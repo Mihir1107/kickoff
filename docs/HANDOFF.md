@@ -1,26 +1,81 @@
-# Handoff (2026-10-17: the fixes to step 6 (pending_frontend gate, Microsoft consent without wids, token journal) and M17 step 8 (access lost, check-connections) built; next: the report stating how a pause ended, directory snapshots, real-tenant confirmation)
+# Handoff (2026-10-18: M17 built except step 7 (legal hold) and step 9 (frontend); production-readiness warns on main; the report states how a pause ended (1.6.0); directory snapshots; SSE connection event; the zip64 test's slow runs are a per-statement database finding, open)
 
 This file alone is enough to continue. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisions §1-§18, notes
-§19-§30 and §32, **every deviation in §31**); the rest of the plan of record is `docs/ARCHITECTURE.md`,
+§19-§30, §32, §33, **every deviation in §31**); the rest of the plan of record is `docs/ARCHITECTURE.md`,
 `docs/adr/`, `docs/plans/phase-2.md` and `docs/BACKLOG.md`. M16 summary:
 `docs/runs/2026-10-12-m16-complete.md`. Expert guide: `docs/VERIFYING.md`. Demo: `docs/DEMO.md`.
 **M17 plan: `docs/plans/m17.md`** (every decision taken: its §12; design changes in ADR 0016
-Amendments 1 and 2; build notes for steps 2, 3 and 3b at the end of ADR 0016). Steps 0, 2, 3 and 3b
-4, 5 (SSE), 5b (download cut-off), 6 (install flows) and 8 (access lost, without the directory
-snapshots) are built (3b approved; its confirmation on real Entra and Okta tenants runs in parallel,
-the user is setting the tenants up; step 6 has its own items to confirm on the real apps); step 7 is
-on hold (legal review). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
+Amendments 1 and 2; build notes per step at the end of ADR 0016, the last one "closing M17").
+Every M17 step is built except step 7 (on hold, legal review) and step 9 (the frontend branch's
+Playwright runs); real-tenant confirmation of steps 3b and 6 is pending (the user is setting up
+the Entra and Okta tenants). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
 
 ## Current state
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`.
-Migrations at head: **0042** (0041 the token journal fix, 0042 access lost, M17 step 8). CI: run 39030431440
-green on `3d8bebc`; run 39034834091 on `59233c9` failed one test (§24.20, open; above). Renderer **1.3.2**, dummy connector **0.5.0**, normalizer
-**0.3.0**, report renderer **1.5.0**, preview renderer **1.0.0**. CI: run 38716016425 green on
-`5f0774e` (pool exhaustion, every job); run 38722400091 green on `4c0d513` (step 3b, every job;
-the unit job prints the real-IdP skips).
-Run 38577569420 green on `43f41b4` (step 3); run 38536427956's failure on `4a8c05f` is diagnosed
-and fixed (below).
+Migrations at head: **0043** (directory snapshots). Renderer **1.3.2**, dummy connector **0.5.0**,
+normalizer **0.3.0**, report renderer **1.6.0**, preview renderer **1.0.0**. CI on main: runs
+39118882391 (`0b2b83e`), 39120935270 (`af39867`), 39121279530 (`c6b5a39`), 39123189226
+(`597d5f2`) all green, every job. Run 39126275352 on `72038ad` FAILED integration shard 3:
+`test_a_grid_sized_directory_pages_on_its_index`, diagnosed as a test bug (its "no Sort" plan
+assertion at the last full page; the planner sorted the ~500 remaining rows after a bitmap read of
+the index range, on cost; ADR 0016 "closing M17" note 3); the test now measures bounded work per
+page at three depths. Not re-run to green. The next commit's run is the verdict (below, "CI"). Full local integration suite on
+`72038ad`'s tree: 1,447 passed.
+
+## Done: closing M17 (2026-10-18; round `m17-close`, 42 breaks, all caught)
+1. **production-readiness warns on main** (ADR 0016 "closing M17" note 1):
+   `scripts/production_readiness.py --mode enforce|warn`. CI on main/branches/PRs: `warn` (one
+   `::warning` annotation per pending item + a job summary; the job is GREEN). Release tags `v*`:
+   `enforce` (fails). `make production-readiness` and the report image's `readiness` stage
+   enforce. No `continue-on-error` any more. Tested by evaluating the job's expression per ref and
+   running the script through the Makefile with GitHub's environment. Verified on run 39118882391:
+   the job succeeded with the two `install-routes` warnings as annotations.
+2. **The report states how each pause ended** (ADR 0018 §33): `ended_how` reauthorized / deadline
+   / finished_without_access / not_ended, when, by whom, the reason given, reason class, deadline,
+   `by_end` counts; a pause table in the HTML; `edisc-verify --job-package` recomputes it (reports
+   before 1.6.0 in their own shape). **Found:** the loader's pause divergence compared "resumed",
+   so every deadline-ended or finished-without-access job would have shown a false
+   `pauses_differ`; it now compares the ending. Report renderer 1.6.0: report goldens (two new
+   cases) and PDF goldens recorded in the report image (toolchain e24aecbb3dd4; veraPDF 16/16;
+   image breaks 4/4; worker OOM/heartbeat 3/3); CI's report-pdf admitted them natively.
+3. **SSE `connection` event** (note 2): sent when the job's connection is not active at a stream's
+   start and on every change, before the snapshot showing it, without an id; the snapshot digest
+   covers it. In `x-sse-events` (the compat rule covers changes).
+4. **Directory snapshots** (note 3; CLAUDE.md "Directory snapshots"): migration 0043,
+   `edisc_worker.directory`, `edisc_normalizer.directory`, `GET /v1/connections/{id}/directory`,
+   the `refresh-directories` sweep (15 min) and a run after each install. Real SIGKILL tests, Grid
+   scale (30,000 users), D12 per role, tenant isolation, exports from their rows.
+5. **`test_zip64_by_entry_count` instrumented** (ADR 0015 §24.20): below.
+
+<!-- zip64-findings -->
+**The zip64 test on CI: the data (ADR 0015 §24.20).** Per run: CPU calibration (a fixed pure
+Python workload), validation wall time, the day-file index inserts (133 statements of 500 rows,
+each with a foreign key to `export_entries`), their page reads:
+
+| run | calibration | validation | day-file inserts | page reads |
+|---|---|---|---|---|
+| laptop (3 runs) | 0.13-0.16 s | 7-14 s | 2.0-2.1 s | 0.3-1.5 s |
+| 39118882391 | 0.21 s | 35.0 s | (26.6 s all inserts) | 5.2 s |
+| 39120935270 | 0.15 s | 30.2 s | (24.0 s all inserts) | 3.9 s |
+| 39121279530 | 0.21 s | 33.7 s | 20.8 s | 5.4 s |
+| 39123189226 | 0.18 s | 11.9 s | 4.5 s | 1.2 s |
+
+**Conclusion so far: not CPU throughput, and one phase spikes.** Runs with the same calibration
+(0.15 vs 0.18 s) differ 2.5x in validation and ~5x in the day-file inserts; on the slow runs the
+4-vCPU host is 69 % idle with no iowait or steal while about one core stays busy (Postgres), the
+test process uses 0.17 cores, the plans are the laptop's (index scans 124-128k on every run, one
+small sequential scan), and the WAL is the same 60 MB. So the same statements cost up to 10x more
+inside Postgres on some runners. **Not moved to a dedicated job** (that is the remedy for a pure
+CPU spread, which this is not) and **the 60 s bound is unchanged**. Open: which part of an insert
+is slow on a slow runner. Since `597d5f2` each insert's statement time is recorded apart from its
+commit and the test probes the foreign-key check's work alone (`fk_lock_probe`: 20 x 500 rows read,
+locked FOR KEY SHARE, committed); run 39123189226 (fast) gave select 10.5 ms, lock 13.6 ms, commit
+33 ms. Needed: the same numbers from a SLOW run (download the `phase-timings-<run>-*-shard0`
+artifact of each main run until one is slow), then: statement time up with the probe's lock time
+=> the FK row locks (consider validating day files against the entries in the batch instead of
+a row-locking FK, a schema decision for the user); commit time up => WAL flush latency of the
+runner's disk.
 
 ## Done: the fixes to step 6, then M17 step 8 (2026-10-17)
 **CI:** run 39030431440 on `3d8bebc` (the fixes): **success**; `production-readiness` red by
@@ -381,6 +436,14 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
   units close in the background and it finishes `completed_with_gaps`. Tenant admins:
   `GET /v1/tenant/settings`, `PUT /v1/tenant/settings/reauth-deadline` (`{"hours": 24..2160,
   "reason"}`; 422 outside).
+- **Directory (closing M17):** `GET /v1/connections/{id}/directory?kind=conversation|user&q=&limit=`
+  (<= 500; `next_cursor` with the SAME `kind`/`q`). `status: not_captured` (items null, show
+  "directory not captured yet", `refresh_running` says whether one is under way) vs `captured`;
+  `generation`, `captured_at`, `approximate_total`. Names may come with `name_code_units` (the name
+  held a lone surrogate). Not for reviewers/auditors (404).
+- **SSE `connection` event (closing M17):** `{connection_id, status, needs_reauthorization}` when
+  the job's connection is not active and on every change; no event means active. Show
+  "re-authorize this connection" while `needs_reauthorization`.
 - **422 bodies:** `ValidationErrorOut` / `UnprocessableOut` in the document (regenerate types). 429 `too_many_streams`
   above 10 open streams per user. Fallback: poll `GET /v1/jobs/{id}` and `/units`.
 - **Error codes:** every operation's `x-error-codes` in the document; `service_busy` (503) and
@@ -455,22 +518,19 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
   tenant); revocation cuts in-flight downloads; revoked tokens end as `access_lost` units.
 
 ## Next
-0. **`test_zip64_by_entry_count` on slow CI runners** (ADR 0015 §24.20): profile `validate_export`
-   on the 66,000-entry export and make it cheaper (or show where the runner loses the time); never
-   raise the 60 s bound to make it pass.
-1. **The report states how a pause ended** (ADR 0016 step-8 note 7): fold `job_pause_ended`
-   (`ended_how`, actor, reason, deadline) into the report's pauses section; a report renderer bump
-   (1.6.0) with new JSON/HTML goldens (`EDISC_RECORD_REPORT=1`) and PDF goldens recorded in the
-   report image (`EDISC_RECORD_REPORT_PDF=1`, by hand), the verifier's recomputation if it states
-   them; VERIFYING.md.
-2. **Directory snapshots** (plan §3.3, the rest of step 8 as planned; migration 0043 now).
-3. **Confirm step 3b and step 6 on real tenants** (in parallel: the user is setting up the Entra
+0. **The zip64 finding** (above, "The zip64 test on CI"): collect a slow run's statement/commit
+   split and lock probe, attribute, decide the fix with the user. Never raise the 60 s bound.
+1. **`test_a_crash_after_the_journal_is_repaired_exactly_once[False]`** failed once locally, output
+   lost, not reproduced in 10 runs (ADR 0015 §24.21): if it recurs, follow the note there.
+2. **Confirm step 3b and step 6 on real tenants** (in parallel: the user is setting up the Entra
    ID and Okta developer tenants; `make test-real-idp`; record every answer in ADR 0016 "To confirm
    on real tenants"; also: Slack PKCE, Graph app roles, the `appid` claim of an app-only Graph
    token, `wids` no longer required).
-4. **The frontend must absorb the install routes** (pending_frontend `install-routes`): until it
-   does, CI's `production-readiness` job is red and the production report image cannot be built.
-5. Step 7 waits for legal review. Phase 3 live connectors implement `check_credentials` (Slack
+3. **The frontend must absorb the install routes** (pending_frontend `install-routes`): until it
+   does, CI's `production-readiness` job warns (green) on main, release tags fail, and the
+   production report image cannot be built. The frontend should also move its scope picker to
+   `GET /v1/connections/{id}/directory` and handle the SSE `connection` event (below).
+4. Step 7 waits for legal review. Phase 3 live connectors implement `check_credentials` (Slack
    `auth.test`, Microsoft client credentials): until then their connections are `unchecked`.
 
 ## Done: the fixes before step 7 (2026-10-12; ADR 0018 §30; mutation round `m16-pre7`, 15/15)

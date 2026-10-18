@@ -1362,6 +1362,24 @@ what was done and why.
     cheaper, or show where the runner loses the time (the job's CPU steal and disk wait during the
     test window).
 
+    **Update 2026-10-18 (instrumented, diagnosis narrowed, still open).** The test now records
+    every phase (`tests/integration/phase_timings.py`: wall, process CPU, the host's `/proc/stat`
+    split, load, a fixed CPU calibration, WAL and scan counters) and the worker logs `phases_ms`,
+    per-table insert time (statement apart from commit) and page reads; CI uploads
+    `phase-timings-<run>-<attempt>-shard<n>` pass or fail. Four CI runs: validation 35.0, 30.2,
+    33.7 and 11.9 s (laptop 7-14 s); the day-file index inserts 20-27 s on the three slow runs,
+    4.5 s on the fast one (laptop 2 s); CPU calibration 0.15-0.21 s on all four (laptop 0.13-0.16).
+    A slow run and the fast one had the same calibration (0.15 vs 0.18 s), the same plans (124-128k
+    index scans on `export_entries`, one small sequential scan, against 121k on the laptop) and the
+    same 60 MB of WAL; on slow runs the 4-vCPU host was 69 % idle with no iowait or steal while about
+    one core stayed busy (Postgres) and the test process used 0.17 cores. So: **not CPU throughput**
+    (a dedicated job with its own budget would not be the remedy) and **one phase spikes**: the same
+    INSERT ... SELECT FROM unnest statements, each foreign-key-checked against `export_entries`
+    (FOR KEY SHARE per row), cost up to 10x more inside Postgres on some runners. The bound is
+    unchanged. Next: the statement/commit split and the FK lock probe (`fk_lock_probe`, since
+    `597d5f2`) from a SLOW run; the fast run 39123189226 gave statement 3.3 s of 4.5 s and probe
+    select 10.5 / lock 13.6 / commit 33 ms. HANDOFF "The zip64 test on CI" has the table.
+
 21. **`test_a_crash_after_the_journal_is_repaired_exactly_once[False]` failed once locally
     (2026-10-18, NOT diagnosed, output lost).** One run of five files (`test_no_echo`,
     `test_error_bodies`, `test_authz`, `test_installs`, `test_schedules`) on the up test stack,

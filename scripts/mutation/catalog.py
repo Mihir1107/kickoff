@@ -2115,4 +2115,8 @@ CATALOG: list[Mutation] = [
       ' {"t": str(tenant_id)})\n'
       '            await hooks.hit("directory_page_tx")  # entries written, checkpoint not yet moved\n',
       "tests/integration/api/test_directory.py", "sigkill_mid_capture"),
+    m("directory_page_sorts_everything", "m17-close", "apps/api/src/edisc_api/routes/directory.py",
+      """    ' ORDER BY search_key COLLATE "C", external_id COLLATE "C" LIMIT :n'\n""",
+      """    ' ORDER BY lower(search_key) COLLATE "C", search_key COLLATE "C", external_id COLLATE "C" LIMIT :n'\n""",
+      "tests/integration/api/test_directory.py", "grid_sized"),
 ]  # fmt: skip

@@ -7,6 +7,7 @@ the dummy ``Dataset`` (the oracle), never from what was captured."""
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 import sys
@@ -442,30 +443,42 @@ GRID = DatasetSpec.model_validate({"seed": 3, "conversations": 4, "days": 1,
 
 async def test_a_grid_sized_directory_pages_on_its_index(api: Api, tenant: TenantCtx) -> None:
     """30,000 users in 1,000-entry source pages, served in pages of 500: every user exactly once,
-    and a deep page is an index range read (no sort, no sequential scan) whatever its depth."""
+    and the work of a page is bounded by the page size whatever its depth. Measured, not assumed:
+    EXPLAIN ANALYZE at the first, a middle and the last full page; no plan node may touch more
+    than two pages' worth of rows and none may scan the table. (Near the end the planner may sort
+    the few hundred rows left after a bitmap read of the index range instead of walking the index
+    in order -- CI run 39126275352 did, on cost; both are bounded, a sort of the whole remainder
+    or a sequential scan is not.)"""
     w = await make_world(api, tenant, GRID)
     outcome, pages = await capture(api, tenant, w)
     assert outcome == "completed" and pages == 31
     items, bodies = await read_all(api, tenant, w, "user", limit=500)
     assert len(bodies) == 60 and len(items) == GRID.users
     assert [i["external_id"] for i in items] == [r[0] for r in oracle(GRID, 0, "user")]
-    deep = bodies[-2]["items"][-1]
+    from edisc_api.routes.directory import PAGE
+
+    sql = (PAGE.replace("CAST(:lo AS text)", "NULL").replace("CAST(:hi AS text)", "NULL")
+           .replace(":after_key", "$3").replace(":after_id", "$4").replace(":s", "$1")
+           .replace(":k", "$2").replace(":n", "501"))  # fmt: skip
+    snapshot = uuid.UUID(bodies[0]["snapshot_id"])
     conn = await superuser(api.settings)
     try:
         await conn.execute("ANALYZE directory_entries")
-        snapshot = uuid.UUID(bodies[0]["snapshot_id"])
-        from edisc_api.routes.directory import PAGE
-
-        sql = (PAGE.replace("CAST(:lo AS text)", "NULL").replace("CAST(:hi AS text)", "NULL")
-               .replace(":after_key", "$3").replace(":after_id", "$4").replace(":s", "$1")
-               .replace(":k", "$2").replace(":n", "501"))  # fmt: skip
-        plan = "\n".join(r[0] for r in await conn.fetch(
-            f"EXPLAIN {sql}", snapshot, "user", search_key(deep["name"]), deep["external_id"]))  # fmt: skip
+        for before in (None, bodies[29]["items"][-1], bodies[-2]["items"][-1]):
+            key = search_key(before["name"]) if before else None
+            plan = json.loads(await conn.fetchval(
+                f"EXPLAIN (ANALYZE, FORMAT JSON) {sql}", snapshot, "user", key,
+                before["external_id"] if before else None))[0]["Plan"]  # fmt: skip
+            nodes = [plan]
+            while nodes:
+                node = nodes.pop()
+                nodes.extend(node.get("Plans", []))
+                assert node["Node Type"] != "Seq Scan", plan
+                assert node["Actual Rows"] <= 2 * 501, (node["Node Type"], node["Actual Rows"])
+                if "Index Name" in node:
+                    assert node["Index Name"] == "ix_directory_entries_search", node
     finally:
         await conn.close()
-    assert (
-        "ix_directory_entries_search" in plan and "Sort" not in plan and "Seq Scan" not in plan
-    ), plan
 
 
 # ------------------------------------------------------------------ an export: no source call

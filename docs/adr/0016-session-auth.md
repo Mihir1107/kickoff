@@ -1195,8 +1195,14 @@ production-readiness gate's two modes. Round `m17-close`.
      `approximate_total` is the generation's count of that kind (exact for it); `q` is a prefix of
      the NFKC case-folded name, served as a `[q, successor)` range on the C-collated search index,
      never `LIKE` (a bind-parameter pattern defeats the index). Grid scale tested: 30,000 users in
-     1,000-entry source pages, 60 served pages of 500, each user once, a deep page an index range
-     read (EXPLAIN: no sort, no sequential scan).
+     1,000-entry source pages, 60 served pages of 500, each user once, and the work of a page bounded
+     by its size at every depth (EXPLAIN ANALYZE at the first, a middle and the last full page: no
+     node over two pages of rows, no sequential scan). **CI run 39126275352 failed the first form of
+     this test** ("no Sort node" at the last full page): diagnosed as a TEST bug. With about 1,000
+     rows left, the planner on the CI runner (fresh ANALYZE) chose a bitmap read of the index range
+     plus a sort of the ~500 matching rows over walking the index in order, on cost; both read only
+     the range. The assertion stated more than the requirement (bounded work per page); it now
+     measures that requirement at three depths, and a break that sorts the whole kind is caught.
    - **Exports**: no source call. Conversations from the validated `export_conversations` rows
      (stand-in ids and exact names kept), users from the locked archive's `users.json` through
      the export connector.
