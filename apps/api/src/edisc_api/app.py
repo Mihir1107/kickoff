@@ -39,6 +39,7 @@ from edisc_connector_dummy.guard import dummy_permitted, ensure_dummy_permitted
 from edisc_connector_slack_export.connector import SlackExportConnector
 from edisc_connectors_base.protocol import Connector
 from edisc_connectors_base.ratelimit import RateLimiter
+from edisc_connectors_base.redis_driver import DRIVER_INFO
 from edisc_core.envelope import SecretBox
 from edisc_core.kms import LocalKmsClient
 from edisc_core.logs import bind_context, clear_context, get_logger
@@ -119,6 +120,7 @@ def redis_client(settings: Settings) -> aioredis.Redis:
     pool = aioredis.BlockingConnectionPool.from_url(
         settings.redis_url, max_connections=settings.redis_max_connections,
         timeout=settings.redis_pool_timeout_seconds, socket_connect_timeout=2, socket_timeout=5,
+        driver_info=DRIVER_INFO,  # never resolved per connection on the loop (redis_driver)
     )  # fmt: skip
     return aioredis.Redis(connection_pool=pool)
 

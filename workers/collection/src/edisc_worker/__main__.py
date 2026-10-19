@@ -31,6 +31,7 @@ from edisc_connector_dummy.guard import (
 from edisc_connector_slack_export.connector import SlackExportConnector
 from edisc_connectors_base.protocol import Connector
 from edisc_connectors_base.ratelimit import RateLimiter
+from edisc_connectors_base.redis_driver import DRIVER_INFO
 from edisc_core import loopblock, loopguard
 from edisc_core.logs import configure_logging, get_logger
 from edisc_core.settings import Settings
@@ -87,7 +88,9 @@ async def activities_for(
 ) -> AsyncIterator[tuple[Activities, MaintenanceActivities]]:
     engine = create_engine(settings, "app")
     sweeper = create_engine(settings, "sweeper", pool_size=2)
-    redis = aioredis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=5)
+    redis = aioredis.from_url(
+        settings.redis_url, socket_connect_timeout=2, socket_timeout=5, driver_info=DRIVER_INFO
+    )
     http = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
     try:
         await warm_pool(engine)

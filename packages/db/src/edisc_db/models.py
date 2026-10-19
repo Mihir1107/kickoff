@@ -231,6 +231,16 @@ class WorkUnit(Base):
         ),
         Index(None, "job_id", "status"),
         Index(None, "job_id", "conversation_id", "day", "unit_key"),  # report order (ADR 0018 §12)
+        # the earlier clean collections of a unit (absence detection; migration 0044)
+        Index(
+            None,
+            "tenant_id",
+            "unit_key",
+            postgresql_where=text(
+                "kind = 'conversation_day' AND status = 'done' AND recon_status = 'matched'"
+                " AND file_gaps = 0"
+            ),
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)

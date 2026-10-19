@@ -45,6 +45,10 @@ Rounds (ADR 0015):
   database's collation (the corpus run on a tailored ICU database, every ordered text column C),
   the clean verdict recomputed from the chain alone (a report may never state clean when the chain
   does not give clean), normalizer versions recorded in `job_started` and each batch, recomputed.
+- ``s24-stale-stats``: bulk-load reads bounded whatever the planner's statistics say (ADR 0015
+  §24.20): the day-file page read without sorts, the export index tables analyzed right after
+  loading (the per-row foreign-key checks by primary key), and no Redis connection resolving
+  redis-py's version on the event loop.
 - ``m17-d11``: no error path echoes a request value (M17 step 0, ADR 0016 amendment, decision
   D11): the sanitised 422 body (no input/ctx, client-chosen loc keys, schema-only messages), the
   fixed 500 and its message-free log line, log paths without client segments, uvicorn's access log
@@ -2119,4 +2123,26 @@ CATALOG: list[Mutation] = [
       """    ' ORDER BY search_key COLLATE "C", external_id COLLATE "C" LIMIT :n'\n""",
       """    ' ORDER BY lower(search_key) COLLATE "C", search_key COLLATE "C", external_id COLLATE "C" LIMIT :n'\n""",
       "tests/integration/api/test_directory.py", "grid_sized"),
+    # ------------------------------------------------------------------ stale statistics (§24.20)
+    m("day_page_sorts_on_stale_statistics", "s24-stale-stats", EXW,
+      '    await s.execute(text("SET LOCAL enable_sort = off"))\n', "",
+      "tests/integration/db/test_stale_statistics.py", "read_one_page"),
+    m("entries_not_analyzed_before_day_files", "s24-stale-stats", EXW,
+      '        await self._analyze(tenant_id, "export_entries")  # before anything reads or references them\n',
+      "", "tests/integration/api/test_export_variants.py", "zip64_by_entry_count"),
+    m("entries_analyzed_after_day_files", "s24-stale-stats", EXW,
+      '        await self._analyze(tenant_id, "export_entries")  # before anything reads or references them\n',
+      '        await self._analyze(tenant_id, "export_conversations")  # (the wrong table)\n',
+      "tests/integration/api/test_export_variants.py", "zip64_by_entry_count"),
+    m("analyze_guard_any_table", "s24-stale-stats", "packages/db/migrations/versions/0044_analyze_export_index.py",
+      "    IF p_table NOT IN ('export_entries', 'export_conversations', 'export_day_files', 'export_threads') THEN\n",
+      "    IF p_table IS NULL THEN\n",
+      "tests/integration/db/test_stale_statistics.py", "only_export_index_tables"),
+    m("absence_scans_every_unit", "s24-stale-stats", "packages/db/migrations/versions/0044_analyze_export_index.py",
+      "CREATE INDEX ix_work_units_tenant_id_unit_key ON work_units (tenant_id, unit_key)\n"
+      "    WHERE kind = 'conversation_day' AND status = 'done' AND recon_status = 'matched' AND file_gaps = 0;\n",
+      "", "tests/integration/db/test_stale_statistics.py", "earlier_clean_collections"),
+    m("redis_version_per_connection", "s24-stale-stats", "apps/api/src/edisc_api/app.py",
+      "        driver_info=DRIVER_INFO,  # never resolved per connection on the loop (redis_driver)\n", "",
+      "tests/unit/api/test_redis_driver.py"),
 ]  # fmt: skip

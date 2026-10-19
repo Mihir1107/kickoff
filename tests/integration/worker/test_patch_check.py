@@ -12,7 +12,6 @@ from types import ModuleType
 
 from temporalio.client import Client
 
-from edisc_core.time import utc_now
 from edisc_worker.contracts import JobInput
 from edisc_worker.workflows import CollectionJobWorkflow
 
@@ -33,7 +32,6 @@ async def test_open_workflows_started_before_the_deploy_block_patch_removal(
 ) -> None:
     check = _script()
     job_id = uuid.uuid4()
-    before_start = utc_now() - timedelta(seconds=5)
     # no worker polls this queue: the workflow stays open, like a multi-day job
     handle = await temporal.start_workflow(
         CollectionJobWorkflow.run,
@@ -42,7 +40,13 @@ async def test_open_workflows_started_before_the_deploy_block_patch_removal(
         task_queue=f"no-worker-{job_id.hex}",
     )
     try:
-        deployed_after = utc_now() + timedelta(seconds=5)
+        # Both bounds from the SERVER's own start time, never this host's clock: the query compares
+        # against Temporal's StartTime, and a Docker VM clock behind the host's (after a laptop
+        # sleep) once put a just-started workflow "before now - 5 s" (ADR 0015 §24.23). The query
+        # truncates to whole seconds, hence the 2 s on each side.
+        started = (await handle.describe()).start_time
+        assert started is not None
+        deployed_after = started + timedelta(seconds=2)
         found: list[str] = []
         for _ in range(50):  # visibility is eventually consistent
             found = await check.open_before(temporal, ["CollectionJobWorkflow"], deployed_after)
@@ -50,7 +54,9 @@ async def test_open_workflows_started_before_the_deploy_block_patch_removal(
                 break
             await asyncio.sleep(0.2)
         assert any(str(job_id) in f for f in found)
-        earlier = await check.open_before(temporal, ["CollectionJobWorkflow"], before_start)
+        earlier = await check.open_before(
+            temporal, ["CollectionJobWorkflow"], started - timedelta(seconds=2)
+        )
         assert not any(str(job_id) in f for f in earlier)
     finally:
         await handle.terminate("test cleanup")

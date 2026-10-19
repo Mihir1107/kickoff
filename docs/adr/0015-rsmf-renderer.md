@@ -1385,6 +1385,76 @@ what was done and why.
     validation; every CI run shows an ANALYZE of `export_entries` in that window, the laptop none.
     Next: sample the backend's wait events (and autovacuum workers) during validation.
 
+    **Resolved 2026-10-19: a product bug, quadratic on stale statistics (fixed, migration 0044).**
+    New instruments (`tests/integration/pg_diagnostics.py`):
+    - **Per-statement series:** each statement's start and duration, per table (`ExportIngest.series`).
+    - **Wait events:** a 100 ms `pg_stat_activity` sampler with autovacuum spans.
+    - **Executed plans:** `auto_explain` (preloaded in compose, inert until enabled) switched on for
+      the validation window. Its NOTICE output is collected from the worker's OWN pool connections,
+      so these are the plans the backends executed, nested foreign-key checks included, captured at
+      the time.
+
+    Locally (laptop):
+    - **The day-file page query was quadratic.** It was planned for 1 row (the new export is in no
+      statistic) on `(export_id, kind, folder)`, read every remaining day entry and sorted them for
+      each page: 51,002 rows read for a 500-row page; page time fell from 32 to 8 ms as the
+      remainder shrank; 7.9 M `idx_tup_fetch` on `export_entries` for 66,000 entries.
+    - **The foreign-key check of each day-file row** (`export_id = $1 AND idx = $2`, run by
+      PostgreSQL per row) had CUSTOM plans on the same index. They cost 6.19 against the primary
+      key's 8.44, with `idx` as a filter, reading the export's entries up to that row (`Rows Removed
+      by Filter: 4000` at idx 4002). Locally each backend's plan cache switched to the generic plan
+      (primary key) after its first 5 executions: 15 bad checks.
+
+    On CI (run 39132450451, the instrumented commit; the test timed out at 60 s):
+    `export_entries.idx_tup_fetch` = **643,353,122** in validation, about 16,000 tuples per check
+    over 40,000 day-file rows. That is the sum over rows of each row's position (n²/2 = 800 M for
+    40,000), so the checks stayed on the bad plan there. **Per-insert time rose through the phase.**
+    The earlier "same plans on every run" (124-128k index scans) was wrong: `idx_scan` counts scans,
+    not the tuples each one read.
+
+    Wait events showed CPU only (no lock or I/O waits), consistent with this. The ANALYZE seen in CI
+    windows was autovacuum catching up, sometimes mid-phase (after it, the custom plans turn
+    correct); the laptop's shorter phase usually finished first.
+
+    **Fixes:**
+    - **(a) The page read forbids sorts** (`SET LOCAL enable_sort = off` in `day_files_page`). The
+      only sort-free plan is the ordered `(export_id, local_header_offset)` scan: one page plus the
+      non-day entries between.
+      - Tried first and rejected on evidence: a partial index `(export_id, local_header_offset)
+        WHERE kind = 'day'` still lost the tie on statistics from before the export (47,496 buffers
+        per page).
+      - An ANALYZE alone also fixes the page read, but is not provable for a large multi-export
+        table.
+      - The query text runs only through that function: a cached generic plan is not re-planned
+        when a setting changes (found by the test: the unguarded text run first on the same pooled
+        connection handed the guarded call a sorting plan).
+    - **(b) Export index tables are analyzed right after loading** (`analyze_export_index`, a definer
+      function owned by the tables' owner, since the app role may not ANALYZE; migration 0044).
+      - Order: `export_entries` before any day file references it; conversations after loading;
+        day files and threads before collection reads them.
+      - After the ANALYZE the export's size is known and the primary key wins (1 row against
+        thousands), custom or generic.
+      - In a large shared table a new export missing from the sample is estimated at the average
+        export's size, which also picks the primary key. The remaining stale case is a SMALL export,
+        where the bad plan is cheap.
+
+    **Tests:**
+    - `tests/integration/db/test_stale_statistics.py`, on a database migrated from scratch:
+      - **States:** never analyzed; analyzed before the export; analyzed after. Each with custom and
+        generic plans.
+      - **Method:** tuples read counted from `pg_stat_xact_user_tables`. Each stale state first
+        proves the trap is armed (the unguarded page read or the unguarded checks read > 10x the
+        bound).
+      - **Observed:** "never analyzed" plans the checks on the primary key here, so it is checked
+        bounded only.
+    - **The zip64 test asserts work, not time:**
+      - validation fetches at most 15 entry tuples per entry (laptop after the fix: 213,722 = 3.2
+        per entry, against 7.9 M before);
+      - the ANALYZE of the entries precedes the first day-file insert.
+
+    The 60 s bound is unchanged. Round `s24-stale-stats` (5/5 caught). The sweep of other bulk-load
+    paths and the 20M-entry estimate are in HANDOFF and `docs/runs/2026-10-19-export-validation-stale-statistics.md`.
+
 21. **`test_a_crash_after_the_journal_is_repaired_exactly_once[False]` failed once locally
     (2026-10-18, NOT diagnosed, output lost).** One run of five files (`test_no_echo`,
     `test_error_bodies`, `test_authz`, `test_installs`, `test_schedules`) on the up test stack,
@@ -1396,3 +1466,34 @@ what was done and why.
     If it recurs: read the failing assertion first; if a count is over by one, list
     `token_refresh_journal` rows by tenant at the failure (the CI artifact holds the custody
     streams) before changing anything.
+
+22. **The API's event loop blocked 301 ms opening a Redis connection (CI run 39132450451,
+    `test_stalled_clients`; product bug, fixed 2026-10-19).**
+    - **What the loop guard showed:** "337 ms of CPU on the loop's thread". The stack: redis-py's
+      `BlockingConnectionPool.make_connection` → `resolve_driver_info` → `get_lib_version` →
+      `importlib.metadata.version("redis")`, which scans the installed distributions' metadata (file
+      reads) on the event loop.
+    - **Why it recurs:** redis-py 8.1 does this for EVERY new connection, uncached, unless given
+      `driver_info`. The API's pool grows lazily under a burst, and that test is the burst.
+    - **Fix:** `edisc_connectors_base.redis_driver.DRIVER_INFO`, resolved once at import (outside any
+      loop) and passed to every client: the API pool, the worker, the test limiter.
+    - **Test:** `tests/unit/api/test_redis_driver.py` (a pool's new connections call no
+      `metadata.version`; mutation `redis_version_per_connection`).
+    - **Diagnosis, not a guess:** the zip64 failure earlier in the same shard did not cause it. Its
+      diagnostics were reset in `finally` (each test's `auto_explain` window), and the stack names
+      the redis call, not a database statement.
+
+23. **`test_open_workflows_started_before_the_deploy_block_patch_removal` failed once locally
+    (2026-10-19; test bug, fixed).** A workflow started by the test was listed by the query
+    `StartTime < (host now - 5 s)`.
+    - **Mechanism (certain):** the assertion compared the HOST's clock with Temporal's StartTime,
+      so it fails exactly when the server's clock is more than 5 s behind the host's.
+    - **Cause (inferred, not observed directly):** the Docker VM's clock lagging after the laptop's
+      overnight sleep. The run began minutes after resume.
+    - **Evidence:** right after the failure the offset measured 0.000 s (a probe workflow's server
+      StartTime against the host clock, three times), and the test passed 5 times in a row.
+    - **Fix:** both bounds now come from the workflow's own server-stamped start time (`describe()`),
+      ± 2 s for the query's whole-second truncation. No host clock is involved, and nothing is
+      loosened.
+    - **Product unaffected:** the script compares an operator-given deploy time with the server's
+      stamps.

@@ -16,6 +16,7 @@ from temporalio.client import Client
 from types_aiobotocore_s3 import S3Client
 
 from edisc_connectors_base.ratelimit import RateLimiter
+from edisc_connectors_base.redis_driver import DRIVER_INFO
 from edisc_core.settings import Settings
 from edisc_db.bootstrap import bootstrap
 from edisc_db.migrate import upgrade
@@ -182,7 +183,7 @@ async def temporal(settings: Settings) -> Client:
 
 @pytest.fixture(scope="session")
 async def limiter(settings: Settings) -> AsyncIterator[RateLimiter]:
-    client = aioredis.from_url(settings.redis_url)
+    client = aioredis.from_url(settings.redis_url, driver_info=DRIVER_INFO)
     # short wait chunks so the heartbeat tests can use short heartbeat timeouts
     yield RateLimiter(client, settings.rate_limits, wait_chunk_seconds=0.3)
     await client.aclose()

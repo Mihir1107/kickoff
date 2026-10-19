@@ -411,6 +411,23 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   scope covering the conversation; collected counts are per conversation-day across the job's links.
 - Queries that join a unit's links to items select items BY ID and filter day/type in Python: with stale statistics
   mid-load the planner otherwise scans a whole day's items (see docs/runs/2026-10-01-storage-throughput-breakdown.md).
+- **Reads during and right after a bulk load are bounded by construction, never by the statistics** (ADR 0015
+  §24.20). Right after a load the planner estimates the new rows at about one, and every index sharing the leading
+  column looks equal. Per-row foreign-key checks and per-page queries then rescan everything loaded so far
+  (quadratic: 643 M tuples for a 66,000-entry export on CI).
+  - Analyze the loaded table before anything references it (`analyze_export_index`, a definer function: the app
+    role may not ANALYZE).
+  - Make a page query's good plan the only cheap one (`day_files_page`: `SET LOCAL enable_sort = off`; such a text
+    runs ONLY through its guard, because cached generic plans ignore later setting changes).
+  - Prove it on a database migrated from scratch in each statistics state, trap armed first
+    (`tests/integration/db/test_stale_statistics.py`).
+  - Assert WORK (tuples read), not time, in large tests.
+  - Diagnose with `tests/integration/pg_diagnostics.py`: `AutoExplain` collects the plans the worker's own
+    backends executed, and `WaitSampler` samples wait events. `auto_explain` is preloaded in compose and inert
+    until enabled.
+  - `items` for a tenant new to the statistics is still open (BACKLOG).
+- Redis clients pass `driver_info=edisc_connectors_base.redis_driver.DRIVER_INFO`: without it redis-py reads
+  package metadata on the event loop for every new connection (ADR 0015 §24.22).
 - Schema changes: new Alembic revision in `packages/db/migrations/versions/` (hand-written SQL, run via `split_sql`),
   update `edisc_db.models` to match (drift test fails otherwise), add RLS + grants for any new tenant table.
 - Tenant isolation: FORCE RLS on every tenant table. The app connects as `edisc_app` (not owner, not superuser,
@@ -513,7 +530,8 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   backstop, not a replacement; never bypass it with `--no-verify`.
 - No scope creep: later-phase ideas go in `docs/BACKLOG.md`.
 - Ask before deviating from a principle. Keep this file, ARCHITECTURE.md and ADRs current when decisions change.
-- Start of a session: read docs/HANDOFF.md (state, open decisions, next milestone, gotchas).
+- Start of a session: read docs/HANDOFF.md (state, open decisions, next milestone, gotchas). The next milestone's
+  plan: `docs/plans/m18.md` (proposed; its §11 decisions come first).
 - Stage explicit paths only (never `git add -A`); `apps/web` belongs to the frontend branch
   (`feat/web-ui`) and is never committed, modified or run from a backend session. Other sessions may share
   this tree: check `git status` first, and never restore files with `git checkout`.

@@ -8,8 +8,6 @@ from __future__ import annotations
 import asyncio
 import io
 import json
-import time
-import uuid
 from typing import Any
 
 import httpx
@@ -21,7 +19,7 @@ from edisc_connector_dummy.dialects.slack_export import ExportManifest, ExportOp
 from edisc_connector_dummy.spec import DatasetSpec
 from edisc_connector_dummy.zipwriter import ZipWriter
 from tests.integration.pg_diagnostics import AutoExplain, WaitSampler, series_summary
-from tests.integration.phase_timings import phase_clock
+from tests.integration.phase_timings import PhaseClock, phase_clock
 from tests.logcapture import captured_logs
 
 from ..custody.conftest import superuser
@@ -175,8 +173,11 @@ async def test_zip64_by_entry_count(exp_batched: Api, tenant: TenantCtx) -> None
                 explain = AutoExplain(
                     lambda: superuser(exp_batched.settings), _engine(exp_batched), sample_rate=0.05
                 )
-                async with clock.phase("validation"), sampler.running(), explain.enabled():
-                    out = await settled(c, export_id)
+                try:
+                    async with clock.phase("validation"), sampler.running(), explain.enabled():
+                        out = await settled(c, export_id)
+                finally:  # recorded whether validation settled or ran out of its bound
+                    _record_validation(clock, exp_batched, sampler, explain)
             clock.extra["worker_phases"] = {
                 e["event"]: {
                     k: e.get(k)
@@ -193,19 +194,36 @@ async def test_zip64_by_entry_count(exp_batched: Api, tenant: TenantCtx) -> None
                 if e.get("event") in ("export locked", "export validated")
                 and e.get("export_id") == export_id
             }
-        # the validating ExportIngest (the lock activity made the one before it)
-        ingest = exp_batched.export_ingests[-1]
-        clock.extra["statement_series"] = {
-            t: series_summary(v) for t, v in sorted(ingest.series.items())
-        }
-        clock.extra["raw_statement_series"] = ingest.series
-        clock.extra["wait_events"] = sampler.record(ingest.started)
-        plans = explain.record(ingest.started)
-        clock.extra["raw_plan_examples"] = plans.pop("examples")
-        clock.extra["plans"] = plans
-        clock.extra["fk_lock_probe"] = await _fk_lock_probe(exp_batched, export_id)
         # the test ends at `ready`: collecting from this export is not part of it (no phase to time)
         assert_complete_mapping(out, manifest)
+        # the work bound, whatever the runner's speed (ADR 0015 §24.20): index tuples the
+        # validation read from export_entries, a few passes over the export (entries, pages,
+        # foreign-key checks, findings). A per-row check or per-page read that scans the export
+        # again (stale statistics: 643 M on CI before the fix) multiplies it by thousands. The
+        # counters may lag the last statements by the stats flush interval: only ever lower.
+        series = exp_batched.export_ingests[-1].series
+        assert series["analyze:export_entries"][0][0] < series["export_day_files"][0][0], (
+            "the entries' statistics are refreshed before the first day-file row references them"
+        )
+        validation = next(p for p in clock.phases if p["phase"] == "validation")
+        fetched = validation["counters"]["export_entries.idx_tup_fetch"]
+        assert fetched <= 15 * manifest.entries, f"validation fetched {fetched} entry tuples"
+
+
+def _record_validation(
+    clock: PhaseClock, api: Api, sampler: WaitSampler, explain: AutoExplain
+) -> None:
+    if not api.export_ingests:
+        return
+    ingest = api.export_ingests[-1]  # the validating one (the lock activity made the one before)
+    clock.extra["statement_series"] = {
+        t: series_summary(v) for t, v in sorted(ingest.series.items())
+    }
+    clock.extra["raw_statement_series"] = ingest.series
+    clock.extra["wait_events"] = sampler.record(ingest.started)
+    plans = explain.record(ingest.started)
+    clock.extra["raw_plan_examples"] = plans.pop("examples")
+    clock.extra["plans"] = plans
 
 
 TABLE_COUNTERS = (
@@ -217,34 +235,6 @@ def _engine(api: Api) -> AsyncEngine:
     bind = api.sessions.kw["bind"]
     assert isinstance(bind, AsyncEngine)
     return bind
-
-
-async def _fk_lock_probe(api: Api, export_id: str) -> dict[str, float]:
-    """What each day-file insert's foreign-key checks do, alone: 20 transactions that each read
-    500 existing ``export_entries`` rows, lock them FOR KEY SHARE (as the RI check does), and
-    commit; wall ms summed per step. Tells statement CPU (the lock writes each row's xmax) from
-    the commit's WAL flush (ADR 0015 §24.20)."""
-    conn = await superuser(api.settings)
-    out = {"select_ms": 0.0, "lock_ms": 0.0, "commit_ms": 0.0}
-    try:
-        for k in range(20):
-            args = (uuid.UUID(export_id), k * 500, (k + 1) * 500)
-            sql = "SELECT idx FROM export_entries WHERE export_id = $1 AND idx >= $2 AND idx < $3"
-            t0 = time.monotonic()
-            await conn.fetch(sql, *args)
-            t1 = time.monotonic()
-            tx = conn.transaction()
-            await tx.start()
-            await conn.fetch(sql + " FOR KEY SHARE", *args)
-            t2 = time.monotonic()
-            await tx.commit()
-            t3 = time.monotonic()
-            out["select_ms"] += (t1 - t0) * 1000
-            out["lock_ms"] += (t2 - t1) * 1000
-            out["commit_ms"] += (t3 - t2) * 1000
-    finally:
-        await conn.close()
-    return {k: round(v, 1) for k, v in out.items()}
 
 
 async def _left(c: httpx.AsyncClient, export_id: str, status: str) -> None:

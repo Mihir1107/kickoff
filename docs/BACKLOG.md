@@ -51,6 +51,21 @@ Ideas and later-phase work. Nothing here is in scope until promoted into a phase
     render, `/1` report); a format bump releases a new verifier.
 - Anchor the exported package manifest to WORM at export time so the manifest hash itself is attested.
 - **[with Phase 2 bulk export ingestion]** Custody lock-narrowing reorder (deferred FK, `append_batch` last), then re-measure. Per-unit chains stay deferred (docs/runs/2026-09-30-custody-contention.md).
+- **[required before production]** `items` lookups and foreign-key checks for a tenant the
+  planner's statistics do not know yet (docs/runs/2026-10-19-export-validation-stale-statistics.md,
+  the sweep).
+  - **Seen:** generic and custom plans on a tenant-leading index with the key as a filter, reading
+    the tenant's items so far, per FK check (`job_items`, `item_derivations` → `items`) and per
+    batch (`idempotency_key = ANY`, the version lookup). A new tenant's first large collection is
+    quadratic until autoanalyze runs (2 % of the table).
+  - **Options:**
+    - an ANALYZE of `items` whenever a job's inserted items double (bounds the stale work to a
+      constant factor; the cheapest);
+    - `pg_hint_plan` for the two pipeline lookups (available on RDS);
+    - list or hash partitioning of `items` by tenant, with an ANALYZE of the new partition;
+    - for the FK checks only: reference `items (id)` and enforce the tenant match with a trigger.
+  - **Test** like `tests/integration/db/test_stale_statistics.py` (a tenant missing from the
+    statistics, trap armed, bounded after).
 - **[required before production]** Post-close destruction workflow: after a matter (or client) is closed
   and every object's retention has expired, destroy the evidence deliberately (every version, verified
   gone), record each destruction in custody, and issue a certificate of destruction listing what was

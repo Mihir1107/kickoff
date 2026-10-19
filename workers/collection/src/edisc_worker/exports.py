@@ -421,6 +421,7 @@ class ExportIngest:
                 "archive_too_large", f"{row.size_bytes} bytes > {limits.max_archive_bytes}"
             )
         scan = await self._scan_directory(tenant_id, export_id, src, limits)
+        await self._analyze(tenant_id, "export_entries")  # before anything reads or references them
         phases.mark("directory")
         tier = detect_tier(
             set(scan.metadata),
@@ -435,11 +436,27 @@ class ExportIngest:
         await self._workspace(src, limits, scan)
         phases.mark("workspace")
         records = await self._load_conversations(tenant_id, export_id, src, limits, scan)
+        await self._analyze(tenant_id, "export_conversations")
         phases.mark("conversations")
         await self.hooks.hit("validate:after_conversations")
         await self._index_day_files(tenant_id, export_id, src, limits, scan)
+        # what collection from this export reads, by export and entry or thread
+        await self._analyze(tenant_id, "export_day_files")
+        await self._analyze(tenant_id, "export_threads")
         phases.mark("day_files")
         return scan, tier, records
+
+    async def _analyze(self, tenant_id: uuid.UUID, table: str) -> None:
+        """Fresh statistics for an index table this export just loaded (migration 0044, ADR 0015
+        §24.20): before, the planner estimated the new export at about one row and planned the
+        per-row foreign-key checks of the day files on ``(export_id, kind, folder)``, reading the
+        export's entries up to each row (quadratic: 643 M index tuples for 66,000 entries on CI).
+        Timed per table in ``db_writes``."""
+        with self._db_write(f"analyze:{table}"):
+            async with tenant_tx(self.sessions, tenant_id) as s:
+                await self._execute(
+                    f"analyze:{table}", s, text("SELECT analyze_export_index(:t)"), {"t": table}
+                )
 
     async def _workspace(self, src: CoalescingSource, limits: ArchiveLimits, scan: _Scan) -> None:
         """The Slack team the export belongs to: the most common ``team_id`` in users.json (external
@@ -501,9 +518,7 @@ class ExportIngest:
         while True:
             started = time.monotonic()
             async with tenant_tx(self.sessions, tenant_id) as s:
-                rows = (
-                    await s.execute(text(DAY_FILES_PAGE), {"e": export_id, "after": after})
-                ).all()
+                rows = await day_files_page(s, export_id, after)
             self.page_reads.append(round((time.monotonic() - started) * 1000))
             pages = self.series.setdefault("day_file_pages", [])
             if len(pages) < SERIES_MAX:
@@ -596,16 +611,9 @@ class ExportIngest:
         with self._db_write("export_day_files"):
             async with tenant_tx(self.sessions, tenant_id) as s:
                 await self._execute(
-                    "export_day_files",
-                    s,
-                    text(
-                        "INSERT INTO export_day_files (tenant_id, export_id, entry_idx, elements, anomalies,"
-                        " parse_error) SELECT CAST(:t AS uuid), CAST(:e AS uuid), * FROM unnest("
-                        " CAST(:entry AS bigint[]), CAST(:elements AS integer[]),"
-                        " CAST(:anomalies AS integer[]), CAST(:error AS text[])) ON CONFLICT DO NOTHING"
-                    ),
+                    "export_day_files", s, text(DAY_FILES_INSERT),
                     {"t": tenant_id, "e": export_id, **cols},
-                )
+                )  # fmt: skip
 
     async def _insert_threads(
         self, tenant_id: uuid.UUID, export_id: uuid.UUID, rows: list[dict[str, Any]]
@@ -958,12 +966,43 @@ class ExportIngest:
         )
 
 
+# one statement per page of day files; each row's foreign key to export_entries is checked by
+# primary key once the entries' statistics are fresh (``_analyze``)
+DAY_FILES_INSERT = (
+    "INSERT INTO export_day_files (tenant_id, export_id, entry_idx, elements, anomalies,"
+    " parse_error) SELECT CAST(:t AS uuid), CAST(:e AS uuid), * FROM unnest("
+    " CAST(:entry AS bigint[]), CAST(:elements AS integer[]),"
+    " CAST(:anomalies AS integer[]), CAST(:error AS text[])) ON CONFLICT DO NOTHING"
+)
 DAY_FILES_PAGE = (
     "SELECT idx, name, kind, method, flags, crc32, compressed_size, uncompressed_size,"
     " local_header_offset, raw_name, name_encoding, folder, hint_day FROM export_entries"
     " WHERE export_id = :e AND kind = 'day' AND local_header_offset > :after"
     " ORDER BY local_header_offset LIMIT 500"
 )
+
+
+async def day_files_page(s: AsyncSession, export_id: uuid.UUID, after: int) -> Sequence[Any]:
+    """The next page of day files in local-header order, read in bounded work whatever the
+    statistics say (ADR 0015 §24.20).
+
+    Right after an export's entries are loaded, ``export_entries``' statistics do not know the
+    export: every path is estimated at about one row, and the planner was seen to break that tie
+    by reading ALL the export's remaining day entries through ``(export_id, kind, folder)`` and
+    sorting them for each page (quadratic: 7.9 M index tuples for 66,000 entries). An ANALYZE
+    after loading does not settle it (the app role may not run one, and a large table's sample
+    can miss a new export), nor does a partial index (still lost the tie on stale statistics).
+    Forbidding the sort leaves only the ordered ``(export_id, local_header_offset)`` scan, which
+    reads one page plus the non-day entries between (tested on a scratch database never
+    analyzed, analyzed before the export, and after, with custom and generic plans).
+
+    ``DAY_FILES_PAGE`` runs nowhere else (a test checks it): a cached generic plan is not re-planned
+    when a setting changes, so the same text run unguarded on a pooled connection would leave
+    this call a plan made with sorts allowed."""
+    await s.execute(text("SET LOCAL enable_sort = off"))
+    return (await s.execute(text(DAY_FILES_PAGE), {"e": export_id, "after": after})).all()
+
+
 # finding -> (count query, sample query)
 LISTINGS = {
     "folders_without_conversation": (
