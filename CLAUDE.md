@@ -415,8 +415,14 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   §24.20). Right after a load the planner estimates the new rows at about one, and every index sharing the leading
   column looks equal. Per-row foreign-key checks and per-page queries then rescan everything loaded so far
   (quadratic: 643 M tuples for a 66,000-entry export on CI).
-  - Analyze the loaded table before anything references it (`analyze_export_index`, a definer function: the app
-    role may not ANALYZE).
+  - Analyze the loaded table before anything references it, through a ZERO-ARGUMENT definer function with a
+    fixed, schema-qualified table list in static SQL (`analyze_export_entries`, `analyze_export_tables`,
+    `analyze_collected_items`; migration 0045): the app role may not ANALYZE, and the caller chooses WHEN, never
+    WHAT. A new one joins `tests/integration/db/test_analyze_functions.py` and `test_app_role.py`'s registry.
+  - A collection refreshes its items' statistics as the job's inserted items double (`collection_jobs.items_inserted`,
+    counted AFTER each batch's commit in its own one-statement transaction; `statistics_due`): a new tenant is
+    otherwise estimated at one row and every FK check and per-batch lookup reads all its items so far. Never lock
+    the job row inside a batch transaction: it deadlocks with transactions that lock it before a chain head.
   - Make a page query's good plan the only cheap one (`day_files_page`: `SET LOCAL enable_sort = off`; such a text
     runs ONLY through its guard, because cached generic plans ignore later setting changes).
   - Prove it on a database migrated from scratch in each statistics state, trap armed first
@@ -425,7 +431,6 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   - Diagnose with `tests/integration/pg_diagnostics.py`: `AutoExplain` collects the plans the worker's own
     backends executed, and `WaitSampler` samples wait events. `auto_explain` is preloaded in compose and inert
     until enabled.
-  - `items` for a tenant new to the statistics is still open (BACKLOG).
 - Redis clients pass `driver_info=edisc_connectors_base.redis_driver.DRIVER_INFO`: without it redis-py reads
   package metadata on the event loop for every new connection (ADR 0015 §24.22).
 - Schema changes: new Alembic revision in `packages/db/migrations/versions/` (hand-written SQL, run via `split_sql`),
@@ -515,7 +520,8 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 
 ## Measurements (re-run before and after performance changes; results go in docs/runs/)
 - `scripts/measure_breakdown.py` (storage per component + per-stage throughput), `scripts/bench_pipeline.py`,
-  `scripts/measure_audit_burst.py` (audited reads), `scripts/resume_soak.py` (SIGKILL soak; 50k is the CI test).
+  `scripts/measure_audit_burst.py` (audited reads), `scripts/resume_soak.py` (SIGKILL soak; 50k is the CI test),
+  `scripts/measure_new_tenant.py` (a new tenant's first collection on statistics that do not know it).
   Run them on a FRESH test stack (`make test-env-up`); the laptop is noisy, so compare paired runs.
 
 ## Mutation checks (`scripts/mutation/`, README there)

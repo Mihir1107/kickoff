@@ -27,6 +27,27 @@ from edisc_core.time import day_bounds
 from edisc_normalizer.model import Derived, NormalizeContext, PriorState
 from edisc_normalizer.slack import NO_LONGER_OBSERVED
 
+# The per-batch lookups on ``items``. For a tenant the statistics do not know yet (a new tenant's
+# first collection), the planner estimates the tenant at about one row and was seen to read ALL the
+# tenant's items through another tenant-leading index for each of them (ADR 0015 §24.20): the
+# collection refreshes the statistics as its items double (``analyze_collected_items``), and
+# ``tests/integration/db/test_stale_statistics.py`` runs these exact texts.
+PRIOR_STATE = (
+    "SELECT i.source_item_id, i.version, i.content_hash, i.change_hints, d.derived"
+    " FROM items i LEFT JOIN LATERAL (SELECT derived FROM item_derivations x"
+    "   WHERE x.item_id = i.id ORDER BY x.created_at DESC,"
+    ' x.normalizer_version COLLATE "C" DESC LIMIT 1) d ON true'
+    " WHERE i.tenant_id = :t AND i.source = :s AND i.source_item_id = ANY(:ids)"
+    " ORDER BY i.source_item_id, i.version"
+)
+ITEMS_BY_KEY = (
+    "SELECT idempotency_key, id FROM items WHERE tenant_id = :t AND idempotency_key = ANY(:k)"
+)
+NEXT_VERSIONS = (
+    "SELECT source_item_id, max(version) + 1 AS v FROM items WHERE tenant_id = :t AND source = :s"
+    " AND source_item_id = ANY(:ids) GROUP BY source_item_id"
+)
+
 
 @dataclass(frozen=True)
 class PersistResult:
@@ -47,14 +68,7 @@ async def load_prior(
     streams = sorted({*ids, *(f"{s}#change" for s in ids)})
     rows = (
         await session.execute(
-            text(
-                "SELECT i.source_item_id, i.version, i.content_hash, i.change_hints, d.derived"
-                " FROM items i LEFT JOIN LATERAL (SELECT derived FROM item_derivations x"
-                "   WHERE x.item_id = i.id ORDER BY x.created_at DESC,"
-                ' x.normalizer_version COLLATE "C" DESC LIMIT 1) d ON true'
-                " WHERE i.tenant_id = :t AND i.source = :s AND i.source_item_id = ANY(:ids)"
-                " ORDER BY i.source_item_id, i.version"
-            ),
+            text(PRIOR_STATE),
             {"t": tenant_id, "s": source, "ids": streams},
         )
     ).all()
@@ -225,9 +239,7 @@ async def persist(
     existing: dict[str, uuid.UUID] = dict(
         (
             await session.execute(
-                text(
-                    "SELECT idempotency_key, id FROM items WHERE tenant_id = :t AND idempotency_key = ANY(:k)"
-                ),
+                text(ITEMS_BY_KEY),
                 {"t": tenant, "k": keys},
             )
         ).all()
@@ -236,10 +248,7 @@ async def persist(
         row.source_item_id: row.v
         for row in (
             await session.execute(
-                text(
-                    "SELECT source_item_id, max(version) + 1 AS v FROM items WHERE tenant_id = :t AND source = :s"
-                    " AND source_item_id = ANY(:ids) GROUP BY source_item_id"
-                ),
+                text(NEXT_VERSIONS),
                 {"t": tenant, "s": source, "ids": sids},
             )
         ).all()
@@ -250,9 +259,7 @@ async def persist(
         item_ids_parents: dict[str, uuid.UUID] = dict(
             (
                 await session.execute(
-                    text(
-                        "SELECT idempotency_key, id FROM items WHERE tenant_id = :t AND idempotency_key = ANY(:k)"
-                    ),
+                    text(ITEMS_BY_KEY),
                     {"t": tenant, "k": unknown},
                 )
             ).all()

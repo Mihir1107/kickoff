@@ -198,6 +198,8 @@ class CollectionJob(Base):
     rerun_of: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     workspace_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     explicit_units: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    # items this job inserted (its statistics refresh as they double; migration 0045)
+    items_inserted: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     started_at: Mapped[datetime | None] = mapped_column(TZ)
     finished_at: Mapped[datetime | None] = mapped_column(TZ)

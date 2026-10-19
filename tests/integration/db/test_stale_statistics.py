@@ -32,6 +32,7 @@ from edisc_core.settings import Settings
 from edisc_db.bootstrap import bootstrap
 from edisc_db.migrate import upgrade
 from edisc_db.session import create_engine, session_factory, tenant_tx, warm_pool
+from edisc_normalizer.store import ITEMS_BY_KEY, NEXT_VERSIONS, PRIOR_STATE
 from edisc_worker.exports import DAY_FILES_INSERT, DAY_FILES_PAGE, day_files_page
 from edisc_worker.pipeline import _EARLIER_CLEAN_ITEMS
 
@@ -225,7 +226,7 @@ async def _assert_fk_checks(
             f"{state}: unguarded, the checks read only {worst}: not reproduced"
         )
     async with tenant_tx(sessions, TENANT) as s:  # the product's guard, as the app role
-        await s.execute(text("SELECT analyze_export_index('export_entries')"))
+        await s.execute(text("SELECT analyze_export_entries()"))
     for near in (1, ENTRIES // 2, near_end):
         for generic in (False, True):
             work = await _insert_work(sessions, export_id, near, generic=generic)
@@ -247,22 +248,6 @@ async def test_day_file_foreign_key_checks_read_one_row_each_after_the_guard(
     # 2. statistics from before this export (the guard's own ANALYZE above), then the guard
     await scratch.execute(LOAD, TENANT, second, ENTRIES)
     await _assert_fk_checks(app, second, "analyzed before the export", armed=True)
-
-
-async def test_the_guard_analyzes_only_export_index_tables(
-    app: async_sessionmaker[AsyncSession],
-) -> None:
-    async with tenant_tx(app, TENANT) as s:
-        for table in (
-            "export_entries",
-            "export_conversations",
-            "export_day_files",
-            "export_threads",
-        ):
-            await s.execute(text("SELECT analyze_export_index(:t)"), {"t": table})
-    with pytest.raises(Exception, match="not an export index table"):
-        async with tenant_tx(app, TENANT) as s:
-            await s.execute(text("SELECT analyze_export_index('items')"))
 
 
 UNITS = """
@@ -329,3 +314,111 @@ async def test_a_units_earlier_clean_collections_are_found_without_scanning_ever
     # the measurement sees a scan when there is one: without the index, the whole table
     await scratch.execute("DROP INDEX ix_work_units_tenant_id_unit_key")
     assert await _units_read(app, unit) >= 30_000
+
+
+# ------------------------------------------------------------------ a tenant new to the statistics
+ITEMS = """
+INSERT INTO items (id, tenant_id, job_id, source, source_item_id, version, item_type, content_hash,
+  raw_hash, evidence_object_id, storage_key, json_path, connector_version, normalizer_version,
+  idempotency_key, sent_at)
+SELECT gen_random_uuid(), $1::uuid, $2::uuid, 'slack', 'T1/C' || (i % 50) || '/' || i, 1, 'message',
+  md5($1::text || i) || md5(i::text), md5(i::text) || md5($1::text || i), gen_random_uuid(), 'k', '$',
+  '0', '0', md5('ik' || $1::text || i) || md5(i::text || 'ik'),
+  timestamptz '2026-01-01' + i * interval '1 second'
+FROM generate_series(1, $3) i
+"""
+BATCH = 500
+# per statement of one batch: its own keys (and a version or a change stream each), plus slack
+ITEMS_BOUND = 2 * BATCH + 50
+
+
+async def _items_read(s: AsyncSession) -> int:
+    row = (
+        await s.execute(
+            text(
+                "SELECT coalesce(idx_tup_fetch, 0) + coalesce(seq_tup_read, 0) AS n"
+                " FROM pg_stat_xact_user_tables WHERE relname = 'items'"
+            )
+        )
+    ).one()
+    return int(row.n)
+
+
+async def _batch_work(
+    sessions: async_sessionmaker[AsyncSession], tenant: uuid.UUID, n: int, *, generic: bool
+) -> dict[str, int]:
+    """Tuples of ``items`` each per-batch statement of the pipeline read, for the tenant's last
+    500 items (the product's exact texts: the prior state, the existing keys, the next versions,
+    and the foreign-key checks of 500 derivation rows); rolled back."""
+    first = n - BATCH + 1
+    sids = [f"T1/C{i % 50}/{i}" for i in range(first, n + 1)]
+    s = sessions()
+    out: dict[str, int] = {}
+    try:
+        await s.begin()
+        await s.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": str(tenant)})
+        mode = "force_generic_plan" if generic else "force_custom_plan"
+        await s.execute(text(f"SET LOCAL plan_cache_mode = {mode}"))
+        keys = [
+            r.idempotency_key
+            for r in await s.execute(
+                text("SELECT idempotency_key FROM items WHERE source_item_id = ANY(:i)"),
+                {"i": sids},
+            )
+        ]  # (by the unique (tenant, source, sid, version) index: not measured)
+        ids = [
+            r.id
+            for r in await s.execute(
+                text("SELECT id FROM items WHERE source_item_id = ANY(:i)"), {"i": sids}
+            )
+        ]
+        statements = {
+            "prior_state": (PRIOR_STATE, {"t": tenant, "s": "slack", "ids": sorted({*sids, *(f"{x}#change" for x in sids)})}),
+            "items_by_key": (ITEMS_BY_KEY, {"t": tenant, "k": keys}),
+            "next_versions": (NEXT_VERSIONS, {"t": tenant, "s": "slack", "ids": sids}),
+            "fk_checks": (
+                "INSERT INTO item_derivations (tenant_id, item_id, normalizer_version, derived, derived_hash)"
+                " SELECT :t, i, 'x', '{}', repeat('a', 64) FROM unnest(CAST(:i AS uuid[])) AS i",
+                {"t": tenant, "i": ids},
+            ),
+        }  # fmt: skip
+        for name, (sql, params) in statements.items():
+            before = await _items_read(s)
+            await s.execute(text(sql), params)
+            out[name] = await _items_read(s) - before
+        return out
+    finally:
+        await s.rollback()
+        await s.close()
+
+
+async def test_a_new_tenants_item_lookups_read_their_batch_after_the_refresh(
+    scratch: asyncpg.Connection, app: async_sessionmaker[AsyncSession]
+) -> None:
+    """A tenant the statistics do not know yet (its first collection): another tenant's items are
+    in the statistics, this tenant's 30,000 are not. Unguarded, the pipeline's per-batch statements
+    read the tenant's items far beyond their batch (the trap, proven first); after the product's
+    refresh (``analyze_collected_items``, called by the pipeline as a job's items double) each reads
+    about its own batch, with custom and with generic plans."""
+    known, fresh = uuid.uuid4(), uuid.uuid4()
+    await scratch.execute(ITEMS, known, uuid.uuid4(), 30_000)
+    async with tenant_tx(app, TENANT) as s:  # the state the refresh leaves: `known` analyzed
+        await s.execute(text("SELECT analyze_collected_items()"))
+    await scratch.execute(ITEMS, fresh, uuid.uuid4(), 30_000)
+
+    unguarded = [await _batch_work(app, fresh, 30_000, generic=g) for g in (False, True)]
+    worst = max(v for run in unguarded for v in run.values())
+    assert worst > 10 * ITEMS_BOUND, f"the stale state is not reproduced: {unguarded}"
+
+    # the collection goes on (its items double, the pipeline refreshes): at a size where reading
+    # the tenant is never cheaper than its batch (at 60,000 rows a sequential scan of the table
+    # costs about what 1,000 index probes do, and the planner fairly picks it)
+    await scratch.execute(
+        ITEMS.replace("FROM generate_series(1, $3) i", "FROM generate_series(30001, $3) i"),
+        fresh, uuid.uuid4(), 300_000,
+    )  # fmt: skip
+    async with tenant_tx(app, TENANT) as s:
+        await s.execute(text("SELECT analyze_collected_items()"))
+    for generic in (False, True):
+        work = await _batch_work(app, fresh, 300_000, generic=generic)
+        assert all(v <= ITEMS_BOUND for v in work.values()), (generic, work, unguarded)

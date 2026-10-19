@@ -152,7 +152,10 @@ async def test_security_definer_functions_are_hardened(connect: Connect) -> None
     finally:
         await conn.close()
     assert {r["fn"].split("(")[0] for r in rows} == {
-        "analyze_export_index",  # ANALYZE of the four export index tables only (migration 0044)
+        # zero-argument ANALYZE of a fixed table list each (migration 0045, test_analyze_functions)
+        "analyze_collected_items",
+        "analyze_export_entries",
+        "analyze_export_tables",
         "bind_external",  # the cross-tenant registry's only writer (migration 0040)
         "connections_to_check",  # check-connections' cross-tenant list (migration 0042)
         "create_tenant",

@@ -1,4 +1,4 @@
-# Handoff (2026-10-19: the zip64 slowness diagnosed and fixed (quadratic on stale statistics, migration 0044); every test run logs to disk; M18 planned (docs/plans/m18.md, decisions pending); M17 built except step 7 (internal-app token, legal REVIEW) and step 9 (frontend))
+# Handoff (2026-10-19: stale statistics fixed for exports AND new tenants' items (migrations 0044-0045, zero-argument ANALYZE functions); every test run logs to disk; M18 planned, decisions pending (docs/plans/m18.md §10, §11); M17 built except step 7 (internal-app token, legal REVIEW) and step 9 (frontend))
 
 This file alone is enough to continue. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisions §1-§18, notes
@@ -15,7 +15,8 @@ the Entra and Okta tenants). **Phase 3 decisions so far: `docs/plans/phase-3.md`
 
 ## Current state
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`.
-CI on main: run 39260189440 (`00356ae`) green, every job. Migrations at head: **0044** (analyze_export_index + the clean-unit index). Renderer **1.3.2**, dummy connector **0.5.0**,
+CI on main: CI_ITEMS_PLACEHOLDER. Migrations at head: **0045** (zero-argument ANALYZE functions,
+`collection_jobs.items_inserted`; 0044: the clean-unit index and the first, now replaced, ANALYZE function). Renderer **1.3.2**, dummy connector **0.5.0**,
 normalizer **0.3.0**, report renderer **1.6.0**, preview renderer **1.0.0**. CI on main: runs
 39118882391 (`0b2b83e`), 39120935270 (`af39867`), 39121279530 (`c6b5a39`), 39123189226
 (`597d5f2`) all green, every job. Run 39126275352 on `72038ad` FAILED integration shard 3:
@@ -24,6 +25,52 @@ assertion at the last full page; the planner sorted the ~500 remaining rows afte
 the index range, on cost; ADR 0016 "closing M17" note 3); the test now measures bounded work per
 page at three depths. Not re-run to green. Run 39127913175 on `e437be5`: **green, every job**. Full local integration suite on
 `72038ad`'s tree: 1,447 passed.
+
+## Done: new tenants' items on stale statistics; the ANALYZE functions hardened (2026-10-19, user-approved)
+**CI:** CI_ITEMS_PLACEHOLDER. Full local integration suite: on the first version 15 failed (the deadlock), 1,441 passed. After
+the fix, the 99 tests of every affected file plus the new ones passed, with no deadlock. A full
+local rerun was refused by the disk guard (11 GB free, guard 12; not lowered), so CI's four shards
+are the full-suite gate for this commit.
+1. **`items` for a tenant the statistics do not know (the sweep's open finding): fixed.**
+   - `collection_jobs.items_inserted` is counted after each batch's commit, in its own
+     one-statement transaction. Counting inside the batch transaction DEADLOCKED: the full local
+     suite failed 15 API tests, and Postgres's report named the job row vs a custody chain head
+     taken in opposite orders (ADR 0015 §24.20).
+   - The count that crosses a power of two (from 1,024; `pipeline.statistics_due`) calls
+     `analyze_collected_items()`.
+   - **Tests:**
+     - `test_stale_statistics.py::test_a_new_tenants_item_lookups_read_their_batch_after_the_refresh`
+       uses the product's exact SQL (`store.PRIOR_STATE`, `ITEMS_BY_KEY`, `NEXT_VERSIONS`) plus
+       500 FK checks. The trap is proven first: unguarded custom plans read 30,000 per lookup and
+       7.57 M for the FK checks. After the refresh, at 300 k items, ≤ 1,050 per statement, custom
+       or generic.
+     - `tests/integration/pipeline/test_item_statistics.py`: a real job's counter is exact, with
+       one ANALYZE per threshold.
+     - `tests/unit/worker/test_statistics_due.py`.
+   - **A new tenant's first 318,860-item collection** (`scripts/measure_new_tenant.py`, fresh stack
+     each, docs/runs/2026-10-19-...):
+
+     | | Before (`acea195`) | After |
+     |---|---|---|
+     | Wall time | 3,799 s | 790 s |
+     | `items` tuples read | 401.5 M | 2.83 M |
+     | Per item | 11.9 ms | 2.5 ms |
+     | ANALYZEs | 0 | 9 |
+
+2. **The ANALYZE functions are safe as SECURITY DEFINER** (migration 0045 replaces 0044's
+   `analyze_export_index(text)`):
+   - `analyze_export_entries()`, `analyze_export_tables()`, `analyze_collected_items()`;
+   - no argument, a fixed schema-qualified table list in static SQL, `SET search_path = pg_catalog,
+     edisc, pg_temp`, owned by the tables' owner, EXECUTE for the app role only.
+   - `tests/integration/db/test_analyze_functions.py` runs on a scratch database migrated in the
+     test. It checks the catalog shape and that each moves exactly its tables' ANALYZE counters.
+     It also checks that a temp table shadowing `items` changes nothing, that an argument is
+     refused, that the app role's own ANALYZE of another table does nothing, and that the sweeper
+     may not call them.
+   - Broken four ways (an argument, the path unpinned, PUBLIC execute, an extra table): all caught.
+     Round `s24-stale-stats` 11/11.
+3. **M18 plan:** §10 rewritten as current vs proposed wording, side by side; migration numbers
+   shifted by one (quotas 0046, holds 0047, destruction 0048).
 
 ## Done: the zip64 diagnosis and fix, local test logs, the M18 plan (2026-10-18/19)
 **CI:**
@@ -65,7 +112,7 @@ page at three depths. Not re-run to green. Run 39127913175 on `e437be5`: **green
    - **Fixed:** absence detection (`_EARLIER_CLEAN_ITEMS`) scanned all `work_units` per unit.
      Partial index `ix_work_units_tenant_id_unit_key`; tested with 30,000 other units: ≤ 20 rows
      read, ≥ 30,000 without the index.
-   - **NOT fixed, needs your decision:** the same pattern on `items` for a tenant new to the
+   - **Fixed the same day (next section):** the same pattern on `items` for a tenant new to the
      statistics. FK checks from `job_items`/`item_derivations`, and the pipeline's per-batch
      `idempotency_key = ANY` and version lookups, read the tenant's items so far, so a new tenant's
      first large collection is quadratic until autoanalyze. Options are in BACKLOG ("`items`
@@ -592,11 +639,7 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
   tenant); revocation cuts in-flight downloads; revoked tokens end as `access_lost` units.
 
 ## Next
-0. **Your decisions:**
-   - the M18 plan's §11 (D1-D13, incl. the principle wording in §10);
-   - the `items` stale-statistics fix (BACKLOG; recommended: an ANALYZE whenever a job's inserted
-     items double).
-
+0. **Your decisions:** the M18 plan's §11 (D1-D13) and the three principle wordings in §10.
    Then M18 step 0 (spikes) and step 1 (storage identities).
 1. **`test_a_crash_after_the_journal_is_repaired_exactly_once[False]`** failed once locally, output
    lost, not reproduced in 10 runs (ADR 0015 §24.21): if it recurs, follow the note there.

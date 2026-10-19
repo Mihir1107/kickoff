@@ -51,21 +51,47 @@ export, normalizer, export variants. 288 passed.
   - Test: 30,000 other units with their links and items → ≤ 20 rows read; the same query without
     the index reads ≥ 30,000.
 
-**Found, NOT fixed (needs a decision, HANDOFF "Next"):** the same stale-statistics pattern on
-`items` for a tenant the statistics do not know yet (every test tenant; in production, a new
-tenant's first large collections until autoanalyze catches up at 2 % of the table):
-- **FK checks** from `job_items` / `item_derivations` → `items (tenant_id, id)`: 40 of 5,366 sampled
-  checks were GENERIC plans on `uq_items_tenant_id_source_source_item_id_version` or
-  `ix_items_tenant_id_source_sent_at`, with `id` as a filter, reading the tenant's items so far (up
-  to 372 per check here).
-- **The pipeline's per-batch lookups:**
-  - `idempotency_key = ANY($2)` read 38,180 rows through `ix_items_tenant_id_source_sent_at`
-    instead of `uq_items_tenant_id_idempotency_key`;
-  - the version lookup (`source_item_id = ANY($3)`) read 27,937 with the array as a filter.
-- **Effect:** each batch rescans the tenant's items so far, which is quadratic in a new tenant's
-  first collection.
-- **The difficulty:** every competing index leads with `tenant_id`, and no per-transaction setting
-  chooses between indexes.
+**Found, then fixed the same day (user-approved): `items` for a tenant the statistics do not
+know yet.** This hits every test tenant, and in production a new tenant's first large collections
+until autoanalyze catches up at 2 % of the table.
+- **FK checks** from `job_items` / `item_derivations` → `items (tenant_id, id)` ran on
+  tenant-leading indexes with `id` as a filter.
+- **The pipeline's per-batch lookups** (`idempotency_key = ANY`, versions, prior state) read the
+  tenant's items so far: 38,180 and 27,937 rows in the sweep.
+- **Fix:** migration 0045. `analyze_collected_items()` runs as a job's inserted items double;
+  every ANALYZE function now takes no argument. ADR 0015 §24.20 "Update".
+
+### A new tenant's first ~320k-item collection, before and after
+`scripts/measure_new_tenant.py`:
+- **Dataset:** 10 conversations × 5 days × 5,000 messages, pages of 200; one `Pipeline.run`.
+- **Stack:** a FRESH test stack for each run, same laptop, nothing else running.
+- **Statistics state:** `items`, `job_items` and `item_derivations` analyzed without the tenant,
+  autovacuum held off on them for the run (a large shared table whose 2 % threshold one tenant's
+  first collection does not reach).
+- **"Before":** the pre-fix commit `acea195` in a worktree; "after": the fix.
+
+| | Before (`acea195`) | After | Ratio |
+|---|---|---|---|
+| Wall time | **3,799 s** (63 min) | **790 s** (13.2 min) | 4.8x faster |
+| Items inserted | 318,860 | 318,860 | |
+| `items` tuples read | 401,519,881 | 2,827,369 | 142x fewer |
+| Tuples read per item | 1,259 | 8.9 | |
+| Per item | 11.9 ms | 2.5 ms | |
+| ANALYZEs of `items` | 0 | 9 (1,024 ... 262,144) | |
+
+"After" was measured on the first version of the fix, which counted inside the batch
+transaction. The final version moves that one statement to its own transaction after the commit,
+because the in-transaction version deadlocked (ADR 0015 §24.20). The ANALYZE schedule is the same
+and the cost is one extra short statement per batch. It was not re-measured: the disk guard
+refused a fresh stack at 11 GB free. Re-run with `scripts/measure_new_tenant.py` on a fresh stack.
+
+Progress of the "before" run, sampled every 2 min:
+- **Collapsing rate:** items per 2 min fell from about 34,000 (minutes 2-4) to about 9,000 (minutes
+  26-28).
+- **Rising reads:** tuples read per 2 min rose from 8 M to 14 M. That is the quadratic in a real
+  collection.
+- **Larger collections:** the old code would degrade further. The new code stays at log2(n)
+  refreshes and a flat per-item cost.
 
 **Small and bounded (no action):** FK checks on `principals` (144 rows) and `directory_snapshots`
 (55 rows) by sequential scan of tiny tables; the `slack_exports` FK check on `(tenant_id,

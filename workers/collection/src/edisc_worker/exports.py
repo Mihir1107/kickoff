@@ -436,27 +436,25 @@ class ExportIngest:
         await self._workspace(src, limits, scan)
         phases.mark("workspace")
         records = await self._load_conversations(tenant_id, export_id, src, limits, scan)
-        await self._analyze(tenant_id, "export_conversations")
         phases.mark("conversations")
         await self.hooks.hit("validate:after_conversations")
         await self._index_day_files(tenant_id, export_id, src, limits, scan)
-        # what collection from this export reads, by export and entry or thread
-        await self._analyze(tenant_id, "export_day_files")
-        await self._analyze(tenant_id, "export_threads")
+        # conversations, day files and threads: what collection from this export reads
+        await self._analyze(tenant_id, "export_tables")
         phases.mark("day_files")
         return scan, tier, records
 
-    async def _analyze(self, tenant_id: uuid.UUID, table: str) -> None:
-        """Fresh statistics for an index table this export just loaded (migration 0044, ADR 0015
-        §24.20): before, the planner estimated the new export at about one row and planned the
-        per-row foreign-key checks of the day files on ``(export_id, kind, folder)``, reading the
-        export's entries up to each row (quadratic: 643 M index tuples for 66,000 entries on CI).
-        Timed per table in ``db_writes``."""
-        with self._db_write(f"analyze:{table}"):
+    async def _analyze(self, tenant_id: uuid.UUID, which: str) -> None:
+        """Fresh statistics for the index tables this export just loaded (migrations 0044, 0045;
+        ADR 0015 §24.20): before, the planner estimated the new export at about one row and planned
+        the per-row foreign-key checks of the day files on ``(export_id, kind, folder)``, reading
+        the export's entries up to each row (quadratic: 643 M index tuples for 66,000 entries on
+        CI). ``which`` picks one of two zero-argument definer functions, each with a fixed table
+        list: nothing here names a table to the database. Timed in ``db_writes`` / ``series``."""
+        statement = ANALYZE_FUNCTIONS[which]
+        with self._db_write(f"analyze:{which}"):
             async with tenant_tx(self.sessions, tenant_id) as s:
-                await self._execute(
-                    f"analyze:{table}", s, text("SELECT analyze_export_index(:t)"), {"t": table}
-                )
+                await self._execute(f"analyze:{which}", s, text(statement), {})
 
     async def _workspace(self, src: CoalescingSource, limits: ArchiveLimits, scan: _Scan) -> None:
         """The Slack team the export belongs to: the most common ``team_id`` in users.json (external
@@ -966,6 +964,11 @@ class ExportIngest:
         )
 
 
+# the statistics refreshes validation calls (zero-argument definer functions, migration 0045)
+ANALYZE_FUNCTIONS = {
+    "export_entries": "SELECT analyze_export_entries()",
+    "export_tables": "SELECT analyze_export_tables()",
+}
 # one statement per page of day files; each row's foreign key to export_entries is checked by
 # primary key once the entries' statistics are fresh (``_analyze``)
 DAY_FILES_INSERT = (

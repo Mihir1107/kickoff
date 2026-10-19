@@ -47,8 +47,9 @@ Rounds (ADR 0015):
   does not give clean), normalizer versions recorded in `job_started` and each batch, recomputed.
 - ``s24-stale-stats``: bulk-load reads bounded whatever the planner's statistics say (ADR 0015
   §24.20): the day-file page read without sorts, the export index tables analyzed right after
-  loading (the per-row foreign-key checks by primary key), and no Redis connection resolving
-  redis-py's version on the event loop.
+  loading (the per-row foreign-key checks by primary key), a collection's items analyzed as they
+  double, the ANALYZE functions safe as SECURITY DEFINER (no argument, fixed tables, pinned path,
+  app role only), and no Redis connection resolving redis-py's version on the event loop.
 - ``m17-d11``: no error path echoes a request value (M17 step 0, ADR 0016 amendment, decision
   D11): the sanitised 422 body (no input/ctx, client-chosen loc keys, schema-only messages), the
   fixed 500 and its message-free log line, log paths without client segments, uvicorn's access log
@@ -2132,16 +2133,34 @@ CATALOG: list[Mutation] = [
       "", "tests/integration/api/test_export_variants.py", "zip64_by_entry_count"),
     m("entries_analyzed_after_day_files", "s24-stale-stats", EXW,
       '        await self._analyze(tenant_id, "export_entries")  # before anything reads or references them\n',
-      '        await self._analyze(tenant_id, "export_conversations")  # (the wrong table)\n',
+      '        await self._analyze(tenant_id, "export_tables")  # (the wrong tables)\n',
       "tests/integration/api/test_export_variants.py", "zip64_by_entry_count"),
-    m("analyze_guard_any_table", "s24-stale-stats", "packages/db/migrations/versions/0044_analyze_export_index.py",
-      "    IF p_table NOT IN ('export_entries', 'export_conversations', 'export_day_files', 'export_threads') THEN\n",
-      "    IF p_table IS NULL THEN\n",
-      "tests/integration/db/test_stale_statistics.py", "only_export_index_tables"),
     m("absence_scans_every_unit", "s24-stale-stats", "packages/db/migrations/versions/0044_analyze_export_index.py",
       "CREATE INDEX ix_work_units_tenant_id_unit_key ON work_units (tenant_id, unit_key)\n"
       "    WHERE kind = 'conversation_day' AND status = 'done' AND recon_status = 'matched' AND file_gaps = 0;\n",
       "", "tests/integration/db/test_stale_statistics.py", "earlier_clean_collections"),
+    m("analyze_takes_a_table_name", "s24-stale-stats", "packages/db/migrations/versions/0045_analyze_functions.py",
+      "CREATE FUNCTION {name}() RETURNS void", "CREATE FUNCTION {name}(p_table text DEFAULT NULL) RETURNS void",
+      "tests/integration/db/test_analyze_functions.py", "fixed_and_pinned"),
+    m("analyze_search_path_unpinned", "s24-stale-stats", "packages/db/migrations/versions/0045_analyze_functions.py",
+      "CREATE FUNCTION {name}() RETURNS void\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, edisc, pg_temp\n",
+      "CREATE FUNCTION {name}() RETURNS void\nLANGUAGE plpgsql SECURITY DEFINER\n",
+      "tests/integration/db/test_analyze_functions.py", "fixed_and_pinned"),
+    m("analyze_executable_by_public", "s24-stale-stats", "packages/db/migrations/versions/0045_analyze_functions.py",
+      "REVOKE ALL ON FUNCTION {name}() FROM PUBLIC;", "GRANT EXECUTE ON FUNCTION {name}() TO PUBLIC;",
+      "tests/integration/db/test_analyze_functions.py", "fixed_and_pinned"),
+    m("analyze_an_extra_table", "s24-stale-stats", "packages/db/migrations/versions/0045_analyze_functions.py",
+      '"analyze_collected_items": ("edisc.items", "edisc.job_items", "edisc.item_derivations"),',
+      '"analyze_collected_items": ("edisc.items", "edisc.job_items", "edisc.item_derivations", "edisc.custody_events"),',
+      "tests/integration/db/test_analyze_functions.py", "exactly_its_tables"),
+    m("collected_items_not_analyzed", "s24-stale-stats", "packages/db/migrations/versions/0045_analyze_functions.py",
+      '"analyze_collected_items": ("edisc.items", "edisc.job_items", "edisc.item_derivations"),',
+      '"analyze_collected_items": ("edisc.job_items", "edisc.item_derivations"),',
+      "tests/integration/db/test_stale_statistics.py", "new_tenants_item_lookups"),
+    m("pipeline_never_refreshes_items", "s24-stale-stats", EXW.replace("exports.py", "pipeline.py"),
+      "        # 3. after commit\n        await self._count_inserted(tenant_id, job_id, inserted)\n",
+      "        # 3. after commit\n",
+      "tests/integration/pipeline/test_item_statistics.py"),
     m("redis_version_per_connection", "s24-stale-stats", "apps/api/src/edisc_api/app.py",
       "        driver_info=DRIVER_INFO,  # never resolved per connection on the loop (redis_driver)\n", "",
       "tests/unit/api/test_redis_driver.py"),

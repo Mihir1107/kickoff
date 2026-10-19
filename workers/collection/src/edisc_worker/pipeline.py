@@ -115,6 +115,19 @@ log = get_logger(__name__)
 # recorded (`units_unsettled`), so the report's unit rows come from the chain alone (ADR 0018 §28)
 UNIT_EVENT_FORMAT = 2
 UNSETTLED_BATCH = 500  # units per `units_unsettled` event
+# the items' statistics are refreshed when a job's inserted items cross a power of two from here on
+STATISTICS_FIRST = 1024
+
+
+def statistics_due(before: int, after: int) -> bool:
+    """Whether a batch that took a job's inserted items from ``before`` to ``after`` crossed a
+    power of two of at least ``STATISTICS_FIRST`` (1,024, 2,048, ...): a refresh per doubling, so
+    log2(n) of them for n items, and the planner never works from statistics that miss more than
+    half of what this job inserted (ADR 0015 §24.20)."""
+    if after < STATISTICS_FIRST or after <= before:
+        return False
+    power = 1 << (after.bit_length() - 1)  # the largest power of two <= after
+    return before < power
 
 
 class NoScopeError(ValueError):
@@ -911,7 +924,7 @@ class Pipeline:
                 and unit is not None
                 else None
             )
-            await self._link_batch(
+            inserted = await self._link_batch(
                 s,
                 ctx=ctx,
                 job_id=job_id,
@@ -945,6 +958,7 @@ class Pipeline:
                 },
             )
         # 3. after commit
+        await self._count_inserted(tenant_id, job_id, inserted)
         await anchor_if_due(
             self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=job_id
         )
@@ -976,8 +990,10 @@ class Pipeline:
         items: Sequence[Derived],
         page_ref: EvidenceRef,
         page_sha256: str,
-    ) -> None:
-        """Persist items, link the NEW ones to the job under a pre-allocated custody event, append it."""
+    ) -> int:
+        """Persist items, link the NEW ones to the job under a pre-allocated custody event, append it.
+        Returns how many items were inserted: the caller counts them AFTER its commit
+        (``_count_inserted``)."""
         stored = await persist(
             s, ctx=ctx, job_id=job_id, connector_version=self.connector.version, items=items
         )
@@ -1018,6 +1034,41 @@ class Pipeline:
             event_id=event_id,
             normalizer_version=NORMALIZER_VERSION,
         )
+        return stored.inserted
+
+    async def _count_inserted(self, tenant_id: uuid.UUID, job_id: uuid.UUID, n: int) -> None:
+        """Count a committed batch's inserted items on the job, and refresh the items' statistics
+        when the count crosses a power of two (from 1,024: ``statistics_due``).
+
+        Its OWN one-statement transaction, after the batch committed: inside the batch transaction
+        the job row's lock deadlocked with transactions that take the job row before a custody
+        chain head (the batch takes the head first; found by the full suite, ADR 0015 §24.20).
+        Holding nothing else, this one can wait for the row but never be part of a cycle; the
+        concurrent counts serialize there, and exactly one of them sees each threshold crossed.
+        A crash between the batch's commit and this count loses that batch's count: it only
+        delays a refresh (the counter decides WHEN to analyze; it is not evidence).
+
+        The refresh (``analyze_collected_items``, a zero-argument definer function, migration 0045)
+        ANALYZEs ``items``, ``job_items`` and ``item_derivations``. Without it, a tenant the
+        statistics do not know yet (its first collection) was estimated at about one row, and every
+        foreign-key check and per-batch lookup read ALL the tenant's items so far through another
+        tenant-leading index: quadratic. A failure is raised like any other (the activity retries;
+        the batch itself is already applied)."""
+        if n <= 0:
+            return
+        async with tenant_tx(self.sessions, tenant_id) as s:
+            total: int = (
+                await s.execute(
+                    text(
+                        "UPDATE collection_jobs SET items_inserted = items_inserted + :n"
+                        " WHERE id = :j RETURNING items_inserted"
+                    ),
+                    {"n": n, "j": job_id},
+                )
+            ).scalar_one()
+        if statistics_due(total - n, total):
+            async with tenant_tx(self.sessions, tenant_id) as s:
+                await s.execute(text("SELECT analyze_collected_items()"))
 
     async def _record_access_lost(
         self,
@@ -1064,7 +1115,7 @@ class Pipeline:
                 response_ref=EvidenceRef(page.evidence_id, page.storage_key),
                 prior=prior,
             )
-            await self._link_batch(
+            inserted = await self._link_batch(
                 s,
                 ctx=ctx,
                 job_id=job_id,
@@ -1080,6 +1131,7 @@ class Pipeline:
                 ),
                 {"r": exc.reason.value, "j": job_id, "k": row.unit_key},
             )
+        await self._count_inserted(tenant_id, job_id, inserted)
         await anchor_if_due(
             self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=job_id
         )
@@ -1173,6 +1225,7 @@ class Pipeline:
             else:
                 recon = ReconStatus.MATCHED.value
         absent: tuple[Derived, ...] = ()
+        inserted = 0
         last_page: tuple[str, EvidenceRef] | None = None  # (message-list fragment hash, page)
         # absence detection compares with earlier clean collections of the source; an export is a
         # snapshot of unknown completeness, so it never reports anything as no longer observed
@@ -1246,7 +1299,7 @@ class Pipeline:
                             {"e": last_page[1].evidence_id},
                         )
                     ).scalar_one()
-                    await self._link_batch(
+                    inserted = await self._link_batch(
                         s,
                         ctx=ctx,
                         job_id=job_id,
@@ -1285,6 +1338,7 @@ class Pipeline:
                 },
                 anchor_every=self.anchor_every,
             )
+        await self._count_inserted(tenant_id, job_id, inserted)
         await anchor_if_due(
             self.sessions, self.s3, self.settings, tenant_id=tenant_id, stream_id=job_id
         )

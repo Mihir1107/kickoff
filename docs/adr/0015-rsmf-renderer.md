@@ -1452,7 +1452,47 @@ what was done and why.
         per entry, against 7.9 M before);
       - the ANALYZE of the entries precedes the first day-file insert.
 
-    The 60 s bound is unchanged. Round `s24-stale-stats` (5/5 caught). The sweep of other bulk-load
+    The 60 s bound is unchanged. Round `s24-stale-stats` (5/5 caught).
+
+    **Update 2026-10-19 (user-approved follow-up):**
+    - **The same pattern on `items` for a new tenant: fixed.** The pipeline's per-batch lookups
+      (`PRIOR_STATE`, `ITEMS_BY_KEY`, `NEXT_VERSIONS` in `edisc_normalizer.store`) and the FK checks
+      of `job_items` / `item_derivations` → `items (tenant_id, id)` estimated a tenant missing from
+      the statistics at about one row. On a scratch database (another tenant analyzed, 30,000 items
+      of the new one not), unguarded custom plans read 30,000 items per lookup and **7,569,717**
+      for 500 FK checks; generic plans read 500.
+    - **The fix:**
+      - `collection_jobs.items_inserted` is counted after each batch's commit, in its OWN
+        one-statement transaction. The first version counted inside the batch transaction, and the
+        full local suite found it DEADLOCKING: the batch took the custody chain head and then the
+        job row, while other transactions of the same job take the job row and then a chain head.
+        Fifteen API tests failed with Postgres's deadlock report (both statements in the server
+        log). Holding nothing else, the separate count can wait for the row but never be part of a
+        cycle; the counts serialize there, and exactly one sees each threshold.
+      - The count that crosses a power of two (from 1,024: `statistics_due`) calls
+        `analyze_collected_items()`: log2(n) refreshes per job.
+      - A crash between a batch's commit and its count loses that count and only delays a refresh:
+        the counter decides when to analyze, it is not evidence. A failed refresh raises like any
+        other error.
+    - **The definer functions (migration 0045) take NO argument:**
+      - `analyze_export_entries()`, `analyze_export_tables()`, `analyze_collected_items()`;
+      - each with a fixed, schema-qualified table list in static SQL (no EXECUTE, no `format`);
+      - `SET search_path = pg_catalog, edisc, pg_temp`, owned by the tables' owner, EXECUTE for the
+        app role only. They replace 0044's `analyze_export_index(text)`, whose caller-supplied name
+        was validated but still a name.
+      - `tests/integration/db/test_analyze_functions.py` checks the catalog shape and that each
+        moves exactly its tables' ANALYZE counters. It also checks that a temp table shadowing
+        `items` changes nothing, that no argument is accepted, that the app role's own ANALYZE of
+        another table does nothing, and that the sweeper role may not call them. Broken four ways
+        (an argument, the path unpinned, PUBLIC execute, an extra table): all caught.
+    - **Plan stability:** `test_a_new_tenants_item_lookups_read_their_batch_after_the_refresh`
+      proves the trap first. After the refresh, at 300,000 items, every statement reads ≤ 1,050
+      items for a 500-item batch, custom or generic. At 60,000 rows a sequential scan legitimately
+      costs about what 1,000 probes do, so the bound is asserted at a realistic size.
+    - **End to end:** `tests/integration/pipeline/test_item_statistics.py` (a real job: the counter
+      equals the items inserted, one ANALYZE per threshold).
+    - Round `s24-stale-stats` 11/11. The new-tenant collection measured before and after:
+      docs/runs/2026-10-19-export-validation-stale-statistics.md. The sweep of other bulk-load
     paths and the 20M-entry estimate are in HANDOFF and `docs/runs/2026-10-19-export-validation-stale-statistics.md`.
 
 21. **`test_a_crash_after_the_journal_is_repaired_exactly_once[False]` failed once locally
