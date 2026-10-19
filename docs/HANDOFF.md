@@ -15,7 +15,7 @@ the Entra and Okta tenants). **Phase 3 decisions so far: `docs/plans/phase-3.md`
 
 ## Current state
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`.
-CI on main: CI_ITEMS_PLACEHOLDER. Migrations at head: **0045** (zero-argument ANALYZE functions,
+CI on main: run 39288602056 (`d2b77e4`) green, every job. Migrations at head: **0045** (zero-argument ANALYZE functions,
 `collection_jobs.items_inserted`; 0044: the clean-unit index and the first, now replaced, ANALYZE function). Renderer **1.3.2**, dummy connector **0.5.0**,
 normalizer **0.3.0**, report renderer **1.6.0**, preview renderer **1.0.0**. CI on main: runs
 39118882391 (`0b2b83e`), 39120935270 (`af39867`), 39121279530 (`c6b5a39`), 39123189226
@@ -27,7 +27,7 @@ page at three depths. Not re-run to green. Run 39127913175 on `e437be5`: **green
 `72038ad`'s tree: 1,447 passed.
 
 ## Done: new tenants' items on stale statistics; the ANALYZE functions hardened (2026-10-19, user-approved)
-**CI:** CI_ITEMS_PLACEHOLDER. Full local integration suite: on the first version 15 failed (the deadlock), 1,441 passed. After
+**CI:** run 39288602056 on `d2b77e4`: green, every job (the full suite on four shards). Full local integration suite: on the first version 15 failed (the deadlock), 1,441 passed. After
 the fix, the 99 tests of every affected file plus the new ones passed, with no deadlock. A full
 local rerun was refused by the disk guard (11 GB free, guard 12; not lowered), so CI's four shards
 are the full-suite gate for this commit.
@@ -57,6 +57,9 @@ are the full-suite gate for this commit.
      | Per item | 11.9 ms | 2.5 ms |
      | ANALYZEs | 0 | 9 |
 
+   - **Not re-run after the deadlock fix (disk guard):** the integration mutation
+     `pipeline_never_refreshes_items` (re-pointed at `_count_inserted`) and the "after" measurement.
+     Re-run both on a fresh stack.
 2. **The ANALYZE functions are safe as SECURITY DEFINER** (migration 0045 replaces 0044's
    `analyze_export_index(text)`):
    - `analyze_export_entries()`, `analyze_export_tables()`, `analyze_collected_items()`;
