@@ -9,7 +9,7 @@ ADR 0015 §24.20 has the diagnosis. This note has the numbers.
 | laptop | before | 9.7 s | 7,912,240 | page query quadratic (Sort over the remainder), FK checks mostly on the primary key (the plan cache switched to generic after 5) |
 | CI 39132450451 | before (instrumented) | > 60 s (timeout) | **643,353,122** at 40,000 of 66,000 day files | FK checks stayed on `(export_id, kind, folder)` reading up to each row: n²/2 |
 | laptop | after | 7.4-8.4 s | 213,722 | every sampled FK check on `pk_export_entries` (5 blocks), pages on the ordered index (3 ms each, flat) |
-| CI (after) | after | see HANDOFF | see HANDOFF | |
+| CI 39260189440 | after | 10.2 s | 178,006 | day-file inserts flat (about 23 ms each, first to last), every sampled FK check on the primary key, waits CPU only |
 
 ## Linearity of the fixed code (laptop, same session, the export worker in process)
 

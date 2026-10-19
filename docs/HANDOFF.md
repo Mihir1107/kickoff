@@ -1,11 +1,13 @@
-# Handoff (2026-10-18: M17 built except step 7 (legal hold) and step 9 (frontend); production-readiness warns on main; the report states how a pause ended (1.6.0); directory snapshots; SSE connection event; the zip64 test's slow runs are a per-statement database finding, open)
+# Handoff (2026-10-19: the zip64 slowness diagnosed and fixed (quadratic on stale statistics, migration 0044); every test run logs to disk; M18 planned (docs/plans/m18.md, decisions pending); M17 built except step 7 (internal-app token, legal REVIEW) and step 9 (frontend))
 
 This file alone is enough to continue. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisions §1-§18, notes
 §19-§30, §32, §33, **every deviation in §31**); the rest of the plan of record is `docs/ARCHITECTURE.md`,
 `docs/adr/`, `docs/plans/phase-2.md` and `docs/BACKLOG.md`. M16 summary:
 `docs/runs/2026-10-12-m16-complete.md`. Expert guide: `docs/VERIFYING.md`. Demo: `docs/DEMO.md`.
-**M17 plan: `docs/plans/m17.md`** (every decision taken: its §12; design changes in ADR 0016
+**M18 plan (proposed, nothing built): `docs/plans/m18.md`**: legal hold, destruction with a verifiable
+certificate, storage identities and bucket policies, upload quotas, the standalone verifier. Its §11
+decisions (D1-D13) come before any code. **M17 plan: `docs/plans/m17.md`** (every decision taken: its §12; design changes in ADR 0016
 Amendments 1 and 2; build notes per step at the end of ADR 0016, the last one "closing M17").
 Every M17 step is built except step 7 (on hold, legal review) and step 9 (the frontend branch's
 Playwright runs); real-tenant confirmation of steps 3b and 6 is pending (the user is setting up
@@ -13,7 +15,7 @@ the Entra and Okta tenants). **Phase 3 decisions so far: `docs/plans/phase-3.md`
 
 ## Current state
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`.
-Migrations at head: **0043** (directory snapshots). Renderer **1.3.2**, dummy connector **0.5.0**,
+CI on main: run 39260189440 (`00356ae`) green, every job. Migrations at head: **0044** (analyze_export_index + the clean-unit index). Renderer **1.3.2**, dummy connector **0.5.0**,
 normalizer **0.3.0**, report renderer **1.6.0**, preview renderer **1.0.0**. CI on main: runs
 39118882391 (`0b2b83e`), 39120935270 (`af39867`), 39121279530 (`c6b5a39`), 39123189226
 (`597d5f2`) all green, every job. Run 39126275352 on `72038ad` FAILED integration shard 3:
@@ -22,6 +24,69 @@ assertion at the last full page; the planner sorted the ~500 remaining rows afte
 the index range, on cost; ADR 0016 "closing M17" note 3); the test now measures bounded work per
 page at three depths. Not re-run to green. Run 39127913175 on `e437be5`: **green, every job**. Full local integration suite on
 `72038ad`'s tree: 1,447 passed.
+
+## Done: the zip64 diagnosis and fix, local test logs, the M18 plan (2026-10-18/19)
+**CI:**
+- Run 39132450451 on `cf1287a` (the instrumentation): failed shard 0 on two tests, both diagnosed:
+  - **the zip64 test:** it timed out, and its counters CONFIRMED the hypothesis below;
+  - **`test_stalled_clients`:** a loop block, a product bug in redis-py, fixed (ADR 0015 §24.22).
+- Run 39260189440 on `00356ae` (the fixes): **green, every job**. The zip64 test there: validation 10.2 s (it
+  timed out at 60 s before), `export_entries.idx_tup_fetch` 178,006 (643 M before), day-file inserts
+  flat at about 23 ms per statement from first to last, every sampled FK check on the primary key,
+  waits CPU only.
+- Full local integration suite on `00356ae`'s tree: 1,452 passed.
+
+1. **The zip64 slowness: a product bug, quadratic on stale statistics (ADR 0015 §24.20 "Resolved";
+   docs/runs/2026-10-19-export-validation-stale-statistics.md).**
+   - **New instruments** (`tests/integration/pg_diagnostics.py`):
+     - per-statement series in `ExportIngest`;
+     - a `pg_stat_activity` sampler;
+     - `auto_explain` (preloaded in compose, inert until enabled), collected from the worker's own
+       pool: the plans its backends EXECUTED, nested FK checks included.
+   - **The bug.** The day-file rows' FK check (`export_id = $1 AND idx = $2`) was planned on
+     `(export_id, kind, folder)` with `idx` as a filter, and read the export up to each row. On CI
+     that was **643 M index tuples** for 40,000 rows (n²/2); per-insert time rose through the phase.
+     The page query also sorted the whole remainder per page (laptop: 7.9 M tuples).
+   - **Fixes:**
+     - an ANALYZE of each export index table right after loading (`analyze_export_index`, a
+       definer function, migration 0044);
+     - `day_files_page` forbids sorts.
+   - **Tried and rejected on evidence:** a partial index (still lost the tie), and an ANALYZE alone
+     for the page query.
+   - **Tests:** `tests/integration/db/test_stale_statistics.py` (a database migrated from scratch,
+     three statistics states × custom/generic plans, trap armed first). The zip64 test now asserts
+     work (≤ 15 entry tuples per entry) and the analyze order, and writes its diagnostics even on
+     a timeout. The 60 s bound is unchanged.
+   - **After:** 214 k tuples; 113-114 µs per entry at 66 k and 330 k entries (linear).
+   - **20M-entry export:** about 38 min on the laptop (about 1-1.3 h on a CI-class host); the old
+     code needed about 3 days (page query) to about 200 days (CI's FK plan).
+   - Round `s24-stale-stats` 6/6.
+2. **Sweep of other bulk-load paths** (auto_explain on 38,272 plans of the heavy suites):
+   - **Fixed:** absence detection (`_EARLIER_CLEAN_ITEMS`) scanned all `work_units` per unit.
+     Partial index `ix_work_units_tenant_id_unit_key`; tested with 30,000 other units: ≤ 20 rows
+     read, ≥ 30,000 without the index.
+   - **NOT fixed, needs your decision:** the same pattern on `items` for a tenant new to the
+     statistics. FK checks from `job_items`/`item_derivations`, and the pipeline's per-batch
+     `idempotency_key = ANY` and version lookups, read the tenant's items so far, so a new tenant's
+     first large collection is quadratic until autoanalyze. Options are in BACKLOG ("`items`
+     lookups ..."); my recommendation is an ANALYZE whenever a job's inserted items double.
+3. **The CI loop block (ADR 0015 §24.22):** redis-py ran `importlib.metadata.version("redis")` per
+   new pooled connection on the loop (301 ms). Fix: `edisc_connectors_base.redis_driver.DRIVER_INFO`,
+   resolved once. Unit test plus a mutation.
+4. **A local failure diagnosed (ADR 0015 §24.23):**
+   `test_open_workflows_started_before_the_deploy_block_patch_removal` compared the host clock with
+   Temporal's StartTime (the Docker VM lagged after the laptop slept). It now uses server stamps
+   only.
+5. **Every test run logs to disk** (CLAUDE.md "Commands"): `scripts/test_log.py` wraps every make
+   test target. Each run writes `test-runs/<UTC>-<label>/output.log`, failure artifacts as on CI,
+   phase timings, and the stack logs on failure; `test-runs/latest` points at the newest; 30 kept.
+6. **M18 plan:** `docs/plans/m18.md`, with a MinIO spike:
+   - legal hold blocks version deletes even for root;
+   - root ignores bucket policies;
+   - MinIO rejects the `s3:if-none-match` condition key, so the "deny PutObject without
+     If-None-Match" policy is a cloud item, and the MinIO-side defence is the shadow-version sweep.
+
+   Decisions D1-D13 in its §11.
 
 ## Done: closing M17 (2026-10-18; round `m17-close`, 42 breaks, all caught)
 1. **production-readiness warns on main** (ADR 0016 "closing M17" note 1):
@@ -49,6 +114,8 @@ page at three depths. Not re-run to green. Run 39127913175 on `e437be5`: **green
 5. **`test_zip64_by_entry_count` instrumented** (ADR 0015 §24.20): below.
 
 <!-- zip64-findings -->
+**RESOLVED 2026-10-19 (above, and ADR 0015 §24.20): quadratic FK checks and page reads on stale
+statistics.** The history of the investigation:
 **The zip64 test on CI: the data (ADR 0015 §24.20).** Per run: CPU calibration (a fixed pure
 Python workload), validation wall time, the day-file index inserts (133 statements of 500 rows,
 each with a foreign key to `export_entries`), their page reads:
@@ -525,8 +592,12 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
   tenant); revocation cuts in-flight downloads; revoked tokens end as `access_lost` units.
 
 ## Next
-0. **The zip64 finding** (above, "The zip64 test on CI"): collect a slow run's statement/commit
-   split and lock probe, attribute, decide the fix with the user. Never raise the 60 s bound.
+0. **Your decisions:**
+   - the M18 plan's §11 (D1-D13, incl. the principle wording in §10);
+   - the `items` stale-statistics fix (BACKLOG; recommended: an ANALYZE whenever a job's inserted
+     items double).
+
+   Then M18 step 0 (spikes) and step 1 (storage identities).
 1. **`test_a_crash_after_the_journal_is_repaired_exactly_once[False]`** failed once locally, output
    lost, not reproduced in 10 runs (ADR 0015 §24.21): if it recurs, follow the note there.
 2. **Confirm step 3b and step 6 on real tenants** (in parallel: the user is setting up the Entra
