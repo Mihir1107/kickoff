@@ -169,6 +169,11 @@ def main() -> None:
     if sys.argv[1:2] == ["move-binding"]:
         _move_main(sys.argv[2:])
         return
+    if sys.argv[1:2] == ["quota"]:
+        from edisc_api import quota_admin
+
+        quota_admin.main(sys.argv[2:])
+        return
     ap = argparse.ArgumentParser(prog="edisc_api.admin", description=__doc__)
     for flag in (
         "subdomain",

@@ -34,6 +34,7 @@ from edisc_custody.retention_extension import extend_retention
 from edisc_custody.sweeper import sweep_anchors
 from edisc_worker import access_lost, directory
 from edisc_worker.contracts import MAINTENANCE_QUEUE
+from edisc_worker.export_expiry import expire_export_uploads
 from edisc_worker.install_recovery import reconcile_tokens
 from edisc_worker.pipeline import Pipeline
 from edisc_worker.render_routing import check_render_routing
@@ -61,6 +62,8 @@ SWEEPS = (
     # directory snapshots for the scope picker (M17 plan §3.3): due connections, budgeted runs that
     # resume from the checkpoint
     Sweep("refresh-directories", "refresh_directories", timedelta(minutes=15)),
+    # export uploads past their TTL release their quota (M18 §4)
+    Sweep("expire-export-uploads", "expire_export_uploads", timedelta(hours=1)),
 )
 
 
@@ -155,6 +158,13 @@ class MaintenanceActivities:
         )
         return {"jobs": result.jobs}
 
+    @activity.defn(name="expire_export_uploads")
+    async def expire_export_uploads(self) -> dict[str, Any]:
+        result = await expire_export_uploads(
+            self.sweeper_sessions, self.sessions, self.s3, self.settings, tenant_id=self.tenant_id
+        )
+        return {"expired": [str(e) for e in result.expired]}
+
     @activity.defn(name="extend_retention")
     async def extend_retention(self) -> dict[str, Any]:
         result = await extend_retention(
@@ -190,6 +200,7 @@ class MaintenanceActivities:
             self.check_reauth_deadlines,
             self.check_connections,
             self.refresh_directories,
+            self.expire_export_uploads,
         ]
 
 

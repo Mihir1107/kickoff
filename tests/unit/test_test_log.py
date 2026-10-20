@@ -64,9 +64,49 @@ def test_the_failure_command_does_not_run_on_success(tmp_path: Path) -> None:
 
 def test_old_runs_are_pruned(tmp_path: Path) -> None:
     for k in range(4):
-        (tmp_path / f"2020010{k}T000000Z-old").mkdir()
+        _old_run(tmp_path, f"2020010{k}T000000Z-old", 10)
     assert _run(tmp_path, 0, env={"TEST_RUNS_KEEP": "2"}) == 0
     names = [p.name for p in _runs(tmp_path)]
     assert (
         len(names) == 2 and names[0] == "20200103T000000Z-old" and names[1].endswith("-unit_test")
     )
+
+
+def _old_run(tmp: Path, name: str, size: int, *, finished: bool = True) -> Path:
+    run = tmp / name
+    (run / "artifacts").mkdir(parents=True)
+    (run / "artifacts" / "blob").write_bytes(b"x" * size)
+    (run / "output.log").write_bytes(b"# finished: then\n" if finished else b"# started: now\n")
+    return run
+
+
+def test_the_size_cap_prunes_oldest_first(tmp_path: Path) -> None:
+    mib = 1024 * 1024
+    for k in range(4):
+        _old_run(tmp_path, f"2020010{k}T000000Z-old", mib)
+    assert _run(tmp_path, 0, env={"TEST_RUNS_KEEP": "20", "TEST_RUNS_MAX_MB": "2"}) == 0
+    names = [p.name for p in _runs(tmp_path)]
+    # the new run (a few hundred bytes) + one 1 MiB run fit under 2 MiB; two more would not
+    assert names[0] == "20200103T000000Z-old" and names[1].endswith("-unit_test")
+    assert len(names) == 2
+
+
+def test_the_newest_run_is_kept_whatever_its_size(tmp_path: Path) -> None:
+    _old_run(tmp_path, "20200101T000000Z-old", 10)
+    big = _old_run(tmp_path, "29990101T000000Z-big", 3 * 1024 * 1024)  # sorts after the new run
+    assert _run(tmp_path, 0, env={"TEST_RUNS_MAX_MB": "1"}) == 0
+    names = [p.name for p in _runs(tmp_path)]
+    assert big.name in names  # newest, over the cap alone
+    assert any(n.endswith("-unit_test") for n in names)  # the run that pruned is never removed
+    assert "20200101T000000Z-old" not in names
+
+
+def test_a_run_still_being_written_is_never_pruned(tmp_path: Path) -> None:
+    running = _old_run(tmp_path, "20200101T000000Z-running", 10, finished=False)
+    _old_run(tmp_path, "20200102T000000Z-done", 10)
+    assert _run(tmp_path, 0, env={"TEST_RUNS_KEEP": "1"}) == 0
+    names = [p.name for p in _runs(tmp_path)]
+    assert running.name in names and "20200102T000000Z-done" not in names
+    os.utime(running / "output.log", (0, 0))  # abandoned for years: a killed run, prunable
+    assert _run(tmp_path, 0, env={"TEST_RUNS_KEEP": "1"}) == 0
+    assert running.name not in [p.name for p in _runs(tmp_path)]

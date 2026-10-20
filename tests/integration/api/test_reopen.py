@@ -17,6 +17,7 @@ from edisc_worker.contracts import MAINTENANCE_QUEUE
 from edisc_worker.maintenance import MaintenanceActivities
 from edisc_worker.workflows import TenantRetentionWorkflow
 
+from ..conftest import _load_env, root_s3_client
 from .conftest import Api, TenantCtx, add_principal, export_worker
 from .test_exports import settled, slack_export, upload
 
@@ -62,10 +63,11 @@ async def test_reopen_relocks_what_lapsed_and_records_every_gap(
             kept, gone = [await _evidence(exp, tenant, i) for i in ids]
             lapse = max(kept[2], gone[2])
             await asyncio.sleep(max(0.0, (lapse - utc_now()).total_seconds()) + 1.5)
-            # unprotected while closed: someone deletes one of them
-            await exp.s3.delete_object(
-                Bucket=exp.settings.s3_evidence_bucket, Key=gone[0], VersionId=gone[1]
-            )
+            # unprotected while closed: someone with root deletes one of them (the app may not)
+            async with root_s3_client(_load_env()) as root:
+                await root.delete_object(
+                    Bucket=exp.settings.s3_evidence_bucket, Key=gone[0], VersionId=gone[1]
+                )
 
             _, client_admin = await add_principal(
                 exp, tenant, roles=[("client_admin", "client", uuid.UUID(client))]

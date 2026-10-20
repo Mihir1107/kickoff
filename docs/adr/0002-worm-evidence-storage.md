@@ -53,7 +53,9 @@ evidence when a matter closes, and COMPLIANCE-mode retention can never be shorte
   unprotected window this guards.
 - **Write-ahead registry** (`evidence_objects`): the row is inserted `pending` before upload, and
   records the multipart `upload_id` as soon as the upload starts. It becomes `complete` (hash, size)
-  or `missing` (no object). Completed rows are final, except that `retain_until` may be extended.
+  or `missing` (no object). Completed rows are final, except that `retain_until` may be extended and that destruction moves
+  them to `destroying`, then `destroyed` (with the destroying custody event); a key destroyed and
+  collected again gets a new row with the next generation (M18, amended 2026-10-20).
   Nothing reaches WORM without a registry row.
 
 ### Files: staging bucket vs local temp spool (evaluated for M6)
@@ -214,6 +216,12 @@ versions:
 ## Consequences
 - + Deletion or overwrite is impossible, even with root credentials, until retention lapses.
   Destruction at matter close stays achievable.
+- **Amendment (2026-10-20, M18, `docs/plans/m18.md` §12):** after retention lapses, raw data is
+  deleted only by the destruction workflow: under its own storage identity, after the owner
+  closed, retention lapsed on the store's clock, approved by a second, different principal, after
+  the cooling-off, and never while a legal hold applies in the database or on the stored object (an
+  S3 legal-hold flag stops version deletes even for root); every deletion is recorded in custody
+  and certified. The design of record for holds and destruction is ADR 0019.
 - + No client evidence on worker disk. Dedup at every size. Peak memory is about 3 parts, independent of
   object size (tested at 20 and 200 MiB).
 - − A second write per file (the server-side copy), and transient unlocked staging objects.

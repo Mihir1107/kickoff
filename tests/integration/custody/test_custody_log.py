@@ -292,11 +292,12 @@ async def test_finished_job_without_seal_fails(
 
 
 async def test_hiding_an_anchor_with_a_delete_marker_is_detected(
-    app_sessions: Sessions, s3: S3Client, settings: Settings
+    app_sessions: Sessions, s3: S3Client, s3_root: S3Client, settings: Settings
 ) -> None:
     job = await run_job(app_sessions, s3, settings, batches=2)
-    # S3 root can add a delete marker (Object Lock allows it; the locked version survives)
-    await s3.delete_object(Bucket=settings.s3_evidence_bucket, Key=sorted(set(job.anchors))[0])
+    # S3 root can add a delete marker (Object Lock allows it; the locked version survives); the
+    # app identity may not (M18 §3)
+    await s3_root.delete_object(Bucket=settings.s3_evidence_bucket, Key=sorted(set(job.anchors))[0])
     report = await _verify(app_sessions, s3, settings, job)
     assert any("delete marker" in e for e in report.errors), report.errors
 

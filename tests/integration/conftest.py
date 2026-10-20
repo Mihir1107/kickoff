@@ -172,7 +172,26 @@ async def sweeper_sessions(
 
 @pytest.fixture(scope="session")
 async def s3(settings: Settings) -> AsyncIterator[S3Client]:
+    """The APP identity (``edisc-app``, M18 §3): the whole suite runs as the services do, so a
+    missing permission fails a test somewhere."""
     async with s3_client(settings) as client:
+        yield client
+
+
+def root_s3_client(env: Mapping[str, str]) -> Any:
+    """MinIO ROOT, for tampering and infrastructure checks only (like the database superuser):
+    never for anything the product does."""
+    from aiobotocore.session import get_session
+
+    return get_session().create_client(
+        "s3", endpoint_url=env["EDISC_S3_ENDPOINT"], region_name=env["EDISC_S3_REGION"],
+        aws_access_key_id=env["EDISC_S3_ROOT_USER"], aws_secret_access_key=env["EDISC_S3_ROOT_PASSWORD"],
+    )  # fmt: skip
+
+
+@pytest.fixture(scope="session")
+async def s3_root(env: Mapping[str, str]) -> AsyncIterator[S3Client]:
+    async with root_s3_client(env) as client:
         yield client
 
 

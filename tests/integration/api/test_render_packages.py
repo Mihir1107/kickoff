@@ -24,6 +24,7 @@ from edisc_db.session import tenant_tx
 from edisc_renderers.rsmf import RenderOptions
 from edisc_worker.renders import create_render
 
+from ..conftest import _load_env, root_s3_client
 from ..custody.conftest import superuser
 from .conftest import Api, TenantCtx, add_principal
 from .cut import cut_every_way, full_length
@@ -238,8 +239,9 @@ async def _diverge(api: Api, render: dict[str, Any], kind: str) -> str:
         key = str(row["storage_key"])
         if kind == "extra_version":  # a second, unrecorded version shadows the anchor
             await api.s3.put_object(Bucket=bucket, Key=key, Body=b'{"forged":true}')
-        elif kind == "delete_marker":  # someone tries to hide the anchor
-            await api.s3.delete_object(Bucket=bucket, Key=key)
+        elif kind == "delete_marker":  # someone with root tries to hide the anchor
+            async with root_s3_client(_load_env()) as root:  # the app may not (M18 §3)
+                await root.delete_object(Bucket=bucket, Key=key)
         elif kind == "missing_row":  # an object under the prefix the database does not know
             key = key.rsplit("/", 1)[0] + "/99999999999999999999.json"
             await api.s3.put_object(Bucket=bucket, Key=key, Body=b'{"planted":true}')

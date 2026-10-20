@@ -1,0 +1,27 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "OnlyTheAppIdentity",
+      "Effect": "Deny",
+      "Principal": {"AWS": ["*"]},
+      "Action": ["s3:*"],
+      "Resource": ["arn:aws:s3:::@STAGING@", "arn:aws:s3:::@STAGING@/*"],
+      "Condition": {"ArnNotEquals": {"aws:PrincipalArn": ["@APP_ROLE_ARN@"]}}
+    },
+    {
+      "Sid": "NoBucketConfiguration",
+      "Effect": "Deny",
+      "Principal": {"AWS": ["*"]},
+      "Action": ["s3:PutBucket*", "s3:DeleteBucket*", "s3:PutLifecycleConfiguration"],
+      "Resource": ["arn:aws:s3:::@STAGING@"]
+    },
+    {
+      "Sid": "WritesOnlyUnderStagingPrefixes",
+      "Effect": "Deny",
+      "Principal": {"AWS": ["*"]},
+      "Action": ["s3:PutObject"],
+      "NotResource": ["arn:aws:s3:::@STAGING@/t/*", "arn:aws:s3:::@STAGING@/exports/*"]
+    }
+  ]
+}

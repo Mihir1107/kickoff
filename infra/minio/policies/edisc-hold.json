@@ -1,0 +1,108 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LegalHoldFlags",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObjectLegalHold",
+        "s3:GetObjectLegalHold"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@EVIDENCE@/t/*",
+        "arn:aws:s3:::@EVIDENCE@/custody-anchors/*"
+      ]
+    },
+    {
+      "Sid": "Versions",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucketVersions"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@EVIDENCE@"
+      ]
+    },
+    {
+      "Sid": "NeverDeleteMarkersOnEvidence",
+      "Effect": "Deny",
+      "Action": [
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@EVIDENCE@/*"
+      ]
+    },
+    {
+      "Sid": "NeverVersionDeletes",
+      "Effect": "Deny",
+      "Action": [
+        "s3:DeleteObjectVersion"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@EVIDENCE@/*",
+        "arn:aws:s3:::@STAGING@/*"
+      ]
+    },
+    {
+      "Sid": "NeverGovernanceBypass",
+      "Effect": "Deny",
+      "Action": [
+        "s3:BypassGovernanceRetention"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@EVIDENCE@/*",
+        "arn:aws:s3:::@STAGING@/*"
+      ]
+    },
+    {
+      "Sid": "NeverBucketConfiguration",
+      "Effect": "Deny",
+      "Action": [
+        "s3:PutBucket*",
+        "s3:DeleteBucket*",
+        "s3:PutLifecycleConfiguration",
+        "s3:PutBucketObjectLockConfiguration",
+        "s3:PutReplicationConfiguration"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@EVIDENCE@",
+        "arn:aws:s3:::@STAGING@"
+      ]
+    },
+    {
+      "Sid": "NeverWrites",
+      "Effect": "Deny",
+      "Action": [
+        "s3:PutObject",
+        "s3:PutObjectRetention"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@EVIDENCE@/*",
+        "arn:aws:s3:::@STAGING@/*"
+      ]
+    },
+    {
+      "Sid": "NeverStaging",
+      "Effect": "Deny",
+      "Action": [
+        "s3:*"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@STAGING@",
+        "arn:aws:s3:::@STAGING@/*"
+      ]
+    },
+    {
+      "Sid": "NeverContent",
+      "Effect": "Deny",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@EVIDENCE@/*"
+      ]
+    }
+  ]
+}

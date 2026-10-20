@@ -45,6 +45,7 @@ from edisc_core.kms import LocalKmsClient
 from edisc_core.logs import bind_context, clear_context, get_logger
 from edisc_core.settings import Settings
 from edisc_db.session import create_engine, session_factory, warm_pool
+from edisc_evidence.identity import assert_least_privilege, refuse_foreign_identities
 from edisc_evidence.s3 import s3_client
 
 log = get_logger(__name__)
@@ -128,6 +129,7 @@ def redis_client(settings: Settings) -> aioredis.Redis:
 @contextlib.asynccontextmanager
 async def build_resources(settings: Settings) -> AsyncIterator[Resources]:
     """Production wiring (tests build ``Resources`` from their own fixtures)."""
+    refuse_foreign_identities(settings, "app")  # never the hold or destroy credentials (M18 §3)
     engine = create_engine(settings, "app")
     redis = redis_client(settings)
     http = httpx.AsyncClient()
@@ -139,6 +141,7 @@ async def build_resources(settings: Settings) -> AsyncIterator[Resources]:
         )
         limiter = RateLimiter(redis, settings.rate_limits)
         async with s3_client(settings) as s3:
+            await assert_least_privilege(s3, settings)  # never root (M18 §3, T12)
             built = Resources(
                 settings,
                 sessions,

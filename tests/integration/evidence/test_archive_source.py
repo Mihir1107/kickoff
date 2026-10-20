@@ -38,7 +38,7 @@ async def test_sequential_coalesced_reads_cost_a_few_requests_per_thousand_entri
     s3: S3Client, settings: Settings
 ) -> None:
     data = _export_like_zip()
-    key = f"tests/archive-source/{new_id()}.zip"
+    key = f"t/tests/archive-source/{new_id()}.zip"  # the app writes staging under t/ only
     put = await s3.put_object(Bucket=settings.s3_staging_bucket, Key=key, Body=data)
     version = put.get("VersionId") or "null"
     limits = ArchiveLimits(read_chunk=1 << 20)

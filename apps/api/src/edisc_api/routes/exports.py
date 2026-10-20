@@ -33,7 +33,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
-from edisc_api import audit
+from edisc_api import audit, quotas
 from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller, require_recent_sign_in
 from edisc_api.authz import TENANT, P, Permission, Scope, authorize, perm, permissions, roles_at
@@ -201,7 +201,7 @@ def _staging_key(tenant_id: uuid.UUID, export_id: uuid.UUID) -> str:
 # ------------------------------------------------------------------ routes
 @router.post(
     "/clients/{client_id}/exports", status_code=201, response_model=ExportOut,
-    openapi_extra=perm(P.CONNECTION_MANAGE, E.CONFLICT, E.EXPORT_TOO_LARGE, E.FORBIDDEN, E.NOT_FOUND, E.REAUTH_REQUIRED),
+    openapi_extra=perm(P.CONNECTION_MANAGE, E.CONFLICT, E.EXPORT_TOO_LARGE, E.FORBIDDEN, E.NOT_FOUND, E.QUOTA_EXCEEDED, E.REAUTH_REQUIRED),
 )  # fmt: skip
 async def create_export(
     client_id: uuid.UUID, body: ExportIn, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
@@ -226,7 +226,40 @@ async def create_export(
     created = await res.s3.create_multipart_upload(
         Bucket=res.settings.s3_staging_bucket, Key=key, ChecksumAlgorithm="SHA256"
     )
+    try:
+        out = await _insert_export(
+            res, caller, rid, client_id, body, export_id, key, created["UploadId"], limits,
+            defaults, overrides, signed_in,
+        )  # fmt: skip
+    except BaseException as exc:
+        # nothing was recorded: the staged upload must not linger (shielded from cancellation)
+        await asyncio.shield(
+            res.s3.abort_multipart_upload(
+                Bucket=res.settings.s3_staging_bucket, Key=key, UploadId=created["UploadId"]
+            )
+        )
+        if isinstance(exc, quotas.QuotaExceededError):
+            async with tenant_tx(res.sessions, caller.tenant_id) as s:
+                await audit.record(
+                    s, tenant_id=caller.tenant_id, actor=caller.actor,
+                    event_type="export_quota_refused",
+                    payload={"client_id": str(client_id), "declared_size": body.size_bytes,
+                             **exc.audit_payload()},
+                    request_id=rid,
+                )  # fmt: skip
+            await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
+        raise
+    await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
+    return out
+
+
+async def _insert_export(
+    res: Resources, caller: Caller, rid: str, client_id: uuid.UUID, body: ExportIn,
+    export_id: uuid.UUID, key: str, upload_id: str, limits: dict[str, int],
+    defaults: dict[str, int], overrides: dict[str, int], signed_in: Any,
+) -> ExportOut:  # fmt: skip
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        await quotas.reserve(s, res.settings, caller.tenant_id, body.size_bytes)
         await s.execute(
             text(
                 "INSERT INTO slack_exports (id, tenant_id, client_id, declared_size, declared_sha256,"
@@ -235,7 +268,7 @@ async def create_export(
             ),
             {"i": export_id, "t": caller.tenant_id, "c": client_id, "n": body.size_bytes,
              "h": body.sha256, "p": body.plan, "l": json.dumps(limits), "k": key,
-             "u": created["UploadId"], "by": caller.actor},
+             "u": upload_id, "by": caller.actor},
         )  # fmt: skip
         await audit.record(
             s, tenant_id=caller.tenant_id, actor=caller.actor, event_type="export_upload_started",
@@ -253,9 +286,7 @@ async def create_export(
                                        for k, v in sorted(overrides.items())}},
                 request_id=rid,
             )  # fmt: skip
-        out = await _out(s, res, export_id)
-    await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
-    return out
+        return await _out(s, res, export_id)
 
 
 @router.put(

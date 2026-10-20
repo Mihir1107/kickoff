@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # One-shot, idempotent bucket setup (ADR 0002).
 # - Evidence bucket: Object Lock (only possible at creation). A bucket default COMPLIANCE retention is a
 #   safety net (DEFAULT_RETENTION_DAYS; 0 = none, used by the ephemeral test stack whose objects carry
@@ -10,8 +10,29 @@
 #   infra/aws/*.json has no expiration rule for evidence.
 # Incomplete multipart uploads: MinIO expires stale uploads itself (api stale_uploads_expiry, default
 # 24h); it rejects the S3 AbortIncompleteMultipartUpload lifecycle rule.
+# - Storage identities (M18 §3, ADR 0019): root is used HERE only. The application runs as
+#   edisc-app (no delete, no hold flags), the holds worker as edisc-hold (legal-hold flags only), the
+#   destruction worker as edisc-destroy (version deletes only). Policies: policies/*.json, each with
+#   explicit Deny statements for what that identity must never do: the second layer, since an
+#   explicit deny wins over any Allow attached later. MinIO does NOT evaluate bucket policies for
+#   IAM users (M18 step 0 spike, ADR 0019), so the bucket policies are AWS-only (infra/aws/*-policy.json).
+#   Root ignores every policy: that is why no running service holds it.
 set -eu
 mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null
+render() {  # policy template -> file with this stack's bucket and identity names (no sed in the image)
+  t=$(cat "/policies/$1.json")
+  t=${t//@EVIDENCE@/$BUCKET}; t=${t//@STAGING@/$STAGING_BUCKET}; t=${t//@APP_USER@/$APP_USER}
+  t=${t//@HOLD_USER@/$HOLD_USER}; t=${t//@DESTROY_USER@/$DESTROY_USER}
+  printf '%s\n' "$t" > "/tmp/$1.json"
+}
+identity() {  # name secret policy: create or update, attach exactly that policy (idempotent)
+  mc admin user add local "$1" "$2" >/dev/null
+  render "$3"
+  mc admin policy create local "$3" "/tmp/$3.json" >/dev/null
+  if ! out=$(mc admin policy attach local "$3" --user "$1" 2>&1); then
+    case "$out" in *"already attached"*) ;; *) echo "$out" >&2; exit 1 ;; esac
+  fi
+}
 mc mb --ignore-existing --with-lock "local/$BUCKET"
 if [ "${DEFAULT_RETENTION_DAYS}" != "0" ]; then
   mc retention set --default COMPLIANCE "${DEFAULT_RETENTION_DAYS}d" "local/$BUCKET"
@@ -30,3 +51,7 @@ case "${EDISC_ENV:-production}" in
   *) echo "no expiry rules on the evidence bucket in ${EDISC_ENV:-production}" ;;
 esac
 mc ilm rule ls "local/$STAGING_BUCKET"
+identity "$APP_USER" "$APP_SECRET" edisc-app
+identity "$HOLD_USER" "$HOLD_SECRET" edisc-hold
+identity "$DESTROY_USER" "$DESTROY_SECRET" edisc-destroy
+echo "identities: $APP_USER $HOLD_USER $DESTROY_USER"

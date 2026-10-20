@@ -44,8 +44,8 @@ def test_evidence_bucket_has_compliance_object_lock(env: Mapping[str, str]) -> N
         "s3",
         endpoint_url=env["EDISC_S3_ENDPOINT"],
         region_name=env["EDISC_S3_REGION"],
-        aws_access_key_id=env["EDISC_S3_ACCESS_KEY"],
-        aws_secret_access_key=env["EDISC_S3_SECRET_KEY"],
+        aws_access_key_id=env["EDISC_S3_ROOT_USER"],  # bucket configuration: root's to read
+        aws_secret_access_key=env["EDISC_S3_ROOT_PASSWORD"],
     )
     bucket = env["EDISC_S3_EVIDENCE_BUCKET"]
     lock = s3.get_object_lock_configuration(Bucket=bucket)["ObjectLockConfiguration"]

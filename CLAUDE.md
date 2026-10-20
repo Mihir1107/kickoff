@@ -9,7 +9,11 @@ The plan of record is in `docs/ARCHITECTURE.md` and `docs/adr/`. Read them befor
    (`completed_with_gaps` / `completed_unverified` / `failed`, never `completed`). Never swallow
    exceptions in the collection path: no bare `except`, no `except Exception: pass`, no logging-and-continuing.
 2. **Tamper evidence.** Every raw item is SHA-256 hashed at collection and stored in WORM (S3 Object
-   Lock, COMPLIANCE mode). Application code never modifies or deletes raw data.
+   Lock, COMPLIANCE mode). Application code never modifies raw data, and deletes it only through the
+   destruction workflow: under its own storage identity, after the owner closed, retention lapsed on
+   the store's clock, approved by a second, different principal, after the cooling-off, and never
+   while a legal hold applies in the database or on the stored object; every deletion is recorded in
+   custody and certified (M18, `docs/plans/m18.md` §12).
 3. **Chain of custody.** Every action (connect, collect, write, render, export) appends a custody event
    to a hash chain: `event_hash = sha256(prev_hash + canonical_json(event))`. `custody_events` is append-only (DB triggers).
 4. **Idempotency.** Key = `tenant_id + source + source_item_id + content_hash`. An edit is a new version, never an overwrite.
@@ -50,7 +54,7 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   `scripts/test_log.py`: `test-runs/<UTC time>-<label>/output.log` (everything printed, colour
   stripped, exit status), `artifacts/` (per failed integration test: worker logs, Temporal histories,
   custody streams, exactly as CI uploads), `phase-timings/`, and `on-failure.log` (the test stack's
-  logs) when it failed; `test-runs/latest` is the newest, 30 are kept (`TEST_RUNS_KEEP`). Run tests
+  logs) when it failed; `test-runs/latest` is the newest; pruned to 20 runs and 1 GiB (`TEST_RUNS_KEEP`, `TEST_RUNS_MAX_MB`; the newest and any run still being written are never removed). Run tests
   through make (or the wrapper), never a bare `pytest` whose output only the terminal sees: a one-off
   failure must be diagnosable from what it left.
 
@@ -68,7 +72,10 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   content reads are audited BEFORE bytes are returned.
 - Credentials only through `edisc_db.connection_tokens`; the API test suite scans every response for
   every credential it handed in.
-- Nothing is deleted: memberships and role assignments are ended (`removed_at` / `revoked_at`).
+- Nothing is deleted: memberships and role assignments are ended (`removed_at` / `revoked_at`). The one
+  exception is destruction (M18): the content columns of destroyed items (text, names, derivations)
+  are redacted by the `edisc_destroyer` role through one definer function; rows, ids, hashes and
+  custody chains stay.
 - No error path echoes a request value (ADR 0016 A8): 422 bodies come from `edisc_api.safe_errors`
   (type, sanitised loc, schema-only msg; never input/ctx); an unhandled error is a fixed 500 whose
   log line has types and frames, never the text; log lines carry `request_path` (static segments
@@ -440,11 +447,26 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   Superuser is only for migrations and tamper tests.
 - Evidence (`edisc_evidence.writer.EvidenceWriter`, ADR 0002 + amendment): pages -> job-scoped keys, single pass.
   Files -> content-addressed `t/{tenant}/files/sha256/...` (dedup per tenant): a key already `complete` in the registry
-  is a dedup hit (no lock, no upload); small files (<= `EDISC_EVIDENCE_SMALL_FILE_MAX_BYTES`) are hashed in memory and
+  is a dedup hit (no lock, no upload); a `destroying` or `destroyed` row never is: the key is written
+  again as a new generation under the content lock; small files (<= `EDISC_EVIDENCE_SMALL_FILE_MAX_BYTES`) are hashed in memory and
   PUT once (If-None-Match, lock, ChecksumSHA256) under the advisory lock; large files stream to the staging bucket and
   are server-side copied. Source hash persisted before any WORM write. A page's files are written with bounded
   concurrency (`EDISC_EVIDENCE_FILE_CONCURRENCY`). Evidence hash = our own SHA-256, never S3's composite.
   Lock set at create; abort multipart on any failure; `recover_pending` at job finalize. No evidence on local disk.
+- **Storage identities (M18 §3, ADR 0019 §2):** services never hold MinIO root (compose and
+  `minio-init` only; tests tamper through `s3_root`). `edisc-app` (API, every collection/export/
+  render/report worker; `EDISC_S3_ACCESS_KEY`), `edisc-hold` (`--holds` only), `edisc-destroy`
+  (destruction only); policies `infra/minio/policies/*.json`, each with explicit Denies (MinIO
+  does NOT evaluate bucket policies for IAM users: those are AWS-only, `infra/aws/`). Every process
+  runs `assert_least_privilege` at startup (refuses anything that may read the bucket policy) and,
+  outside local/test/ci, refuses another identity's credentials. MinIO authorizes a delete by
+  version as `s3:DeleteObject`; markers are denied with an `s3:versionid` Null condition. The
+  integration suite runs as `edisc-app`: a missing permission must fail a test. A new S3 call by
+  the product needs its permission in the right policy file and `tests/unit/test_storage_policies.py`.
+- **Export upload quotas (M18 §4):** per tenant (`tenant_quotas`, operator CLI `python -m
+  edisc_api.admin quota` only), usage COMPUTED from `slack_exports` under a per-tenant
+  `pg_advisory_xact_lock` in the create transaction (`edisc_api.quotas`); 409 `quota_exceeded`
+  never echoes the declared size; `expire-export-uploads` rejects uploads past their TTL.
 - Retention: rolling window `min(matter.retention_until, now + EDISC_EVIDENCE_RETENTION_WINDOW_DAYS)`, extended while the
   matter is active (extension job: backlog, required before production). Never lock for the full matter upfront.
   Dedup hits extend only below `EDISC_EVIDENCE_RETENTION_EXTEND_FLOOR_DAYS` (60), then to the target.

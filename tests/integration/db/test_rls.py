@@ -10,7 +10,7 @@ from edisc_core.settings import Settings
 from edisc_db.models import Matter
 from edisc_db.session import create_engine, session_factory, tenant_tx
 
-from .conftest import ALL_TABLES, TENANT_TABLES, Connect, Seeded, tenant_ctx
+from .conftest import ALL_TABLES, OPERATOR_TABLES, TENANT_TABLES, Connect, Seeded, tenant_ctx
 
 # Per table: overrides that make a copy of tenant A's row distinct, so only RLS can reject it.
 COPY_OVERRIDES = {
@@ -226,6 +226,27 @@ async def test_every_tenant_scoped_table_forces_rls_and_is_covered_here(connect:
     finally:
         await conn.close()
     tables = {r["relname"] for r in rows}
-    assert tables == set(TENANT_TABLES), tables ^ set(TENANT_TABLES)
+    covered = set(TENANT_TABLES) | set(OPERATOR_TABLES)
+    assert tables == covered, tables ^ covered
     for r in rows:
         assert r["relrowsecurity"] and r["relforcerowsecurity"] and r["policy"], r["relname"]
+
+
+async def test_operator_tables_are_isolated_and_read_only_for_the_app(
+    connect: Connect, two_tenants: tuple[Seeded, Seeded]
+) -> None:
+    """``tenant_quotas`` / ``tenant_quota_changes`` (M18 §4): written by the operator CLI as the
+    owner; the app role reads its own tenant's rows only and can never write them."""
+    a, _ = two_tenants
+    app = await connect("app")
+    try:
+        for table in OPERATOR_TABLES:
+            assert await app.fetchval(f"SELECT count(*) FROM {table}") == 0  # no tenant context
+            async with tenant_ctx(app, a.tenant_id):
+                seen = await app.fetch(f"SELECT DISTINCT tenant_id FROM {table}")
+                assert [r["tenant_id"] for r in seen] == [a.tenant_id], table
+            with pytest.raises(asyncpg.InsufficientPrivilegeError, match="permission denied"):
+                async with tenant_ctx(app, a.tenant_id):
+                    await app.execute(f"INSERT INTO {table} SELECT * FROM {table} LIMIT 1")
+    finally:
+        await app.close()

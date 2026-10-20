@@ -804,6 +804,7 @@ class SlackExport(Base):
             ["tenant_id", "connection_id"], ["connections.tenant_id", "connections.id"]
         ),
         Index(None, "tenant_id", "client_id"),
+        Index(None, "tenant_id", "status"),  # quota usage, upload expiry (migration 0046)
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
@@ -922,6 +923,32 @@ class RetentionGap(Base):
     unprotected_from: Mapped[datetime] = mapped_column(TZ)
     unprotected_until: Mapped[datetime] = mapped_column(TZ)
     outcome: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+
+
+class TenantQuota(Base):
+    """Export upload limits of one tenant, set by the operator CLI only (migration 0046, M18 §4)."""
+
+    __tablename__ = "tenant_quotas"
+    __table_args__ = (ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),)
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    export_bytes_in_flight: Mapped[int] = mapped_column(BigInteger)
+    export_bytes_stored: Mapped[int] = mapped_column(BigInteger)
+    export_uploads_concurrent: Mapped[int] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+
+
+class TenantQuotaChange(Base):
+    __tablename__ = "tenant_quota_changes"
+    __table_args__ = (ForeignKeyConstraint(["tenant_id"], ["tenants.id"]), Index(None, "tenant_id"))
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    operator: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text)
+    before: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    after: Mapped[dict[str, Any]] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
 
 

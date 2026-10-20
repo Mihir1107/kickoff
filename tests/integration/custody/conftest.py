@@ -110,7 +110,7 @@ async def collect_batch(
     }
     body = canonical_json(page)
     ev_id = new_id()
-    key = f"raw/{job.tenant_id}/{job.job_id}/{ev_id}.json"
+    key = f"t/{job.tenant_id}/jobs/{job.job_id}/pages/{ev_id}.json"
     async with tenant_tx(sessions, job.tenant_id) as s:
         retention = (
             await s.execute(

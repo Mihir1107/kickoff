@@ -2413,6 +2413,30 @@
         "title": "PrincipalOut",
         "type": "object"
       },
+      "QuotaValuesOut": {
+        "additionalProperties": false,
+        "properties": {
+          "export_bytes_in_flight": {
+            "title": "Export Bytes In Flight",
+            "type": "integer"
+          },
+          "export_bytes_stored": {
+            "title": "Export Bytes Stored",
+            "type": "integer"
+          },
+          "export_uploads_concurrent": {
+            "title": "Export Uploads Concurrent",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "export_bytes_in_flight",
+          "export_bytes_stored",
+          "export_uploads_concurrent"
+        ],
+        "title": "QuotaValuesOut",
+        "type": "object"
+      },
       "ReauthDeadlineIn": {
         "additionalProperties": false,
         "description": "ADR 0016 A6, A2.2: 24 hours .. 90 days; outside is refused (422), never clamped.",
@@ -3686,6 +3710,24 @@
           "revoked"
         ],
         "title": "SessionsRevokedOut",
+        "type": "object"
+      },
+      "TenantQuotasOut": {
+        "additionalProperties": false,
+        "description": "M18 §4, D10: set by the operator only; tenant admins read limits and usage.",
+        "properties": {
+          "limits": {
+            "$ref": "#/components/schemas/QuotaValuesOut"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/QuotaValuesOut"
+          }
+        },
+        "required": [
+          "limits",
+          "usage"
+        ],
+        "title": "TenantQuotasOut",
         "type": "object"
       },
       "TenantSettingsOut": {
@@ -5905,7 +5947,7 @@
                 }
               }
             },
-            "description": "error: conflict"
+            "description": "error: conflict, quota_exceeded"
           },
           "413": {
             "content": {
@@ -5970,6 +6012,7 @@
           "internal_error",
           "malformed_body",
           "not_found",
+          "quota_exceeded",
           "reauth_required",
           "service_busy",
           "too_many_requests",
@@ -15448,6 +15491,107 @@
           "validation_error"
         ],
         "x-permission": "authenticated"
+      }
+    },
+    "/v1/tenant/quotas": {
+      "get": {
+        "description": "The tenant's export upload quotas and their usage (M18 §4). Raised only by the operator.",
+        "operationId": "get_tenant_quotas",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantQuotasOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: ambiguous_credentials"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: cross_site, forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: not_found"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: too_many_requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: db_pool_exhausted, service_busy"
+          }
+        },
+        "summary": "Get Tenant Quotas",
+        "x-error-codes": [
+          "ambiguous_credentials",
+          "cross_site",
+          "db_pool_exhausted",
+          "forbidden",
+          "internal_error",
+          "not_found",
+          "service_busy",
+          "too_many_requests",
+          "unauthorized"
+        ],
+        "x-permission": "tenant.admin"
       }
     },
     "/v1/tenant/settings": {

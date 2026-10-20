@@ -85,6 +85,13 @@ class E:
     DECLARED_HASH_MISMATCH = Code(
         "declared_hash_mismatch", 422, "the upload differs from its declared SHA-256"
     )
+    QUOTA_EXCEEDED = Code("quota_exceeded", 409, "the tenant's export upload quota is used up")
+    # legal hold (M18)
+    LEGAL_HOLD = Code("legal_hold", 409, "a legal hold covers it")
+    SECOND_ADMIN_REQUIRED = Code(
+        "second_admin_required", 409, "the action needs a second, different tenant admin"
+    )
+    SAME_PRINCIPAL = Code("same_principal", 403, "the requester cannot also approve")
     # browser sessions
     NOT_A_SESSION = Code("not_a_session", 400, "a route for browser sessions called without one")
     INSTALL_UNAVAILABLE = Code(

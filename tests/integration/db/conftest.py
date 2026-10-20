@@ -402,9 +402,22 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
 async def two_tenants(connect: Connect) -> tuple[Seeded, Seeded]:
     conn = await connect("app")
     try:
-        return await seed_tenant(conn), await seed_tenant(conn)
+        seeded = await seed_tenant(conn), await seed_tenant(conn)
     finally:
         await conn.close()
+    owner = await connect("owner")  # the operator tables (M18 §4): the app role cannot write them
+    try:
+        for one in seeded:
+            async with tenant_ctx(owner, one.tenant_id):
+                await owner.execute(
+                    "INSERT INTO tenant_quotas (tenant_id, export_bytes_in_flight, export_bytes_stored,"
+                    " export_uploads_concurrent) VALUES ($1, 10, 10, 1)", one.tenant_id)  # fmt: skip
+                await owner.execute(
+                    "INSERT INTO tenant_quota_changes (id, tenant_id, operator, reason, after)"
+                    " VALUES (gen_random_uuid(), $1, 'operator:seed', 'seed', '{}')", one.tenant_id)  # fmt: skip
+    finally:
+        await owner.close()
+    return seeded
 
 
 TENANT_TABLES = [
@@ -460,4 +473,6 @@ SEALED_STUB = (
 SEALED_BYTES = (
     b'{"alg":"a","ct":"c","key_id":"k","key_version":"1","nonce":"n","v":1,"wrapped_dek":"w"}'
 )
-ALL_TABLES = ["tenants", *TENANT_TABLES]
+# tenant tables only the operator writes (owner credentials; the app role may only read them)
+OPERATOR_TABLES = ["tenant_quotas", "tenant_quota_changes"]
+ALL_TABLES = ["tenants", *TENANT_TABLES, *OPERATOR_TABLES]

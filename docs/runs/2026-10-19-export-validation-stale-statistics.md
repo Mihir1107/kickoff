@@ -82,8 +82,23 @@ until autoanalyze catches up at 2 % of the table.
 "After" was measured on the first version of the fix, which counted inside the batch
 transaction. The final version moves that one statement to its own transaction after the commit,
 because the in-transaction version deadlocked (ADR 0015 §24.20). The ANALYZE schedule is the same
-and the cost is one extra short statement per batch. It was not re-measured: the disk guard
-refused a fresh stack at 11 GB free. Re-run with `scripts/measure_new_tenant.py` on a fresh stack.
+and the cost is one extra short statement per batch. It was re-measured on 2026-10-20 on the final
+code (`d2b77e4`), on a fresh stack, with `--conversations 10 --days 5 --messages 5000`:
+
+| | First version of the fix | Final code (`d2b77e4`) |
+|---|---|---|
+| Wall time | 790 s | 872.6 s |
+| Items inserted | 318,860 | 318,860 |
+| `items` tuples read | 2,827,369 | 2,825,474 |
+| Tuples read per item | 8.9 | 8.9 |
+| Per item | 2.5 ms | 2.7 ms |
+| ANALYZEs of `items` | 9 | 9 |
+
+The database work is the same to within 0.07 %, with the same nine refreshes. The wall time is 10 %
+longer, but this run was not on a quiet machine (an editor session and a lint/typecheck ran
+alongside), so the difference is within this laptop's noise. The extra statement per batch is not
+visible in the tuples read. The integration mutation `pipeline_never_refreshes_items` (count after
+commit removed) was re-run on the final code the same day: caught (the job's counter stays 0).
 
 Progress of the "before" run, sampled every 2 min:
 - **Collapsing rate:** items per 2 min fell from about 34,000 (minutes 2-4) to about 9,000 (minutes

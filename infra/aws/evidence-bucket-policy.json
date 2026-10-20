@@ -1,0 +1,119 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "NoDeleteMarkers",
+      "Effect": "Deny",
+      "Principal": {
+        "AWS": [
+          "*"
+        ]
+      },
+      "Action": [
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@EVIDENCE@/*"
+      ],
+      "Condition": {
+        "Null": {
+          "s3:versionid": "true"
+        }
+      }
+    },
+    {
+      "Sid": "VersionDeletesOnlyByTheDestructionIdentity",
+      "Effect": "Deny",
+      "Principal": {
+        "AWS": [
+          "*"
+        ]
+      },
+      "Action": [
+        "s3:DeleteObject",
+        "s3:DeleteObjectVersion"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@EVIDENCE@/*"
+      ],
+      "Condition": {
+        "ArnNotEquals": {
+          "aws:PrincipalArn": [
+            "@DESTROY_ROLE_ARN@"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "HoldFlagsOnlyByTheHoldIdentity",
+      "Effect": "Deny",
+      "Principal": {
+        "AWS": [
+          "*"
+        ]
+      },
+      "Action": [
+        "s3:PutObjectLegalHold"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@EVIDENCE@/*"
+      ],
+      "Condition": {
+        "ArnNotEquals": {
+          "aws:PrincipalArn": [
+            "@HOLD_ROLE_ARN@"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "NoGovernanceBypass",
+      "Effect": "Deny",
+      "Principal": {
+        "AWS": [
+          "*"
+        ]
+      },
+      "Action": [
+        "s3:BypassGovernanceRetention"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@EVIDENCE@/*"
+      ]
+    },
+    {
+      "Sid": "NoBucketConfiguration",
+      "Effect": "Deny",
+      "Principal": {
+        "AWS": [
+          "*"
+        ]
+      },
+      "Action": [
+        "s3:PutBucket*",
+        "s3:DeleteBucket*",
+        "s3:PutLifecycleConfiguration",
+        "s3:PutBucketObjectLockConfiguration"
+      ],
+      "Resource": [
+        "arn:aws:s3:::@EVIDENCE@"
+      ]
+    },
+    {
+      "Sid": "WritesOnlyUnderEvidencePrefixes",
+      "Effect": "Deny",
+      "Principal": {
+        "AWS": [
+          "*"
+        ]
+      },
+      "Action": [
+        "s3:PutObject"
+      ],
+      "NotResource": [
+        "arn:aws:s3:::@EVIDENCE@/t/*",
+        "arn:aws:s3:::@EVIDENCE@/custody-anchors/*"
+      ]
+    }
+  ]
+}

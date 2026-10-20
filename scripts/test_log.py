@@ -13,7 +13,14 @@ A failure seen once and lost with the terminal scrollback cannot be diagnosed (A
   Temporal histories and custody streams (``tests/integration/artifacts.py``) exactly as on CI. An
   explicit value (CI sets both) wins.
 - ``--on-failure``: run when CMD fails (the test stack's logs), its output saved as ``on-failure.log``.
-- The newest ``TEST_RUNS_KEEP`` (default 30) run directories are kept; older ones are removed.
+- Pruned after every run, newest first: at most ``TEST_RUNS_KEEP`` (default 20) runs and
+  ``TEST_RUNS_MAX_MB`` (default 1024) MiB in total. 20 runs cover a working session's history
+  (diagnosing an intermittent failure means comparing it with the passing runs around it); the cap
+  keeps a few failed full suites (their artifacts: worker logs, Temporal histories, custody streams,
+  tens to hundreds of MiB each) within a small share of the margin above the disk guard
+  (``MIN_FREE_GB``, 15). The newest run is always kept, however large (it is the one to read), and
+  a run still being written (no ``# finished`` line, younger than two days) is never removed: a
+  concurrent run's directory must not vanish under it.
 - ``test-runs/latest`` points at the newest one.
 
 The exit status is CMD's.
@@ -41,10 +48,34 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _prune(keep: int) -> None:
-    runs = sorted(p for p in ROOT.iterdir() if p.is_dir() and not p.is_symlink())
-    for old in runs[: max(0, len(runs) - keep)]:
-        shutil.rmtree(old, ignore_errors=True)
+IN_PROGRESS_MAX_AGE_S = 2 * 86400  # older without a "# finished" line: killed, prunable
+
+
+def _size(run: Path) -> int:
+    return sum(f.stat().st_size for f in run.rglob("*") if f.is_file() and not f.is_symlink())
+
+
+def _in_progress(run: Path) -> bool:
+    log = run / "output.log"
+    try:
+        if time.time() - log.stat().st_mtime > IN_PROGRESS_MAX_AGE_S:
+            return False
+        with log.open("rb") as fh:
+            fh.seek(max(0, log.stat().st_size - 512))
+            return b"# finished:" not in fh.read()
+    except FileNotFoundError:
+        return time.time() - run.stat().st_mtime <= IN_PROGRESS_MAX_AGE_S
+
+
+def _prune(keep: int, max_bytes: int, current: Path) -> None:
+    runs = sorted((p for p in ROOT.iterdir() if p.is_dir() and not p.is_symlink()), reverse=True)
+    kept, total = 0, 0
+    for run in runs:  # newest first
+        size = _size(run)
+        if run == current or (kept < keep and total + size <= max_bytes) or kept == 0:
+            kept, total = kept + 1, total + size
+        elif not _in_progress(run):
+            shutil.rmtree(run, ignore_errors=True)
 
 
 def main() -> int:
@@ -116,8 +147,9 @@ def main() -> int:
                 args.on_failure, shell=True, stdout=fh, stderr=subprocess.STDOUT, check=False
             )
 
-    keep = int(os.environ.get("TEST_RUNS_KEEP", "30"))
-    _prune(keep)
+    keep = int(os.environ.get("TEST_RUNS_KEEP", "20"))
+    max_mb = int(os.environ.get("TEST_RUNS_MAX_MB", "1024"))
+    _prune(keep, max_mb * 1024 * 1024, run_dir)
     print(f"test output saved to {log_path}", file=sys.stderr)
     return status
 

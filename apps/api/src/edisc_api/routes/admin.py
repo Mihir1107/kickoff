@@ -3,6 +3,7 @@ memberships and assignments are ended, and every change is an audit event."""
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from datetime import datetime
 from typing import Literal
@@ -14,7 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from edisc_api import audit
+from edisc_api import audit, quotas
 from edisc_api.app import CallerDep, RequestIdDep, ResourcesDep
 from edisc_api.auth import require_recent_sign_in
 from edisc_api.authz import ROLES, TENANT, P, Scope, ancestors, authorize, perm
@@ -68,6 +69,19 @@ class MemberIn(Strict):
 
 class TenantSettingsOut(Strict):
     reauth_deadline_hours: int
+
+
+class QuotaValuesOut(Strict):
+    export_bytes_in_flight: int
+    export_bytes_stored: int
+    export_uploads_concurrent: int
+
+
+class TenantQuotasOut(Strict):
+    """M18 §4, D10: set by the operator only; tenant admins read limits and usage."""
+
+    limits: QuotaValuesOut
+    usage: QuotaValuesOut
 
 
 class ReauthDeadlineIn(Strict):
@@ -566,3 +580,20 @@ async def set_reauth_deadline(
         )  # fmt: skip
     await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
     return TenantSettingsOut(reauth_deadline_hours=body.hours)
+
+
+@router.get(
+    "/tenant/quotas",
+    response_model=TenantQuotasOut,
+    openapi_extra=perm(P.TENANT_ADMIN, E.FORBIDDEN, E.NOT_FOUND),
+)
+async def get_tenant_quotas(caller: CallerDep, res: ResourcesDep) -> TenantQuotasOut:
+    """The tenant's export upload quotas and their usage (M18 §4). Raised only by the operator."""
+    async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        await authorize(s, caller, P.TENANT_ADMIN, TENANT)
+        limits = await quotas.limits(s, res.settings, caller.tenant_id)
+        used = await quotas.usage(s)
+    return TenantQuotasOut(
+        limits=QuotaValuesOut(**dataclasses.asdict(limits)),
+        usage=QuotaValuesOut(**dataclasses.asdict(used)),
+    )

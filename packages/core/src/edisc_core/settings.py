@@ -118,8 +118,16 @@ class Settings(BaseSettings):
 
     s3_endpoint: str | None = None  # None = AWS default endpoint
     s3_region: str = "us-east-1"
+    # storage identities (M18 §3): the app's pair below; the holds and destruction workers' pairs are
+    # loaded ONLY by those workers (edisc_evidence.s3.s3_client(identity=...)). Root never: it is a
+    # provisioning credential (infra/minio/init.sh), and every process refuses an identity that can
+    # read the bucket policy (edisc_evidence.identity.assert_least_privilege).
     s3_access_key: SecretStr | None = None
     s3_secret_key: SecretStr | None = None
+    s3_hold_access_key: SecretStr | None = None
+    s3_hold_secret_key: SecretStr | None = None
+    s3_destroy_access_key: SecretStr | None = None
+    s3_destroy_secret_key: SecretStr | None = None
     s3_evidence_bucket: str = "edisc-evidence"
     s3_staging_bucket: str = (
         "edisc-staging"  # unlocked, short expiry; files land here before the WORM copy
@@ -173,6 +181,11 @@ class Settings(BaseSettings):
         ge=1024,
         description="largest single element of a metadata JSON array (streamed element by element)",
     )
+    # per-tenant upload quotas (M18 §4, D10): the defaults for a tenant without its own row in
+    # tenant_quotas (set by the operator CLI only; tenant admins read them, never raise them)
+    export_quota_bytes_in_flight: int = Field(default=200 * 1024**3, ge=1)
+    export_quota_bytes_stored: int = Field(default=2 * 1024**4, ge=1)
+    export_quota_uploads_concurrent: int = Field(default=3, ge=1)
     export_upload_ttl_days: int = Field(
         default=7,
         ge=1,

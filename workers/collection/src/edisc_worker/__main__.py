@@ -36,6 +36,7 @@ from edisc_core import loopblock, loopguard
 from edisc_core.logs import configure_logging, get_logger
 from edisc_core.settings import Settings
 from edisc_db.session import create_engine, session_factory, warm_pool
+from edisc_evidence.identity import assert_least_privilege, refuse_foreign_identities
 from edisc_evidence.s3 import s3_client
 from edisc_worker.activities import Activities
 from edisc_worker.contracts import EXPORTS_QUEUE, MAINTENANCE_QUEUE, task_queue
@@ -86,6 +87,7 @@ def build_connectors(
 async def activities_for(
     settings: Settings, sources: Sequence[str], client: Client
 ) -> AsyncIterator[tuple[Activities, MaintenanceActivities]]:
+    refuse_foreign_identities(settings, "app")  # never the hold or destroy credentials (M18 §3)
     engine = create_engine(settings, "app")
     sweeper = create_engine(settings, "sweeper", pool_size=2)
     redis = aioredis.from_url(
@@ -98,6 +100,7 @@ async def activities_for(
         sessions = session_factory(engine)
         limiter = RateLimiter(redis, settings.rate_limits)
         async with s3_client(settings) as s3:
+            await assert_least_privilege(s3, settings)  # never root (M18 §3, T12)
             result = await reconcile_tokens(session_factory(sweeper), sessions, s3, settings)
             log.info("token refresh journal reconciled", **result)
             connectors = build_connectors(
