@@ -6,6 +6,8 @@ Redis limiter. At startup, journaled token refreshes are reconciled (ADR 0009) b
 ``--exports`` also runs the ``exports`` queue: hash, lock and validate uploaded Slack exports (ADR 0014).
 ``--renders`` also runs the ``renders`` queue: RSMF renders of sealed jobs (ADR 0015).
 ``--reports`` also runs the report queue of this runtime: collection reports (ADR 0018).
+``--holds`` runs ONLY the ``holds`` queue (legal-hold S3 flags, M18 §1.3) as the hold storage
+identity; it refuses every other queue (a process loads only its own identity).
 """
 
 from __future__ import annotations
@@ -203,6 +205,37 @@ async def run(
         await asyncio.gather(*(w.run() for w in workers))
 
 
+async def run_holds(queue: str | None = None) -> None:
+    """The holds worker: the hold identity for flags, the app identity for anchors (M18 §3)."""
+    from edisc_worker.contracts import HOLDS_QUEUE
+    from edisc_worker.hold_activities import HoldActivities
+    from edisc_worker.holds import HoldFlagger
+    from edisc_worker.workflows import LegalHoldWorkflow
+
+    settings = Settings()
+    refuse_foreign_identities(settings, "hold")  # never the destroy credentials
+    client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+    engine = create_engine(settings, "app")
+    try:
+        await warm_pool(engine)
+        async with s3_client(settings) as app_s3, s3_client(settings, "hold") as hold_s3:
+            await assert_least_privilege(app_s3, settings)
+            await assert_least_privilege(hold_s3, settings)
+            flagger = HoldFlagger(session_factory(engine), app_s3, hold_s3, settings)
+            worker = Worker(
+                client, task_queue=queue or HOLDS_QUEUE, workflows=[LegalHoldWorkflow],
+                activities=HoldActivities(flagger).all(),
+            )  # fmt: skip
+            log.info("worker started", task_queues=[queue or HOLDS_QUEUE])
+            loopguard.install_from_env(
+                asyncio.get_running_loop(), permitted=settings.env.is_ephemeral_test, log=log.error
+            )
+            loopblock.install_from_env(permitted=settings.env.is_ephemeral_test, log=log.error)
+            await worker.run()
+    finally:
+        await engine.dispose()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="edisc_worker")
     ap.add_argument("--source", action="append", dest="sources", help="repeatable; default dummy")
@@ -213,7 +246,19 @@ def main() -> None:
     ap.add_argument("--queue", help="task queue override (one source only; tests and soak runs)")
     ap.add_argument("--renders-queue", help="renders queue override (tests; default: by versions)")
     ap.add_argument("--reports-queue", help="reports queue override (tests; default: by runtime)")
+    ap.add_argument(
+        "--holds", action="store_true", help="ONLY the legal-hold flags (hold identity)"
+    )
+    ap.add_argument("--holds-queue", help="holds queue override (tests; default: holds)")
     args = ap.parse_args()
+    if args.holds:
+        others = [f for f in ("sources", "maintenance", "exports", "renders", "reports", "queue")
+                  if getattr(args, f)]  # fmt: skip
+        if others:
+            ap.error(f"--holds runs no other queue (also given: {', '.join(others)})")
+        configure_logging()
+        asyncio.run(run_holds(args.holds_queue))
+        return
     sources = args.sources or ["dummy"]
     if args.queue and len(sources) != 1:
         ap.error("--queue needs exactly one --source")

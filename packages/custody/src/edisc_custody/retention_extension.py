@@ -10,6 +10,9 @@ floor/target rule as dedup hits (``extension_needed``):
   matters referencing it)``.
 - **Client-level evidence:** validated (``ready``) Slack exports while their client is ACTIVE (not
   closed). They belong to no matter until a job uses them. Target: ``now + window``.
+- **Under a legal hold (M18 §1.2):** a held matter's evidence (a hold on it or its client) is
+  extended whether the matter is open or closed and past its retention date (target ``now +
+  window``, no cap), and every locked export of a client held directly, whatever its status.
 
 Nothing is ever shortened. Closing the matter (or client) stops extension and objects expire on schedule.
 After a reopen, an object found with LAPSED retention is re-locked if its pinned version still exists, or
@@ -46,8 +49,11 @@ from edisc_evidence.writer import EvidenceWriter
 ACTOR = "system:retention"
 
 MATTER_CANDIDATES = (
-    "WITH active AS (SELECT id, retention_until FROM matters"
-    "  WHERE closed_at IS NULL AND retention_until > :now),"
+    # a matter under a legal hold is kept locked whether it is open or closed, past its own
+    # retention date (no cap: NULL), M18 §1.2; matter_held is the one definition (migration 0047)
+    "WITH active AS (SELECT id,"
+    "   CASE WHEN matter_held(id) THEN NULL ELSE retention_until END AS retention_until"
+    "  FROM matters WHERE (closed_at IS NULL AND retention_until > :now) OR matter_held(id)),"
     " refs AS ("
     "  SELECT e.id, m.id AS matter_id, m.retention_until FROM active m"
     "   JOIN collection_jobs j ON j.matter_id = m.id"
@@ -69,8 +75,9 @@ MATTER_CANDIDATES = (
     # an archive entry is protected by locking its archive (the entry is never an object of its own)
     " owned AS (SELECT coalesce(x.archive_evidence_id, x.id) AS id, r.matter_id, r.retention_until"
     "  FROM refs r JOIN evidence_objects x ON x.id = r.id)"
-    " SELECT e.id, e.storage_key, e.version_id, e.retain_until, max(r.retention_until) AS until,"
-    " (array_agg(r.matter_id ORDER BY r.retention_until DESC))[1] AS owner"
+    " SELECT e.id, e.storage_key, e.version_id, e.retain_until,"
+    " CASE WHEN bool_or(r.retention_until IS NULL) THEN NULL ELSE max(r.retention_until) END AS until,"
+    " (array_agg(r.matter_id ORDER BY r.retention_until DESC NULLS FIRST))[1] AS owner"
     " FROM owned r JOIN evidence_objects e ON e.id = r.id"
     " WHERE e.state = 'complete' AND e.retain_until < :need"
     " AND (CAST(:after AS uuid) IS NULL OR e.id > :after)"
@@ -81,7 +88,9 @@ EXPORT_CANDIDATES = (
     " (array_agg(c.id ORDER BY c.id))[1] AS owner"
     " FROM slack_exports x JOIN clients c ON c.id = x.client_id"
     " JOIN evidence_objects e ON e.id = x.evidence_object_id"
-    " WHERE x.status = 'ready' AND c.closed_at IS NULL AND e.state = 'complete'"
+    # a validated export of an open client, or ANY locked export of a client held directly
+    " WHERE ((x.status = 'ready' AND c.closed_at IS NULL) OR client_directly_held(c.id))"
+    " AND e.state = 'complete'"
     " AND e.retain_until < :need AND (CAST(:after AS uuid) IS NULL OR e.id > :after)"
     " GROUP BY e.id ORDER BY e.id LIMIT :n"
 )

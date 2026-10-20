@@ -198,6 +198,10 @@
             "title": "Created At",
             "type": "string"
           },
+          "held": {
+            "title": "Held",
+            "type": "boolean"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -217,7 +221,8 @@
           "name",
           "is_default",
           "created_at",
-          "closed_at"
+          "closed_at",
+          "held"
         ],
         "title": "ClientOut",
         "type": "object"
@@ -314,6 +319,30 @@
           "updated_at"
         ],
         "title": "ConnectionOut",
+        "type": "object"
+      },
+      "CoolingOffIn": {
+        "additionalProperties": false,
+        "description": "M18 D4: 7 .. 90 days; outside is refused (422), never clamped.",
+        "properties": {
+          "days": {
+            "maximum": 90.0,
+            "minimum": 7.0,
+            "title": "Days",
+            "type": "integer"
+          },
+          "reason": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "days",
+          "reason"
+        ],
+        "title": "CoolingOffIn",
         "type": "object"
       },
       "CsrfOut": {
@@ -982,6 +1011,68 @@
         "title": "FinishWithoutAccessIn",
         "type": "object"
       },
+      "FlagsOut": {
+        "additionalProperties": false,
+        "description": "The S3 legal-hold flags (D2), as the store confirmed them: ``objects_in_scope`` is null until\na full pass over the scope finished; ``pending`` = in scope and not yet confirmed.",
+        "properties": {
+          "last_pass_completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Pass Completed At"
+          },
+          "objects_cleared": {
+            "title": "Objects Cleared",
+            "type": "integer"
+          },
+          "objects_flagged": {
+            "title": "Objects Flagged",
+            "type": "integer"
+          },
+          "objects_in_scope": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Objects In Scope"
+          },
+          "pending": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "objects_flagged",
+          "objects_in_scope",
+          "pending",
+          "objects_cleared",
+          "last_pass_completed_at"
+        ],
+        "title": "FlagsOut",
+        "type": "object"
+      },
       "GroupIn": {
         "additionalProperties": false,
         "properties": {
@@ -1059,6 +1150,179 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HoldIn": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "HoldIn",
+        "type": "object"
+      },
+      "HoldOut": {
+        "additionalProperties": false,
+        "properties": {
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "client_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Id"
+          },
+          "cooling_off_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cooling Off Until"
+          },
+          "flags": {
+            "$ref": "#/components/schemas/FlagsOut"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "matter_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matter Id"
+          },
+          "placed_at": {
+            "format": "date-time",
+            "title": "Placed At",
+            "type": "string"
+          },
+          "placed_by": {
+            "title": "Placed By",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference"
+          },
+          "release_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Reason"
+          },
+          "release_request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReleaseRequestOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "released_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Released At"
+          },
+          "released_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Released By"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "scope",
+          "matter_id",
+          "client_id",
+          "reason",
+          "reference",
+          "placed_by",
+          "placed_at",
+          "active",
+          "released_at",
+          "released_by",
+          "release_reason",
+          "cooling_off_until",
+          "flags",
+          "release_request"
+        ],
+        "title": "HoldOut",
         "type": "object"
       },
       "InstallIn": {
@@ -1579,6 +1843,10 @@
             "title": "Created At",
             "type": "string"
           },
+          "held": {
+            "title": "Held",
+            "type": "boolean"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -1600,7 +1868,8 @@
           "name",
           "retention_until",
           "created_at",
-          "closed_at"
+          "closed_at",
+          "held"
         ],
         "title": "MatterOut",
         "type": "object"
@@ -1872,6 +2141,35 @@
           "next_cursor"
         ],
         "title": "Page[GroupOut]",
+        "type": "object"
+      },
+      "Page_HoldOut_": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/HoldOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "Page[HoldOut]",
         "type": "object"
       },
       "Page_JobOut_": {
@@ -2524,6 +2822,59 @@
           "not_matched"
         ],
         "title": "ReconciliationOut",
+        "type": "object"
+      },
+      "ReleaseIn": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "ReleaseIn",
+        "type": "object"
+      },
+      "ReleaseRequestOut": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "requested_at": {
+            "format": "date-time",
+            "title": "Requested At",
+            "type": "string"
+          },
+          "requested_by": {
+            "title": "Requested By",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "requested_by",
+          "requested_at",
+          "expires_at",
+          "reason"
+        ],
+        "title": "ReleaseRequestOut",
         "type": "object"
       },
       "RenderFileOut": {
@@ -3733,13 +4084,18 @@
       "TenantSettingsOut": {
         "additionalProperties": false,
         "properties": {
+          "hold_cooling_off_days": {
+            "title": "Hold Cooling Off Days",
+            "type": "integer"
+          },
           "reauth_deadline_hours": {
             "title": "Reauth Deadline Hours",
             "type": "integer"
           }
         },
         "required": [
-          "reauth_deadline_hours"
+          "reauth_deadline_hours",
+          "hold_cooling_off_days"
         ],
         "title": "TenantSettingsOut",
         "type": "object"
@@ -5181,7 +5537,7 @@
                 }
               }
             },
-            "description": "error: conflict"
+            "description": "error: conflict, legal_hold"
           },
           "422": {
             "content": {
@@ -5233,6 +5589,7 @@
           "db_pool_exhausted",
           "forbidden",
           "internal_error",
+          "legal_hold",
           "not_found",
           "reauth_required",
           "service_busy",
@@ -6020,6 +6377,143 @@
           "validation_error"
         ],
         "x-permission": "connection.manage"
+      }
+    },
+    "/v1/clients/{client_id}/legal-holds": {
+      "post": {
+        "description": "A hold on the client: every matter of it, and its Slack exports.",
+        "operationId": "place_client_hold",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HoldIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HoldOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: ambiguous_credentials, malformed_body"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: reauth_required, unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: cross_site, csrf, forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: not_found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorOut"
+                }
+              }
+            },
+            "description": "error: validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: too_many_requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: db_pool_exhausted, service_busy"
+          }
+        },
+        "summary": "Place Client Hold",
+        "x-error-codes": [
+          "ambiguous_credentials",
+          "cross_site",
+          "csrf",
+          "db_pool_exhausted",
+          "forbidden",
+          "internal_error",
+          "malformed_body",
+          "not_found",
+          "reauth_required",
+          "service_busy",
+          "too_many_requests",
+          "unauthorized",
+          "validation_error"
+        ],
+        "x-permission": "legal_hold.place"
       }
     },
     "/v1/clients/{client_id}/matters": {
@@ -11007,6 +11501,600 @@
         "x-permission": "job.read"
       }
     },
+    "/v1/legal-holds": {
+      "get": {
+        "description": "The holds the caller may read: ``legal_hold.read`` at the hold's matter, its client or the\ntenant (a join on role assignments, like ``GET /v1/jobs``).",
+        "operationId": "list_holds",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "matter_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Matter Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "client_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Client Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "active",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Active"
+            }
+          },
+          {
+            "description": "opaque cursor from the previous page",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "opaque cursor from the previous page",
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_HoldOut_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: ambiguous_credentials"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: cross_site"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnprocessableOut"
+                }
+              }
+            },
+            "description": "error: cursor_mismatch, unprocessable, validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: too_many_requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: db_pool_exhausted, service_busy"
+          }
+        },
+        "summary": "List Holds",
+        "x-error-codes": [
+          "ambiguous_credentials",
+          "cross_site",
+          "cursor_mismatch",
+          "db_pool_exhausted",
+          "internal_error",
+          "service_busy",
+          "too_many_requests",
+          "unauthorized",
+          "unprocessable",
+          "validation_error"
+        ],
+        "x-permission": "visible"
+      }
+    },
+    "/v1/legal-holds/{hold_id}": {
+      "get": {
+        "operationId": "get_hold",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hold_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Hold Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HoldOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: ambiguous_credentials"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: cross_site, forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: not_found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorOut"
+                }
+              }
+            },
+            "description": "error: validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: too_many_requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: db_pool_exhausted, service_busy"
+          }
+        },
+        "summary": "Get Hold",
+        "x-error-codes": [
+          "ambiguous_credentials",
+          "cross_site",
+          "db_pool_exhausted",
+          "forbidden",
+          "internal_error",
+          "not_found",
+          "service_busy",
+          "too_many_requests",
+          "unauthorized",
+          "validation_error"
+        ],
+        "x-permission": "legal_hold.read"
+      }
+    },
+    "/v1/legal-holds/{hold_id}/release": {
+      "post": {
+        "description": "Ask for a release; the hold stays in force until a second, different tenant admin approves.",
+        "operationId": "request_hold_release",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hold_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Hold Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HoldOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: ambiguous_credentials, malformed_body"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: reauth_required, unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: cross_site, csrf, forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: conflict, second_admin_required"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorOut"
+                }
+              }
+            },
+            "description": "error: validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: too_many_requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: db_pool_exhausted, service_busy"
+          }
+        },
+        "summary": "Request Hold Release",
+        "x-error-codes": [
+          "ambiguous_credentials",
+          "conflict",
+          "cross_site",
+          "csrf",
+          "db_pool_exhausted",
+          "forbidden",
+          "internal_error",
+          "malformed_body",
+          "not_found",
+          "reauth_required",
+          "second_admin_required",
+          "service_busy",
+          "too_many_requests",
+          "unauthorized",
+          "validation_error"
+        ],
+        "x-permission": "legal_hold.release"
+      }
+    },
+    "/v1/legal-holds/{hold_id}/release/approve": {
+      "post": {
+        "description": "The second person: releases the hold now; the cooling-off starts; the flags are cleared in\nthe background on versions no other active hold covers.",
+        "operationId": "approve_hold_release",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hold_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Hold Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HoldOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: ambiguous_credentials"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: reauth_required, unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: cross_site, csrf, forbidden, same_principal"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorOut"
+                }
+              }
+            },
+            "description": "error: validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: too_many_requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: db_pool_exhausted, service_busy"
+          }
+        },
+        "summary": "Approve Hold Release",
+        "x-error-codes": [
+          "ambiguous_credentials",
+          "conflict",
+          "cross_site",
+          "csrf",
+          "db_pool_exhausted",
+          "forbidden",
+          "internal_error",
+          "not_found",
+          "reauth_required",
+          "same_principal",
+          "service_busy",
+          "too_many_requests",
+          "unauthorized",
+          "validation_error"
+        ],
+        "x-permission": "legal_hold.release"
+      }
+    },
     "/v1/matters/{matter_id}": {
       "get": {
         "operationId": "get_matter",
@@ -11132,7 +12220,7 @@
     },
     "/v1/matters/{matter_id}/close": {
       "post": {
-        "description": "No new jobs; the retention-extension job stops extending this matter's evidence, which then\nexpires on schedule. Running jobs must be finished or cancelled first (and, once legal hold exists,\na held matter cannot close). Reversible by a tenant admin (``.../reopen``).",
+        "description": "No new jobs; the retention-extension job stops extending this matter's evidence, which then\nexpires on schedule. Running jobs must be finished or cancelled first, and a matter under a legal\nhold (on it or its client) cannot close. Reversible by a tenant admin (``.../reopen``).",
         "operationId": "close_matter",
         "parameters": [
           {
@@ -11205,7 +12293,7 @@
                 }
               }
             },
-            "description": "error: conflict"
+            "description": "error: conflict, legal_hold"
           },
           "422": {
             "content": {
@@ -11257,6 +12345,7 @@
           "db_pool_exhausted",
           "forbidden",
           "internal_error",
+          "legal_hold",
           "not_found",
           "reauth_required",
           "service_busy",
@@ -11738,6 +12827,143 @@
           "validation_error"
         ],
         "x-permission": "job.start"
+      }
+    },
+    "/v1/matters/{matter_id}/legal-holds": {
+      "post": {
+        "description": "A hold on the matter: every object behind its jobs (deduplicated files included), its\nproductions, reports, seals and anchors. Allowed on a closed matter (its evidence is then\nextended again).",
+        "operationId": "place_matter_hold",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "matter_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Matter Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HoldIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HoldOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: ambiguous_credentials, malformed_body"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: reauth_required, unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: cross_site, csrf, forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: not_found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorOut"
+                }
+              }
+            },
+            "description": "error: validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: too_many_requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: db_pool_exhausted, service_busy"
+          }
+        },
+        "summary": "Place Matter Hold",
+        "x-error-codes": [
+          "ambiguous_credentials",
+          "cross_site",
+          "csrf",
+          "db_pool_exhausted",
+          "forbidden",
+          "internal_error",
+          "malformed_body",
+          "not_found",
+          "reauth_required",
+          "service_busy",
+          "too_many_requests",
+          "unauthorized",
+          "validation_error"
+        ],
+        "x-permission": "legal_hold.place"
       }
     },
     "/v1/matters/{matter_id}/reopen": {
@@ -15690,6 +16916,131 @@
           "service_busy",
           "too_many_requests",
           "unauthorized"
+        ],
+        "x-permission": "tenant.admin"
+      }
+    },
+    "/v1/tenant/settings/hold-cooling-off": {
+      "put": {
+        "description": "How long after a legal hold's release nothing it covered may be destroyed (M18 D4). Applies\nto releases that happen afterwards: a release fixes its own cooling-off end.",
+        "operationId": "set_hold_cooling_off",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CoolingOffIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantSettingsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: ambiguous_credentials, malformed_body"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: reauth_required, unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: cross_site, csrf, forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: not_found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorOut"
+                }
+              }
+            },
+            "description": "error: validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: too_many_requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            },
+            "description": "error: db_pool_exhausted, service_busy"
+          }
+        },
+        "summary": "Set Hold Cooling Off",
+        "x-error-codes": [
+          "ambiguous_credentials",
+          "cross_site",
+          "csrf",
+          "db_pool_exhausted",
+          "forbidden",
+          "internal_error",
+          "malformed_body",
+          "not_found",
+          "reauth_required",
+          "service_busy",
+          "too_many_requests",
+          "unauthorized",
+          "validation_error"
         ],
         "x-permission": "tenant.admin"
       }

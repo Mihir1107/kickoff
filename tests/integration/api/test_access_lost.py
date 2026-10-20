@@ -65,16 +65,25 @@ async def test_the_deadline_is_a_tenant_setting_bounded_24_hours_to_90_days(
 ) -> None:
     t = tenant
     async with api.client(t.subdomain, t.token(api.settings)) as c:
-        assert (await c.get("/v1/tenant/settings")).json() == {"reauth_deadline_hours": 168}
+        assert (await c.get("/v1/tenant/settings")).json() == {
+            "reauth_deadline_hours": 168,
+            "hold_cooling_off_days": 7,
+        }
         for hours in (23, 2161, 0, -1):  # refused, never clamped
             r = await c.put("/v1/tenant/settings/reauth-deadline",
                             json={"hours": hours, "reason": "policy"})  # fmt: skip
             assert r.status_code == 422, r.text
-        assert (await c.get("/v1/tenant/settings")).json() == {"reauth_deadline_hours": 168}
+        assert (await c.get("/v1/tenant/settings")).json() == {
+            "reauth_deadline_hours": 168,
+            "hold_cooling_off_days": 7,
+        }
         for hours in (24, 2160, 48):
             r = await c.put("/v1/tenant/settings/reauth-deadline",
                             json={"hours": hours, "reason": "policy"})  # fmt: skip
-            assert r.status_code == 200 and r.json() == {"reauth_deadline_hours": hours}
+            assert r.status_code == 200 and r.json() == {
+                "reauth_deadline_hours": hours,
+                "hold_cooling_off_days": 7,
+            }
         assert (
             await c.put("/v1/tenant/settings/reauth-deadline", json={"hours": 48})
         ).status_code == 422  # a reason is required

@@ -56,6 +56,7 @@ class Tenant(Base):
     kms_key_ref: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
     reauth_deadline_hours: Mapped[int] = mapped_column(Integer, server_default=text("168"))
+    hold_cooling_off_days: Mapped[int] = mapped_column(Integer, server_default=text("7"))  # M18 D4
 
 
 class Client(Base):
@@ -288,6 +289,10 @@ class EvidenceObject(Base):
         ForeignKeyConstraint(["tenant_id", "render_id"], ["renders.tenant_id", "renders.id"]),
         ForeignKeyConstraint(["tenant_id", "report_id"], ["reports.tenant_id", "reports.id"]),
         Index(None, "job_id", "state"),
+        Index(None, "job_id", "id"),  # a job's objects in id order (hold flag passes, 0047)
+        Index(
+            None, "archive_evidence_id", postgresql_where=text("archive_evidence_id IS NOT NULL")
+        ),
         Index(None, "render_id", postgresql_where=text("render_id IS NOT NULL")),
         Index(None, "report_id", postgresql_where=text("report_id IS NOT NULL")),
     )
@@ -378,6 +383,7 @@ class Item(Base):
         UniqueConstraint("tenant_id", "id"),
         UniqueConstraint("tenant_id", "idempotency_key"),
         UniqueConstraint("tenant_id", "source", "source_item_id", "version"),
+        Index(None, "evidence_object_id"),  # which matters own an object (evidence_held, 0047)
         ForeignKeyConstraint(
             ["tenant_id", "job_id"], ["collection_jobs.tenant_id", "collection_jobs.id"]
         ),
@@ -924,6 +930,100 @@ class RetentionGap(Base):
     unprotected_until: Mapped[datetime] = mapped_column(TZ)
     outcome: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+
+
+class LegalHold(Base):
+    """A legal hold on one matter or one client (migration 0047, M18 §1)."""
+
+    __tablename__ = "legal_holds"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),
+        ForeignKeyConstraint(["tenant_id", "matter_id"], ["matters.tenant_id", "matters.id"]),
+        ForeignKeyConstraint(["tenant_id", "client_id"], ["clients.tenant_id", "clients.id"]),
+        Index(None, "tenant_id", "matter_id", postgresql_where=text("released_at IS NULL")),
+        Index(None, "tenant_id", "client_id", postgresql_where=text("released_at IS NULL")),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    matter_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    client_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    reason: Mapped[str] = mapped_column(Text)
+    reference: Mapped[str | None] = mapped_column(Text)
+    placed_by: Mapped[str] = mapped_column(Text)
+    placed_by_principal: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    placed_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    released_at: Mapped[datetime | None] = mapped_column(TZ)
+    released_by: Mapped[str | None] = mapped_column(Text)
+    release_reason: Mapped[str | None] = mapped_column(Text)
+    cooling_off_until: Mapped[datetime | None] = mapped_column(TZ)
+    flag_state: Mapped[str] = mapped_column(Text, server_default=text("'pending'"))
+    objects_flagged: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+    objects_in_scope: Mapped[int | None] = mapped_column(BigInteger)
+    objects_cleared: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+    flag_incidents: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+    flag_cursor: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    last_pass_completed_at: Mapped[datetime | None] = mapped_column(TZ)
+
+
+class LegalHoldReleaseRequest(Base):
+    __tablename__ = "legal_hold_release_requests"
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id", "hold_id"], ["legal_holds.tenant_id", "legal_holds.id"]),
+        Index("ux_legal_hold_release_requests_pending", "hold_id", unique=True,
+              postgresql_where=text("decision IS NULL")),
+        Index(None, "tenant_id", "hold_id"),
+    )  # fmt: skip
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    hold_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    requested_by: Mapped[str] = mapped_column(Text)
+    requested_by_principal: Mapped[uuid.UUID] = mapped_column(Uuid)
+    reason: Mapped[str] = mapped_column(Text)
+    requested_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    expires_at: Mapped[datetime] = mapped_column(TZ)
+    decision: Mapped[str | None] = mapped_column(Text)
+    decided_at: Mapped[datetime | None] = mapped_column(TZ)
+    decided_by: Mapped[str | None] = mapped_column(Text)
+    decided_by_principal: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+
+
+class LegalHoldObject(Base):
+    __tablename__ = "legal_hold_objects"
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id", "hold_id"], ["legal_holds.tenant_id", "legal_holds.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "evidence_object_id"],
+            ["evidence_objects.tenant_id", "evidence_objects.id"],
+        ),
+        Index(None, "evidence_object_id"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    hold_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    evidence_object_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    storage_key: Mapped[str] = mapped_column(Text(collation="C"))
+    version_id: Mapped[str] = mapped_column(Text)
+    flagged_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
+    clear_requested_at: Mapped[datetime | None] = mapped_column(TZ)
+    cleared_at: Mapped[datetime | None] = mapped_column(TZ)
+
+
+class LegalHoldJob(Base):
+    __tablename__ = "legal_hold_jobs"
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id", "hold_id"], ["legal_holds.tenant_id", "legal_holds.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "job_id"], ["collection_jobs.tenant_id", "collection_jobs.id"]
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    hold_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    links_read_sealed_at: Mapped[datetime] = mapped_column(TZ, server_default=NOW)
 
 
 class TenantQuota(Base):

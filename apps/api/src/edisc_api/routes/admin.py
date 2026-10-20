@@ -69,6 +69,16 @@ class MemberIn(Strict):
 
 class TenantSettingsOut(Strict):
     reauth_deadline_hours: int
+    hold_cooling_off_days: (
+        int  # after a hold's release, nothing it uncovered is destroyed sooner (D4)
+    )
+
+
+class CoolingOffIn(Strict):
+    """M18 D4: 7 .. 90 days; outside is refused (422), never clamped."""
+
+    days: int = Field(ge=7, le=90)
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class QuotaValuesOut(Strict):
@@ -546,10 +556,14 @@ async def list_assignments(
 async def get_tenant_settings(caller: CallerDep, res: ResourcesDep) -> TenantSettingsOut:
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await authorize(s, caller, P.TENANT_ADMIN, TENANT)
-        hours: int = (await s.execute(text(
-            "SELECT reauth_deadline_hours FROM tenants WHERE id = :t"), {"t": caller.tenant_id}
-        )).scalar_one()  # fmt: skip
-    return TenantSettingsOut(reauth_deadline_hours=hours)
+        return await _tenant_settings(s, caller.tenant_id)
+
+
+async def _tenant_settings(s: AsyncSession, tenant_id: uuid.UUID) -> TenantSettingsOut:
+    row = (await s.execute(text(
+        "SELECT reauth_deadline_hours, hold_cooling_off_days FROM tenants WHERE id = :t"),
+        {"t": tenant_id})).one()  # fmt: skip
+    return TenantSettingsOut(**row._mapping)
 
 
 @router.put(
@@ -578,8 +592,41 @@ async def set_reauth_deadline(
                      "reason": body.reason},
             request_id=rid,
         )  # fmt: skip
+        out = await _tenant_settings(s, caller.tenant_id)
     await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
-    return TenantSettingsOut(reauth_deadline_hours=body.hours)
+    return out
+
+
+@router.put(
+    "/tenant/settings/hold-cooling-off",
+    response_model=TenantSettingsOut,
+    openapi_extra=perm(P.TENANT_ADMIN, E.FORBIDDEN, E.NOT_FOUND, E.REAUTH_REQUIRED),
+)
+async def set_hold_cooling_off(
+    body: CoolingOffIn, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
+) -> TenantSettingsOut:
+    """How long after a legal hold's release nothing it covered may be destroyed (M18 D4). Applies
+    to releases that happen afterwards: a release fixes its own cooling-off end."""
+    async with tenant_tx(res.sessions, caller.tenant_id) as s:
+        await authorize(s, caller, P.TENANT_ADMIN, TENANT)
+        signed_in = require_recent_sign_in(caller, res.settings)
+        old: int = (await s.execute(text(
+            "SELECT hold_cooling_off_days FROM tenants WHERE id = :t FOR NO KEY UPDATE"),
+            {"t": caller.tenant_id})).scalar_one()  # fmt: skip
+        await s.execute(
+            text("UPDATE tenants SET hold_cooling_off_days = :d WHERE id = :t"),
+            {"d": body.days, "t": caller.tenant_id},
+        )
+        await audit.record(
+            s, tenant_id=caller.tenant_id, actor=caller.actor,
+            event_type="tenant_setting_changed",
+            payload={"setting": "hold_cooling_off_days", "old": old, "new": body.days,
+                     "reason": body.reason, "authenticated_at": signed_in},
+            request_id=rid,
+        )  # fmt: skip
+        out = await _tenant_settings(s, caller.tenant_id)
+    await audit.anchor(res.sessions, res.s3, res.settings, caller.tenant_id)
+    return out
 
 
 @router.get(

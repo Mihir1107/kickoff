@@ -22,10 +22,15 @@ MAINTENANCE_QUEUE = "maintenance"
 EXPORTS_QUEUE = "exports"  # Slack export hash-lock-validate (ADR 0014)
 RENDERS_QUEUE = "renders"  # prefix: one queue per renderer/Unicode/tzdata triple (ADR 0015 §15)
 REPORTS_QUEUE = "reports"  # prefix: one queue per report runtime identity (ADR 0018 §6)
+HOLDS_QUEUE = "holds"  # legal-hold S3 flags, the hold storage identity only (M18 §1.3)
 
 
 def export_workflow_id(export_id: str) -> str:
     return f"export-{export_id}"
+
+
+def hold_workflow_id(hold_id: object) -> str:
+    return f"legal-hold-{hold_id}"
 
 
 def render_workflow_id(render_id: str) -> str:

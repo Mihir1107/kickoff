@@ -3,8 +3,7 @@
 Status: **Accepted** (2026-10-20). Built from `docs/plans/m18.md` (the plan) with the user's
 decisions of 2026-10-20 (its §12, which wins where it differs from the rest of the plan).
 **Built so far:** step 0 (spikes, §1), step 1 (storage identities, §2), step 2 (upload quotas,
-§3). **In progress:** steps 3-4 (legal hold in the database and its S3 flags, §4: the design as
-it is being built). **Not built yet:** step 5 (the standalone verifier), steps 6-7 (destruction
+§3), steps 3-4 (legal hold in the database and its S3 flags, §4). **Not built yet:** step 5 (the standalone verifier), steps 6-7 (destruction
 and its certificate), step 8 (closing docs). Every
 place where the build differs from the plan is listed in §5.
 
@@ -58,7 +57,7 @@ results are the record.
 - `expire-export-uploads` (hourly): an upload still `uploading` after the TTL becomes `rejected`
   `upload_expired` (a new transition, only with that reason), audited, its multipart aborted.
 
-## 4. Legal hold (M18 §1; steps 3-4; migration 0047; in progress)
+## 4. Legal hold (M18 §1; steps 3-4; migration 0047)
 - **Model:** `legal_holds` (one matter OR one client; identity immutable; release final, with the
   cooling-off end; flag progress never goes back), `legal_hold_release_requests` (one pending per
   hold; the approver is never the requester: a CHECK; expires after 72 h; decisions final),
@@ -107,3 +106,12 @@ results are the record.
    entries.
 7. **Sealed jobs are read once per hold** (`legal_hold_jobs`): the 15-minute re-runs would
    otherwise re-read every object of every job.
+8. **The hold scope's indexes** (not in the plan): `evidence_objects (job_id, id)`,
+   `evidence_objects (archive_evidence_id)` and `items (evidence_object_id)`, so a flag page and an
+   "is this object held?" question read bounded rows (CLAUDE.md: bounded by construction). On a
+   large production `items` the index is built inside the migration's transaction (not
+   `CONCURRENTLY`): a maintenance window, noted for the deployment.
+9. **Tenant admin count for the two-person rule** counts active USER principals with
+   `tenant_admin` at the tenant directly or through a group's recorded members. An admin who holds
+   the role only through an IdP group claim with no recorded membership is not counted: the rule
+   then refuses (`second_admin_required`), the safe side.

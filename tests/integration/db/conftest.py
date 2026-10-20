@@ -385,6 +385,38 @@ async def seed_tenant(conn: asyncpg.Connection) -> Seeded:
             ids["ev"],
             ids["matter"],
         )
+        # legal holds (migration 0047)
+        hold = new_id()
+        await conn.execute(
+            # released: the seeded matter is closed by other tests, a live hold would refuse that
+            "INSERT INTO legal_holds (id, tenant_id, matter_id, reason, placed_by, released_at,"
+            " released_by, release_reason, cooling_off_until) VALUES ($1, $2, $3, 'seed', 'seed',"
+            " now(), 'seed', 'seed', now() + interval '7 days')",
+            hold,
+            t,
+            ids["matter"],
+        )
+        await conn.execute(
+            "INSERT INTO legal_hold_release_requests (id, tenant_id, hold_id, requested_by,"
+            " requested_by_principal, reason, expires_at)"
+            " VALUES ($1, $2, $3, 'seed', gen_random_uuid(), 'seed', now() + interval '1 day')",
+            new_id(),
+            t,
+            hold,
+        )
+        await conn.execute(
+            "INSERT INTO legal_hold_objects (tenant_id, hold_id, evidence_object_id, storage_key,"
+            " version_id) VALUES ($1, $2, $3, 'k', 'v')",
+            t,
+            hold,
+            ids["ev"],
+        )
+        await conn.execute(
+            "INSERT INTO legal_hold_jobs (tenant_id, hold_id, job_id) VALUES ($1, $2, $3)",
+            t,
+            hold,
+            ids["job"],
+        )
     return Seeded(
         t,
         ids["matter"],
@@ -464,6 +496,10 @@ TENANT_TABLES = [
     "oauth_installs",
     "directory_snapshots",
     "directory_entries",
+    "legal_holds",
+    "legal_hold_release_requests",
+    "legal_hold_objects",
+    "legal_hold_jobs",
 ]
 # the shape of a sealed SecretBox envelope (the journal refuses anything else, migration 0041)
 SEALED_STUB = (

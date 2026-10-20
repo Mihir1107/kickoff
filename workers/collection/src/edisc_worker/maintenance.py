@@ -32,7 +32,7 @@ from edisc_core.settings import Settings
 from edisc_custody.recovery import sweep_stale_uploads
 from edisc_custody.retention_extension import extend_retention
 from edisc_custody.sweeper import sweep_anchors
-from edisc_worker import access_lost, directory
+from edisc_worker import access_lost, directory, hold_sweeps
 from edisc_worker.contracts import MAINTENANCE_QUEUE
 from edisc_worker.export_expiry import expire_export_uploads
 from edisc_worker.install_recovery import reconcile_tokens
@@ -64,6 +64,10 @@ SWEEPS = (
     Sweep("refresh-directories", "refresh_directories", timedelta(minutes=15)),
     # export uploads past their TTL release their quota (M18 §4)
     Sweep("expire-export-uploads", "expire_export_uploads", timedelta(hours=1)),
+    # legal holds (M18 §1.3, §1.4): a flag pass for every active hold whose last pass finished
+    # (objects linked since: new jobs, renders, reports, dedup hits); expired release requests
+    Sweep("flag-held-objects", "flag_held_objects", timedelta(minutes=15)),
+    Sweep("expire-hold-releases", "expire_hold_releases", timedelta(minutes=15)),
 )
 
 
@@ -165,6 +169,22 @@ class MaintenanceActivities:
         )
         return {"expired": [str(e) for e in result.expired]}
 
+    @activity.defn(name="flag_held_objects")
+    async def flag_held_objects(self) -> dict[str, Any]:
+        if self.temporal is None:
+            raise RuntimeError("flag-held-objects needs a Temporal client")
+        started = await hold_sweeps.start_flag_passes(
+            self.sweeper_sessions, self.sessions, self.temporal, tenant_id=self.tenant_id
+        )
+        return {"started": started}
+
+    @activity.defn(name="expire_hold_releases")
+    async def expire_hold_releases(self) -> dict[str, Any]:
+        expired = await hold_sweeps.expire_release_requests(
+            self.sweeper_sessions, self.sessions, self.s3, self.settings, tenant_id=self.tenant_id
+        )
+        return {"expired": expired}
+
     @activity.defn(name="extend_retention")
     async def extend_retention(self) -> dict[str, Any]:
         result = await extend_retention(
@@ -201,6 +221,8 @@ class MaintenanceActivities:
             self.check_connections,
             self.refresh_directories,
             self.expire_export_uploads,
+            self.flag_held_objects,
+            self.expire_hold_releases,
         ]
 
 

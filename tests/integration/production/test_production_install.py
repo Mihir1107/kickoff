@@ -30,6 +30,8 @@ WORKERS: dict[str, list[str]] = {
     "exports": ["--source", "slack_export", "--exports"],
     "renders": ["--source", "slack_export", "--renders"],
     "reports": ["--source", "slack_export", "--reports"],
+    # its own queue name: a production install must not take the suite's holds (M18 §1.3)
+    "holds": ["--holds", "--holds-queue", "holds-production-install"],
 }
 pytestmark = [pytest.mark.production_install, pytest.mark.timeout(900)]
 

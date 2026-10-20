@@ -391,6 +391,36 @@ class ExportIngestWorkflow:
         return result
 
 
+@workflow.defn(name="LegalHoldWorkflow")
+class LegalHoldWorkflow:
+    """The S3 flags of one legal hold (M18 §1.3; id ``legal-hold-{hold_id}``, queue ``holds``):
+    ``hold_begin_pass`` (flagging for an active hold, clearing for a released one), then
+    ``hold_step`` page by page until the pass is complete. Every step reads and checkpoints its
+    state in the database, so a retry, a crash or a second run continues where the hold is."""
+
+    @workflow.run
+    async def run(self, tenant_id: str, hold_id: str) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "start_to_close_timeout": timedelta(minutes=15),
+            "heartbeat_timeout": timedelta(minutes=2),
+            "retry_policy": RetryPolicy(maximum_interval=timedelta(minutes=1)),
+        }
+        state: str = await workflow.execute_activity(
+            "hold_begin_pass", args=[tenant_id, hold_id], result_type=str, **options
+        )
+        steps = 0
+        while state in ("flagging", "clearing"):
+            done: bool = await workflow.execute_activity(
+                "hold_step", args=[tenant_id, hold_id], result_type=bool, **options
+            )
+            if done:
+                break
+            steps += 1
+            if steps >= 1000:  # bounded history: continue from the database checkpoint
+                workflow.continue_as_new(args=[tenant_id, hold_id])
+        return {"state": state, "steps": steps}
+
+
 @workflow.defn(name="TenantRetentionWorkflow")
 class TenantRetentionWorkflow:
     """One retention-extension run for one tenant, started when a matter or client is reopened so that

@@ -16,10 +16,11 @@ from edisc_api.app import CallerDep, RequestIdDep, Resources, ResourcesDep
 from edisc_api.auth import Caller, require_recent_sign_in
 from edisc_api.authz import TENANT, P, Scope, authorize, perm, permissions, roles_at, visible_ids
 from edisc_api.error_codes import E
-from edisc_api.errors import conflict, forbidden, not_found, unprocessable
+from edisc_api.errors import ApiError, conflict, forbidden, not_found, unprocessable
 from edisc_api.pagination import CursorQ, LimitQ, Page, decode, page_of
 from edisc_core.ids import new_id
 from edisc_core.time import UtcDatetime, utc_now
+from edisc_custody import holds
 from edisc_db.session import tenant_tx
 from edisc_worker.contracts import MAINTENANCE_QUEUE
 
@@ -40,6 +41,7 @@ class ClientOut(Strict):
     is_default: bool
     created_at: datetime
     closed_at: datetime | None
+    held: bool  # an active legal hold covers it (M18)
 
 
 class MatterIn(Strict):
@@ -54,6 +56,7 @@ class MatterOut(Strict):
     retention_until: datetime
     created_at: datetime
     closed_at: datetime | None
+    held: bool  # an active legal hold on it or its client (M18)
 
 
 class WorkspaceIn(Strict):
@@ -67,9 +70,13 @@ class WorkspaceOut(Strict):
     created_at: datetime
 
 
-CLIENT_ONE = "SELECT id, name, is_default, created_at, closed_at FROM clients WHERE id = :i"
+CLIENT_ONE = (
+    "SELECT id, name, is_default, created_at, closed_at, client_held(id) AS held FROM clients"
+    " WHERE id = :i"
+)
 MATTER_ONE = (
-    "SELECT id, client_id, name, retention_until, created_at, closed_at FROM matters WHERE id = :i"
+    "SELECT id, client_id, name, retention_until, created_at, closed_at, matter_held(id) AS held"
+    " FROM matters WHERE id = :i"
 )
 
 
@@ -105,7 +112,7 @@ async def create_client(
             await s.execute(
                 text(
                     "INSERT INTO clients (id, tenant_id, name) VALUES (:i, :t, :n)"
-                    " RETURNING id, name, is_default, created_at, closed_at"
+                    " RETURNING id, name, is_default, created_at, closed_at, false AS held"
                 ),
                 {"i": new_id(), "t": caller.tenant_id, "n": body.name},
             )
@@ -130,7 +137,7 @@ async def list_clients(
         rows = (
             await s.execute(
                 text(
-                    "SELECT id, name, is_default, created_at, closed_at FROM clients"
+                    "SELECT id, name, is_default, created_at, closed_at, client_held(id) AS held FROM clients"
                     " WHERE (CAST(:after AS uuid) IS NULL OR id > :after)"
                     " AND (CAST(:all AS boolean) OR id = ANY(:ids)) ORDER BY id LIMIT :n"
                 ),
@@ -179,7 +186,8 @@ async def create_matter(
             await s.execute(
                 text(
                     "INSERT INTO matters (id, tenant_id, client_id, name, retention_until)"
-                    " VALUES (:i, :t, :c, :n, :r) RETURNING id, client_id, name, retention_until, created_at, closed_at"
+                    " VALUES (:i, :t, :c, :n, :r) RETURNING id, client_id, name, retention_until, created_at, closed_at,"
+                    " matter_held(id) AS held"
                 ),
                 {
                     "i": new_id(),
@@ -232,7 +240,8 @@ async def list_matters(
         rows = (
             await s.execute(
                 text(
-                    "SELECT id, client_id, name, retention_until, created_at, closed_at FROM matters WHERE client_id = :c"
+                    "SELECT id, client_id, name, retention_until, created_at, closed_at, matter_held(id) AS held"
+                    " FROM matters WHERE client_id = :c"
                     " AND (CAST(:after AS uuid) IS NULL OR id > :after)"
                     " AND (CAST(:all AS boolean) OR id = ANY(:ids)) ORDER BY id LIMIT :n"
                 ),
@@ -269,14 +278,16 @@ async def get_matter(matter_id: uuid.UUID, caller: CallerDep, res: ResourcesDep)
 @router.post(
     "/matters/{matter_id}/close",
     response_model=MatterOut,
-    openapi_extra=perm(P.MATTER_CREATE, E.CONFLICT, E.FORBIDDEN, E.NOT_FOUND, E.REAUTH_REQUIRED),
+    openapi_extra=perm(
+        P.MATTER_CREATE, E.CONFLICT, E.FORBIDDEN, E.LEGAL_HOLD, E.NOT_FOUND, E.REAUTH_REQUIRED
+    ),
 )
 async def close_matter(
     matter_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
 ) -> MatterOut:
     """No new jobs; the retention-extension job stops extending this matter's evidence, which then
-    expires on schedule. Running jobs must be finished or cancelled first (and, once legal hold exists,
-    a held matter cannot close). Reversible by a tenant admin (``.../reopen``)."""
+    expires on schedule. Running jobs must be finished or cancelled first, and a matter under a legal
+    hold (on it or its client) cannot close. Reversible by a tenant admin (``.../reopen``)."""
     async with tenant_tx(res.sessions, caller.tenant_id) as s:
         await authorize(s, caller, P.MATTER_CREATE, Scope("matter", matter_id))
         signed_in = require_recent_sign_in(caller, res.settings)
@@ -292,6 +303,8 @@ async def close_matter(
         ).scalar_one()
         if running:
             raise conflict(f"{running} job(s) of this matter are still running")
+        if await holds.matter_held(s, matter_id):  # the trigger refuses it too (EA005)
+            raise ApiError(409, "legal_hold", "a legal hold covers this matter")
         await s.execute(
             text("UPDATE matters SET closed_at = now(), closed_by = :by WHERE id = :i"),
             {"by": caller.actor, "i": matter_id},
@@ -308,7 +321,9 @@ async def close_matter(
 @router.post(
     "/clients/{client_id}/close",
     response_model=ClientOut,
-    openapi_extra=perm(P.CLIENT_CREATE, E.CONFLICT, E.FORBIDDEN, E.NOT_FOUND, E.REAUTH_REQUIRED),
+    openapi_extra=perm(
+        P.CLIENT_CREATE, E.CONFLICT, E.FORBIDDEN, E.LEGAL_HOLD, E.NOT_FOUND, E.REAUTH_REQUIRED
+    ),
 )
 async def close_client(
     client_id: uuid.UUID, caller: CallerDep, res: ResourcesDep, rid: RequestIdDep
@@ -330,6 +345,10 @@ async def close_client(
         ).scalar_one()
         if open_matters:
             raise conflict(f"{open_matters} matter(s) of this client are still open")
+        if await holds.client_held(s, client_id):  # the trigger refuses it too (EA005)
+            raise ApiError(
+                409, "legal_hold", "a legal hold covers this client or one of its matters"
+            )
         await s.execute(
             text("UPDATE clients SET closed_at = now(), closed_by = :by WHERE id = :i"),
             {"by": caller.actor, "i": client_id},

@@ -388,6 +388,30 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
 - `make test-production-install` (CI job `production-install`): the API and every worker type start
   from a no-dev, non-editable install. A runtime import of a dev-only package fails it.
 
+## Legal hold (M18 steps 3-4, ADR 0019 §4; migration 0047)
+- "Is it held?" has ONE answer: the SQL functions `matter_held` / `client_held` /
+  `client_directly_held` / `evidence_held` (invoker rights, RLS applies), through
+  `edisc_custody.holds` in Python. Never re-derive it. A matter is held by a hold on it or its
+  client; a client by a hold on it or any of its matters (it cannot close); an object through ANY
+  owner (its job's matter, any job that linked an item behind it, its render's/report's job, a job
+  that read an entry of its archive), or as the archive of an export of a client held directly.
+- A hold blocks closing (API 409 `legal_hold` AND trigger EA005 on any path), retention shortening
+  (EA004) and destruction (step 6 must call `evidence_held` per object and refuse on the S3 flag);
+  never new jobs, renders, reports or reads. Retention extension keeps held evidence locked whether
+  the owner is open or closed, past its retention date.
+- Release = two different tenant admins (`legal_hold_release_requests`, a CHECK forbids the
+  requester approving; 72 h; refused with fewer than two active user admins, never an operator
+  path) and a cooling-off (`tenants.hold_cooling_off_days`, 7..90). Placement, request, approval,
+  expiry, release: tenant-stream custody events anchored with `anchor_now`, plus an alert.
+- S3 flags: `LegalHoldWorkflow` on queue `holds`, `python -m edisc_worker --holds` ONLY (hold
+  identity for flags, app identity for anchors; it refuses every other queue). Progress counts only
+  what the store confirmed; a missing version or a flag that disagrees with the database is an
+  incident (event + alert), never fixed on the way. Clearing commits its intent
+  (`clear_requested_at`) before any OFF call and never clears a version another active hold
+  covers. `flag-held-objects` (15 min) re-runs passes; sealed jobs are read once per hold.
+- Database rules of migration 0047 are tested on a database migrated in the test
+  (`tests/integration/db/test_hold_rules.py`): a mutation of the migration must fail there.
+
 ## Conventions
 - Python 3.12, `uv` only (no pip). Add deps with `uv add --package <member> <dep>`.
 - mypy `--strict` on all source (packages/apps/workers). ruff is the formatter and linter.

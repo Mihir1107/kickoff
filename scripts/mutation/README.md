@@ -66,10 +66,12 @@ broken next to a `<name>.mutation-backup` copy: the runner refuses to start unti
 | `m17-close` | closing M17: the production-readiness gate's modes (warn on main, enforce on tags and the production image), the report's pause endings (stated, recomputed, in the HTML, the divergence), the SSE `connection` event (polled, in the digest, never repeated, published, status only), the directory snapshots (never partial, checkpoint, real SIGKILLs, generations, D12, budget, failures, prefix, D14, exports, off the loop, lone surrogates, the sweep, bounded work per page at any depth) | 43 |
 | `s24-stale-stats` | reads during and right after bulk loads bounded by construction: the ANALYZE functions, the pipeline's statistics refresh, the redis driver info (ADR 0015 §24.20-§24.22) | 11 |
 | `m18-housekeeping` | `test-runs/` pruning: the size cap, a run still being written is never removed | 2 |
-| `m18-identities` | storage identities (M18 §3, ADR 0019 §2): each identity's grants and explicit denies (also against a later wide grant), the root probe at every process start, foreign credentials refused, a missing identity never replaced | 9 |
+| `m18-identities` | storage identities (M18 §3, ADR 0019 §2): each identity's grants and explicit denies (also against a later wide grant), the root probe at every process start, foreign credentials refused, a missing identity never replaced, `--holds` runs no other queue | 10 |
 | `m18-quotas` | export upload quotas (M18 §4): the lock, what counts, no echo, upload expiry, no staged upload left by a refusal | 5 |
+| `m18-holds` | legal hold in the database (M18 §1.1-§1.4, ADR 0019 §4): closing refused (API and trigger), the one "held" definition (client holds, dedup links, exports only by a direct client hold), extension under hold, two people, expiry, cooling-off, who reads | 13 |
+| `m18-hold-flags` | the S3 flags (M18 §1.3): linked items flagged, a release never clears another hold's flag, a disagreeing flag refused, progress only as confirmed, the clearing intent | 5 |
 
-627 entries: 228 unit, 395 integration, 4 image.
+646 entries: 229 unit, 413 integration, 4 image.
 
 The `s19-*` rounds were run by hand when they were built and only their categories were written
 down; the entries here re-create them against the current code.

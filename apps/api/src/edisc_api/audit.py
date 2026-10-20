@@ -70,3 +70,16 @@ async def anchor_now(
         ).scalar_one()
     if anchored < event.seq:
         raise RuntimeError(f"audit event {event.seq} is not anchored (anchored up to {anchored})")
+
+
+async def anchor_change(
+    sessions: async_sessionmaker[AsyncSession],
+    s3: S3Client,
+    settings: Settings,
+    tenant_id: uuid.UUID,
+    event: AppendedEvent,
+) -> None:
+    """Anchor the tenant stream NOW for a state change that must be in WORM before it is
+    answered (legal holds, M18 §1.4): the same guarantee as ``anchor_now``, which is reserved for
+    content reads (every route calling it is held to the download rules)."""
+    await anchor_now(sessions, s3, settings, tenant_id, event)

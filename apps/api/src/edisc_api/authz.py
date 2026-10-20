@@ -48,6 +48,11 @@ class Permission(StrEnum):
         "report.read"  # collection reports: files and package, always audited (ADR 0018 §2)
     )
     REPORT_CREATE = "report.create"  # request a report (manual regeneration, with a reason)
+    LEGAL_HOLD_PLACE = "legal_hold.place"  # place a hold on a matter or client (M18)
+    LEGAL_HOLD_RELEASE = (
+        "legal_hold.release"  # ask for or approve a release: tenant admins only (D3)
+    )
+    LEGAL_HOLD_READ = "legal_hold.read"  # see holds and their flag progress
 
 
 P = Permission
@@ -68,6 +73,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
             P.CUSTODY_READ,
             P.EVIDENCE_READ,
             P.REPORT_READ,
+            P.LEGAL_HOLD_READ,
             *_READ_MATTER,
         }
     ),
@@ -84,12 +90,14 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
             P.EXPORT_READ,
             P.REPORT_READ,
             P.REPORT_CREATE,
+            P.LEGAL_HOLD_PLACE,
+            P.LEGAL_HOLD_READ,
             *_READ_MATTER,
         }
     ),
     "collector": frozenset({P.JOB_START, P.JOB_CANCEL, P.REPORT_READ, *_READ_MATTER}),
     "reviewer": frozenset({P.EVIDENCE_READ, P.REPORT_READ, *_READ_MATTER}),
-    "auditor": frozenset({P.CUSTODY_READ, P.REPORT_READ, *_READ_MATTER}),
+    "auditor": frozenset({P.CUSTODY_READ, P.REPORT_READ, P.LEGAL_HOLD_READ, *_READ_MATTER}),
 }
 ROLES = frozenset(ROLE_PERMISSIONS)
 
