@@ -1537,3 +1537,20 @@ what was done and why.
       loosened.
     - **Product unaffected:** the script compares an operator-given deploy time with the server's
       stamps.
+24. **`test_a_grid_sized_directory_pages_on_its_index` failed the loop guard once on CI (run
+    39459441287, shard 3, commit `4e5f1fa`, 2026-10-20). OPEN, not diagnosed, not re-run.**
+    - **What the guard saw:** one block of 456 ms (lag 455 ms, 9 ms of it garbage collection) with
+      495 ms of CPU on the test process's loop thread, sampled "idle" in a NON-blocking Redis
+      `writelines` (`redis/asyncio/connection.py:1169` → `selector_events.py:1122`), during
+      `read_all` (test line 453: 60 pages of 500 directory entries through the in-process API).
+      The sampled frame is where the loop was when the sample landed, not what used the CPU.
+    - **Context:** the same test passed on run 39455171845 (`52a8ffe`) and locally in the API
+      suite on `4e5f1fa`'s tree (1,134 passed). `4e5f1fa` changed nothing on the directory route
+      or the per-request path (it registers the hold routes; the identity checks run at process
+      start, which test-built `Resources` skip).
+    - **Why not reproduced:** the local disk guard refused a test stack (14 GB free, guard 15;
+      not lowered).
+    - **Next:** reproduce in a loop under 8-core contention with `EDISC_TEST_LOOP_BLOCK_MS=50
+      EDISC_TEST_LOOP_BLOCK_MODE=report EDISC_TEST_LOOP_BLOCK_LOG=<file>` to find which step of a
+      page (JSON encoding of 500 entries, response validation, the cursor HMAC) spends the CPU on
+      the loop; then classify product or test bug and fix the cause (never the threshold).

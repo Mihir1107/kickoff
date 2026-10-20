@@ -1,30 +1,104 @@
-# Handoff (2026-10-19: stale statistics fixed for exports AND new tenants' items (migrations 0044-0045, zero-argument ANALYZE functions); every test run logs to disk; M18 planned, decisions pending (docs/plans/m18.md §10, §11); M17 built except step 7 (internal-app token, legal REVIEW) and step 9 (frontend))
+# Handoff (2026-10-20: M18 decisions taken; M18 steps 0-4 built: storage identities, upload quotas, legal hold with S3 flags (migrations 0046-0047); STOPPED by instruction before step 5 (the standalone verifier) and destruction)
 
 This file alone is enough to continue. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisions §1-§18, notes
 §19-§30, §32, §33, **every deviation in §31**); the rest of the plan of record is `docs/ARCHITECTURE.md`,
 `docs/adr/`, `docs/plans/phase-2.md` and `docs/BACKLOG.md`. M16 summary:
 `docs/runs/2026-10-12-m16-complete.md`. Expert guide: `docs/VERIFYING.md`. Demo: `docs/DEMO.md`.
-**M18 plan (proposed, nothing built): `docs/plans/m18.md`**: legal hold, destruction with a verifiable
-certificate, storage identities and bucket policies, upload quotas, the standalone verifier. Its §11
-decisions (D1-D13) come before any code. **M17 plan: `docs/plans/m17.md`** (every decision taken: its §12; design changes in ADR 0016
-Amendments 1 and 2; build notes per step at the end of ADR 0016, the last one "closing M17").
-Every M17 step is built except step 7 (on hold, legal review) and step 9 (the frontend branch's
-Playwright runs); real-tenant confirmation of steps 3b and 6 is pending (the user is setting up
-the Entra and Okta tenants). **Phase 3 decisions so far: `docs/plans/phase-3.md`.**
+**M18: plan `docs/plans/m18.md` (accepted; the user's decisions in its §12 win over the rest),
+design of record `docs/adr/0019-legal-hold-and-destruction.md` (spikes §1, what is built §2-§4,
+every deviation from the plan §5).** M17 plan: `docs/plans/m17.md` (every decision: its §12;
+ADR 0016 Amendments 1 and 2). M17 is built except step 7 (legal review) and step 9 (frontend);
+real-tenant confirmation of steps 3b and 6 is pending. Phase 3 decisions so far: `docs/plans/phase-3.md`.
 
 ## Current state
-**Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`.
-CI on main: run 39288602056 (`d2b77e4`) green, every job. Migrations at head: **0045** (zero-argument ANALYZE functions,
-`collection_jobs.items_inserted`; 0044: the clean-unit index and the first, now replaced, ANALYZE function). Renderer **1.3.2**, dummy connector **0.5.0**,
-normalizer **0.3.0**, report renderer **1.6.0**, preview renderer **1.0.0**. CI on main: runs
-39118882391 (`0b2b83e`), 39120935270 (`af39867`), 39121279530 (`c6b5a39`), 39123189226
-(`597d5f2`) all green, every job. Run 39126275352 on `72038ad` FAILED integration shard 3:
-`test_a_grid_sized_directory_pages_on_its_index`, diagnosed as a test bug (its "no Sort" plan
-assertion at the last full page; the planner sorted the ~500 remaining rows after a bitmap read of
-the index range, on cost; ADR 0016 "closing M17" note 3); the test now measures bounded work per
-page at three depths. Not re-run to green. Run 39127913175 on `e437be5`: **green, every job**. Full local integration suite on
-`72038ad`'s tree: 1,447 passed.
+**Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`. Migrations at head: **0047**.
+- `52a8ffe` (M18 steps 0-2): CI run 39455171845 **green, every job**.
+- `4e5f1fa` (M18 steps 3-4): CI run 39459441287 **FAILED one test** in integration shard 3,
+  every other job green (lint, typecheck, unit, api-compat, production-install, report-pdf,
+  production-readiness, integration 0-2): `test_a_grid_sized_directory_pages_on_its_index`, a
+  456 ms event-loop block (ADR 0015 §24 note 24). **Not re-run to green, not diagnosed yet**:
+  the local disk guard blocked the reproduction loop. It is the first item under "Next".
+Renderer 1.3.2, dummy connector 0.5.0, normalizer 0.3.0, report renderer 1.6.0, preview renderer
+1.0.0 (unchanged by M18 so far).
+
+**Local machine (2026-10-20):** the `edisc-demo` compose stack was STOPPED (user's choice, volumes
+kept; `docker compose -p edisc-demo start` brings it back). Docker build cache was pruned to its
+newest 2.5 GB. Free disk swings with macOS swap: at the end of the session it was 10 GB, below
+the 15 GB guard, so the last full local suite could not run (guard not lowered); CI's four shards
+are the full-suite gate for `4e5f1fa`. **A local `.env` made before 2026-10-20 needs the new
+variables from `.env.example`** (`EDISC_S3_ROOT_USER/PASSWORD` for MinIO root, and the
+`edisc-app` / `edisc-hold` / `edisc-destroy` identity pairs); `make up` re-runs `minio-init`,
+which provisions the identities (idempotent).
+
+## Done: M18 steps 0-4 (2026-10-20)
+**Decisions (user, 2026-10-20; docs/plans/m18.md §12):** all approved; the changes the user made:
+- principle 2 says "approved by a second, different principal" and "never while a legal hold
+  applies in the database or on the stored object" (CLAUDE.md, ADR 0002);
+- the certificate (step 7) states that destroyed content's hashes are retained (short content
+  may be inferable), the PITR backup expiry, and every destroyed job's final seal and anchor hashes;
+- D2: progress reported honestly; destruction and release refuse an object whose flag disagrees;
+- D3: never an operator approval path; a tenant with one admin adds a second;
+- D12: the verifier accepts exactly ONE fixed JWS algorithm, rejects any header `alg` mismatch,
+  passes the RFC 7515 vectors.
+
+**Housekeeping:**
+- The 4-day-old `until grep "run 8 exit"` wait loop of an earlier session (the recurring
+  "contention runs" notice) was killed; none remain.
+- `test-runs/` is pruned to 20 runs and 1 GiB (`TEST_RUNS_KEEP`, `TEST_RUNS_MAX_MB`): 20 runs
+  cover a session's history for comparing an intermittent failure with the runs around it; 1 GiB
+  holds several failed full suites' artifacts within a small share of the margin above the 15 GB
+  guard. The newest run and runs still being written are never removed.
+- The two pending items: the new-tenant measurement on the final code (`d2b77e4`): 872.6 s,
+  2,825,474 `items` tuples (first version 2,827,369), 9 ANALYZEs, same 318,860 items
+  (docs/runs/2026-10-19-...); the integration mutation `pipeline_never_refreshes_items`: caught.
+
+**Step 0, spikes (ADR 0019 §1):** **MinIO does not evaluate bucket policies for IAM users** (stored,
+never applied); an explicit Deny in an identity's own policy wins over any later Allow; a delete
+by version is authorized as `s3:DeleteObject` (not `DeleteObjectVersion`); a marker can be denied
+by an `s3:versionid` Null condition; `GetObjectLegalHold` on a never-held version answers
+`NoSuchObjectLockConfiguration`; prefix listing of versions includes sibling keys.
+
+**Step 1, storage identities (ADR 0019 §2):** `edisc-app` / `edisc-hold` / `edisc-destroy`
+(`infra/minio/policies/*.json`, explicit denies as the second layer); root only in compose and
+`minio-init`; every process refuses root at startup (`assert_least_privilege`) and, outside
+local/test/ci, another identity's credentials; the whole suite runs as `edisc-app` (tampering
+through `s3_root`); bucket policies are AWS-only (`infra/aws`, confirm on AWS). The full suite as
+`edisc-app` found 27 failing tests, all test-side: helpers writing outside the evidence prefixes
+(`raw/`, `tests/`) and tamper steps that need root.
+
+**Step 2, quotas (migration 0046):** per tenant, operator CLI only (`python -m edisc_api.admin
+quota`), usage computed under a per-tenant advisory lock (no counter to drift: ADR 0019 §5.2),
+`GET /v1/tenant/quotas`, 409 `quota_exceeded` without echo, `expire-export-uploads` (a new
+`uploading -> rejected upload_expired` transition).
+
+**Steps 3-4, legal hold (migration 0047; CLAUDE.md "Legal hold"):** the one "held" definition in
+SQL; close blocked by the API and a trigger; extension under hold; two-person release with
+expiry and cooling-off; `LegalHoldWorkflow` + `edisc_worker --holds`; incidents for missing
+versions and disagreeing flags; clearing intent; the 15-minute re-flag sweep. Found while
+building: an expired upload could not be rejected (the lock CHECK; 0046 amended before commit); the
+app role lacked the column grant for the new tenant setting (caught by its test); a resumed
+clearing would have reported its own interrupted work as tampering (hence the intent column).
+
+**Mutation rounds (all caught):** `m18-housekeeping` 2/2, `m18-identities` 10/10, `m18-quotas`
+5/5, `m18-holds` 13/13, `m18-hold-flags` 5/5. Six survived at first and each found a weak test:
+policy files not tested as files, the root probe untested on a bucket without policy, a doubled
+status filter masking a break, a refused create's staged upload never checked, no missing-version
+case, and migration rules testable only on a database migrated in the test
+(`tests/integration/db/test_hold_rules.py`).
+
+## Next
+0. **Diagnose CI run 39459441287's loop block** (ADR 0015 §24 note 24): reproduce
+   `test_a_grid_sized_directory_pages_on_its_index` in a loop under CPU contention with the guard
+   in report mode at 50 ms, find the CPU on the loop, fix the cause. Needs >= 15 GB free.
+1. **M18 step 5, the standalone verifier** (`packages/verify`, plan §5, D12 with the user's
+   cryptography rules), then step 6 destruction (spike S0.7, the `edisc_destroyer` definer pattern,
+   first) and step 7 the certificate. The user asked to stop after legal hold: confirm before
+   starting step 5.
+2. On a machine with disk to spare: the full local integration suite on `4e5f1fa`'s tree
+   (`make test-integration`).
+3. AWS (cloud items): the bucket policies in `infra/aws/*-bucket-policy.json` and the identity
+   policies as IAM roles, each statement confirmed refused for the other roles.
 
 ## Done: new tenants' items on stale statistics; the ANALYZE functions hardened (2026-10-19, user-approved)
 **CI:** run 39288602056 on `d2b77e4`: green, every job (the full suite on four shards). Full local integration suite: on the first version 15 failed (the deadlock), 1,441 passed. After
@@ -641,9 +715,7 @@ and the guard counts an "idle" sample when the loop thread was measured busy. Ro
   callback's `tenant` parameter** (otherwise one customer can bind another customer's consented Entra
   tenant); revocation cuts in-flight downloads; revoked tokens end as `access_lost` units.
 
-## Next
-0. **Your decisions:** the M18 plan's §11 (D1-D13) and the three principle wordings in §10.
-   Then M18 step 0 (spikes) and step 1 (storage identities).
+## Still open from before M18
 1. **`test_a_crash_after_the_journal_is_repaired_exactly_once[False]`** failed once locally, output
    lost, not reproduced in 10 runs (ADR 0015 §24.21): if it recurs, follow the note there.
 2. **Confirm step 3b and step 6 on real tenants** (in parallel: the user is setting up the Entra
