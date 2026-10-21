@@ -36,9 +36,9 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-from edisc_core.canonical import canonical_json
 from edisc_core.kms import SIGNING_ALGORITHM, KmsSigner
 from edisc_core.settings import ClientKeySpec, Settings
+from edisc_verify.canonical import canonical_json
 
 ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 ASSERTION_SECONDS = 300

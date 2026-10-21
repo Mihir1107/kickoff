@@ -14,10 +14,10 @@ You do not need to trust our servers or our staff to use it. You need to trust o
    anchors *as listed from the bucket*. To be independent of our export tooling too, fetch each
    anchor yourself by key and VersionId (see [Checking the anchors yourself](#checking-the-anchors-yourself)).
 2. **The verifier's source code**, which you can read. It is a few thousand lines of Python. The
-   offline path imports only the Python standard library, `rfc8785` (canonical JSON), `pydantic`
-   (through `edisc_core`), and pure modules of this repository (`edisc_core`, `edisc_custody`, and
-   `edisc_renderers.report` for the recomputation). A test fails if the verifier imports database,
-   S3 or cloud code (`tests/integration/custody/test_package.py`).
+   whole distribution (`packages/verify`, module `edisc_verify`) imports only the Python standard
+   library, its own modules, `rfc8785` (canonical JSON) and `cryptography` (signatures). Tests
+   fail if any of its modules imports anything else, or if importing all of it loads anything else
+   (`tests/unit/verify/test_boundary.py`).
 
 ## 1. What you receive
 
@@ -38,23 +38,36 @@ package may likewise reference its outputs and natives, which you pass with `--f
 
 ## 2. Getting the verifier
 
-You need Python 3.12 (we pin 3.12.13; `.python-version`) and [uv](https://docs.astral.sh/uv/).
-From the source archive of the repository at the commit we name for the production:
+The verifier is its own distribution, `edisc-verify` (module `edisc_verify`): the standard
+library plus two pinned dependencies, `cryptography` and `rfc8785` (with `cffi` and `pycparser`,
+which `cryptography` needs). It contains no database, object-storage, workflow or web code (a test
+enforces it), so it installs on its own, into an otherwise empty environment.
+
+You need Python 3.12 (we pin 3.12.13; `.python-version`). From the source archive of the
+repository at the commit we name for the production:
 
 ```
-uv sync --frozen --no-dev --package edisc-renderers
-uv run --no-sync edisc-verify --help
+uv build --package edisc-verify --wheel --out-dir dist     # with SOURCE_DATE_EPOCH, see below
+python3.12 -m venv verifier
+verifier/bin/pip install --require-hashes -r packages/verify/requirements.lock
+verifier/bin/pip install --no-deps dist/edisc_verify-*.whl
+verifier/bin/edisc-verify --version
 ```
 
-`--frozen` installs exactly the versions in `uv.lock` (with their hashes). `edisc-renderers` pulls
-in `edisc-custody` (the verifier) and `edisc-core`. It is needed for `--job-package` on a report
-package, which recomputes the report from the job's chain. The workspace also installs the database
-and S3 client libraries as dependencies of `edisc-custody`, but the verifier never imports them
-(tested).
-
-For an air-gapped machine, run `uv sync` on a connected machine with the same OS and Python, then
-copy the whole directory, including `.venv`, across. A standalone verifier distribution with a
-minimal dependency set is not available yet (docs/BACKLOG.md).
+- `requirements.lock` pins every dependency with its SHA-256 hashes (generated from `uv.lock`);
+  `--require-hashes` refuses anything else.
+- **The wheel is reproducible.** Built with `SOURCE_DATE_EPOCH` set to the commit's time
+  (`SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)`), two builds of one commit are byte-identical
+  and every entry carries that time; compare its SHA-256 with the one we publish for the commit
+  (`scripts/verifier_standalone.py build` builds twice and prints it). Our CI builds it twice,
+  installs it into an empty venv with `--no-index`, and checks that it answers exactly like the
+  verifier in the workspace, on real packages and on tampered ones.
+- **Air-gapped machine:** on a connected machine with the same OS, CPU architecture and Python,
+  `pip download --require-hashes --only-binary=:all: -r requirements.lock -d wheels`, then copy
+  `wheels/`, the wheel and `requirements.lock` across and install with `--no-index --find-links
+  wheels`.
+- `edisc-verify --version` names the package formats it reads: custody `/1`-`/3`, render
+  `/1`-`/3`, report `/1`.
 
 Exit codes: **0** verified, **1** verification failed, **2** the package could not be read or its
 format is not supported. `--json` prints the full machine-readable result.

@@ -297,7 +297,7 @@ def test_the_reconciler_checks_the_written_natives() -> None:
 def test_an_external_reference_that_was_not_planned_fails() -> None:
     import dataclasses
 
-    from edisc_core.canonical import canonical_json
+    from edisc_verify.canonical import canonical_json
 
     options = RenderOptions(external_over_bytes=MIB)
     big = sized("F1", 2 * MIB)
@@ -342,7 +342,7 @@ def _name_line(f: RenderedFile) -> str:
     ],
 )
 def test_placeholder_names_round_trip_exactly(name: str, encoded: str) -> None:
-    from edisc_custody.rsmf_check import decode_name
+    from edisc_verify.rsmf_check import decode_name
 
     line = _name_line(
         one_file(sized("F1", 2 * MIB, name=name), RenderOptions(external_over_bytes=MIB))
@@ -352,7 +352,7 @@ def test_placeholder_names_round_trip_exactly(name: str, encoded: str) -> None:
 
 
 def test_a_literal_escape_and_a_real_newline_give_different_placeholders() -> None:
-    from edisc_custody.rsmf_check import decode_name
+    from edisc_verify.rsmf_check import decode_name
 
     options = RenderOptions(external_over_bytes=MIB)
     literal = _name_line(one_file(sized("F1", 2 * MIB, name=LITERAL), options))
@@ -365,7 +365,7 @@ def test_a_literal_escape_and_a_real_newline_give_different_placeholders() -> No
     "bad", ["a\nb", "a\\", "a\\x41", "a\\u004", "a\\u000A", "a\\u0041", "a\\\\\\"]
 )
 def test_the_decoder_accepts_one_encoding_only(bad: str) -> None:
-    from edisc_custody.rsmf_check import RsmfCheckError, decode_name
+    from edisc_verify.rsmf_check import RsmfCheckError, decode_name
 
     with pytest.raises(RsmfCheckError):
         decode_name(bad)

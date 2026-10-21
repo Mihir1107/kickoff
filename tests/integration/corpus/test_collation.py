@@ -39,14 +39,14 @@ from types_aiobotocore_s3 import S3Client
 from edisc_connector_dummy.dataset import Dataset
 from edisc_connector_dummy.dialects.slack_export import ExportOptions, write_export
 from edisc_connectors_base.ratelimit import RateLimiter
-from edisc_core.canonical import canonical_json
 from edisc_core.kms import LocalKmsClient
 from edisc_core.settings import Settings
 from edisc_custody.export import export_package
 from edisc_db.bootstrap import bootstrap
 from edisc_db.migrate import upgrade
 from edisc_db.session import create_engine, session_factory
-from edisc_renderers.report.recompute import recompute
+from edisc_verify.canonical import canonical_json
+from edisc_verify.report.recompute import recompute
 from edisc_worker.renders import RenderRun
 from edisc_worker.report_loader import ReportLoader
 

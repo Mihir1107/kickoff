@@ -1,6 +1,6 @@
 """Report packages (``edisc-report-package/1``, ADR 0018 §14, §27): one generator for the directory
 export and the download stream (``GET /v1/reports/{id}/package``), verified offline by
-``edisc-verify`` (``edisc_custody.report_package``).
+``edisc-verify`` (``edisc_verify.report_package``).
 
 Entries, in a fixed order: ``manifest.json``; ``events.jsonl`` (the report's own custody stream up to
 its sealed head); ``anchors.jsonl`` (the report stream's anchors as LISTED from the bucket, never the
@@ -27,10 +27,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
 
-from edisc_core.canonical import canonical_json
 from edisc_core.settings import Settings
 from edisc_core.time import format_utc
-from edisc_custody.chain import anchor_prefix
 from edisc_custody.render_export import (
     PackageIntegrityError,
     PackageObject,
@@ -42,11 +40,13 @@ from edisc_custody.render_export import (
     _object_member,
     _registry,
 )
-from edisc_custody.report_files import REPORT_GENERATED, REPORT_STARTED
-from edisc_custody.report_package import REPORT_PACKAGE_FORMAT
 from edisc_custody.zipwriter import ZipMember, ZipSizer
 from edisc_db.session import tenant_tx
 from edisc_evidence.worm import get_bytes, list_versions
+from edisc_verify.canonical import canonical_json
+from edisc_verify.chain import anchor_prefix
+from edisc_verify.report_files import REPORT_GENERATED, REPORT_STARTED
+from edisc_verify.report_package import REPORT_PACKAGE_FORMAT
 
 __all__ = [
     "PackageIntegrityError",

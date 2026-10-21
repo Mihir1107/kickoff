@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 
 from edisc_connector_dummy.spec import DatasetSpec
-from edisc_core.canonical import canonical_json
 from edisc_renderers.rsmf import (
     Reconciler,
     ReconciliationError,
@@ -23,6 +22,7 @@ from edisc_renderers.rsmf import (
     subject_digest,
 )
 from edisc_renderers.rsmf.render import _root_of
+from edisc_verify.canonical import canonical_json
 from tests.unit.renderers.oracle import OracleJob, build_job
 
 OPTIONS = RenderOptions(cap=8)

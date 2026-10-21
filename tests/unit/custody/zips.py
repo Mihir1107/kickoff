@@ -7,7 +7,7 @@ import io
 import struct
 import zipfile
 
-from edisc_custody.archive import CD_LEN, LOCAL_LEN
+from edisc_verify.archive import CD_LEN, LOCAL_LEN
 
 
 def make_zip(

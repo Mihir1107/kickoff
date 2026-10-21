@@ -11,8 +11,8 @@ from types_aiobotocore_s3 import S3Client
 
 from edisc_core.ids import new_id
 from edisc_core.settings import Settings
-from edisc_custody.archive import ArchiveLimits, scan
 from edisc_evidence.archive_source import CoalescingSource, S3ObjectSource
+from edisc_verify.archive import ArchiveLimits, scan
 
 ENTRIES = 5000
 
@@ -59,7 +59,7 @@ async def test_sequential_coalesced_reads_cost_a_few_requests_per_thousand_entri
     # ~ one request per window of archive, plus the end records and the directory
     assert coalesced.requests <= len(data) // window + 6, coalesced.requests
     # the naive reader, measured on the first 200 entries (header, name, data: ~3 requests each)
-    from edisc_custody.archive import open_entry
+    from edisc_verify.archive import open_entry
 
     for e in sorted(entries, key=lambda e: e.local_header_offset)[:200]:
         async for _ in open_entry(plain, e, limits):

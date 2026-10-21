@@ -36,11 +36,11 @@ from types_aiobotocore_s3 import S3Client
 from edisc_core.settings import Settings
 from edisc_custody.log import verify_chain
 from edisc_custody.render_export import export_render_package
-from edisc_custody.render_package import verify_render_package
 from edisc_custody.sweeper import sweep_anchors
 from edisc_db.session import tenant_tx
 from edisc_evidence.writer import EvidenceWriter
 from edisc_renderers.rsmf import RenderOptions, runtime_versions
+from edisc_verify.render_package import verify_render_package
 from edisc_worker.contracts import RenderRef, render_task_queue, render_workflow_id
 from edisc_worker.renders import RenderActivities, RenderRun, create_render, start_render_workflow
 from edisc_worker.workflows import RenderWorkflow

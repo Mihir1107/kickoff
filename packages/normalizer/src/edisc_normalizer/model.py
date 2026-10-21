@@ -9,10 +9,10 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
-from edisc_core.canonical import canonical_source_hash
-from edisc_core.idempotency import idempotency_key
-from edisc_core.lone_surrogates import FIELD, has_lone, make_valid
 from edisc_core.schemas import EventKind, ItemType
+from edisc_verify.canonical import canonical_source_hash
+from edisc_verify.idempotency import idempotency_key
+from edisc_verify.lone_surrogates import FIELD, has_lone, make_valid
 
 NORMALIZER_VERSION = "0.3.0"
 """Recorded on every derived record (item_derivations). Bump when derivation logic changes. Changing a

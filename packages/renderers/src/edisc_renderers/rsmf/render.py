@@ -17,11 +17,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, tzinfo
 from typing import Any
 
-from edisc_core.canonical import canonical_json
-from edisc_core.lone_surrogates import has_lone, make_valid, replacement, utf16_units
 from edisc_core.schemas import ARCHIVE_CAVEAT
 from edisc_core.time import format_utc, from_epoch
-from edisc_custody.merkle import batch_root
 from edisc_custody.zipwriter import MAX16
 from edisc_renderers.rsmf import eml
 from edisc_renderers.rsmf.model import (
@@ -62,6 +59,9 @@ from edisc_renderers.rsmf.zipstream import (
     drive,
     sizer,
 )
+from edisc_verify.canonical import canonical_json
+from edisc_verify.lone_surrogates import has_lone, make_valid, replacement, utf16_units
+from edisc_verify.merkle import batch_root
 
 _EVENT_COLLECTION_NS = uuid.uuid5(uuid.NAMESPACE_URL, "urn:edisc:rsmf:eventcollectionid")
 _CONVERSATION_ID = re.compile(r"^[A-Za-z0-9]{1,64}$")
@@ -381,7 +381,7 @@ def _one_line(text: str) -> str:
     """A value that cannot break the one-field-per-line layout, encoded unambiguously (ADR 0015
     §21.4): a backslash becomes `\\\\`; control characters, line and paragraph separators and lone
     surrogates become `\\uXXXX` (four lowercase hex digits); everything else is itself. Decoded by
-    `edisc_custody.rsmf_check.decode_name`. The manifest's `display` keeps the exact name."""
+    `edisc_verify.rsmf_check.decode_name`. The manifest's `display` keeps the exact name."""
     return "".join(
         "\\\\"
         if c == "\\"

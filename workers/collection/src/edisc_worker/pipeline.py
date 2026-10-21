@@ -50,7 +50,6 @@ from edisc_connectors_base.types import (
 )
 from edisc_core.ids import new_id
 from edisc_core.logs import get_logger
-from edisc_core.lone_surrogates import recorded_text, replacement
 from edisc_core.schemas import ItemType, JobStatus, ReconStatus, ScopeType
 from edisc_core.settings import Settings
 from edisc_core.time import day_bounds, ensure_utc, utc_now
@@ -81,6 +80,7 @@ from edisc_normalizer.slack import (
     normalize_messages_page,
 )
 from edisc_normalizer.store import load_prior, persist
+from edisc_verify.lone_surrogates import recorded_text, replacement
 
 DIRECTORY_UNIT = "directory"
 

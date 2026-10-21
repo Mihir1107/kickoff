@@ -41,11 +41,11 @@ from edisc_connectors_base.protocol import Connector
 from edisc_connectors_base.types import AuthenticationError, Connection
 from edisc_core.ids import new_id
 from edisc_core.logs import get_logger
-from edisc_core.lone_surrogates import recorded_text
 from edisc_core.settings import Settings
 from edisc_db.session import tenant_tx
 from edisc_normalizer import directory
 from edisc_normalizer.slack import NormalizationError
+from edisc_verify.lone_surrogates import recorded_text
 from edisc_worker.pipeline import CrashHooks
 
 log = get_logger(__name__)

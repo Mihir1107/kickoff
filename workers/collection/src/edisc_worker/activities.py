@@ -31,9 +31,9 @@ from types_aiobotocore_s3 import S3Client
 from edisc_connector_dummy.guard import ensure_dummy_permitted
 from edisc_connectors_base.protocol import Connector
 from edisc_connectors_base.types import AuthenticationError, Connection
-from edisc_core.canonical import canonical_json
 from edisc_core.settings import Settings
 from edisc_db.session import tenant_tx
+from edisc_verify.canonical import canonical_json
 from edisc_worker.contracts import (
     ChildrenRequest,
     CollectRequest,

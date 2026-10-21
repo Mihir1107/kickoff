@@ -73,7 +73,7 @@ OFF_LOOP = (
     "edisc_worker.render_loader:_index_rows",
     "edisc_worker.report_loader:unit_rows_page",
     "edisc_renderers.preview:render_preview",
-    "edisc_renderers.report.model:valid_document",
+    "edisc_verify.report.model:valid_document",
     "edisc_connector_dummy.connector:DummyConnector.plan",
     "edisc_connector_dummy.connector:directory_listing",
     "edisc_connector_dummy.dialects.slack:history_page",

@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from edisc_custody.merkle import EMPTY_ROOT
-from edisc_custody.render_files import (
+from edisc_verify.merkle import EMPTY_ROOT
+from edisc_verify.render_files import (
     FILE_FIELDS,
     FILE_FIELDS_1,
     NATIVE_FIELDS,
@@ -72,7 +72,7 @@ def test_the_root_over_batches_depends_on_order_and_count() -> None:
 
 # ------------------------------------------------------------------ the verifier's render checks
 def _chain(payloads: list[tuple[str, dict[str, Any]]]) -> list[Any]:
-    from edisc_custody.chain import GENESIS_HASH, EventRecord, compute_event_hash, hashed_fields
+    from edisc_verify.chain import GENESIS_HASH, EventRecord, compute_event_hash, hashed_fields
 
     out, prev = [], GENESIS_HASH
     for seq, (event_type, payload) in enumerate(payloads, start=1):
@@ -96,7 +96,7 @@ def _verify(
 ) -> list[str]:
     """A render stream: render_started (``version``), the batches (with their natives from 1.3.0),
     render_completed. ``batch_payloads`` overrides fields of the batch events."""
-    from edisc_custody.chain import ChainVerifier
+    from edisc_verify.chain import ChainVerifier
 
     fields = FILE_FIELDS if has_natives(version) else FILE_FIELDS_1
     natives = natives or [[] for _ in batches]
@@ -141,7 +141,7 @@ def test_render_completed_totals_are_recomputed_from_the_batches() -> None:
 
 
 def test_a_batch_that_skips_or_repeats_files_is_caught() -> None:
-    from edisc_custody.chain import ChainVerifier
+    from edisc_verify.chain import ChainVerifier
 
     files = [record(0), record(1)]
     payloads = [

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "RSMF renderer (pure: no database or cloud imports)."
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "edisc-verify",
     "edisc-core",
     "edisc-custody",
     "jsonschema>=4.23",
@@ -12,6 +13,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
+edisc-verify = { workspace = true }
 edisc-core = { workspace = true }
 edisc-custody = { workspace = true }
 

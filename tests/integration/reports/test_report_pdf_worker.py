@@ -37,7 +37,7 @@ from types_aiobotocore_s3 import S3Client
 from edisc_core.settings import Settings
 from edisc_db.session import tenant_tx
 from edisc_renderers.report.html import glyph_set_id
-from edisc_renderers.report.version import REPORT_RENDERER_VERSION
+from edisc_verify.report.version import REPORT_RENDERER_VERSION
 from edisc_worker.contracts import ReportRef, report_task_queue, report_workflow_id
 from edisc_worker.workflows import ReportWorkflow
 

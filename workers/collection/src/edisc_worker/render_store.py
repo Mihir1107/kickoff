@@ -67,7 +67,7 @@ class StoredNative:
     deduplicated: bool
 
     def record(self) -> dict[str, Any]:
-        """The native's record (``edisc_custody.render_files.NATIVE_FIELDS``)."""
+        """The native's record (``edisc_verify.render_files.NATIVE_FIELDS``)."""
         return {
             "ord": self.ord,
             "sha256": self.sha256,

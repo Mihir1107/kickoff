@@ -11,10 +11,10 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from edisc_core.canonical import canonical_json
-from edisc_renderers.report import model as m
-from edisc_renderers.report.recompute import recompute
-from edisc_renderers.report.version import REPORT_RENDERER_VERSION
+from edisc_verify.canonical import canonical_json
+from edisc_verify.report import model as m
+from edisc_verify.report.recompute import recompute
+from edisc_verify.report.version import REPORT_RENDERER_VERSION
 from edisc_worker import pipeline
 
 T0 = datetime(2026, 1, 5, 9, 0, tzinfo=UTC)

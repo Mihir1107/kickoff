@@ -1,6 +1,6 @@
 """Job custody packages (``edisc-custody-package/3``, ADR 0008, ADR 0018 §27): one generator for the
 directory export (``edisc_custody.export.export_package``) and the download stream
-(``GET /v1/jobs/{id}/package``), verified offline by ``edisc-verify`` (``edisc_custody.package``).
+(``GET /v1/jobs/{id}/package``), verified offline by ``edisc-verify`` (``edisc_verify.package``).
 
 Format 3 is format 2 with a DETERMINISTIC manifest: the job's seal time instead of an export time,
 so two packages of one sealed job in one mode are byte-identical. Same two passes as render packages
@@ -30,12 +30,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
 
-from edisc_core.canonical import canonical_json
 from edisc_core.settings import Settings
 from edisc_core.time import format_utc
-from edisc_custody.chain import BATCH_EVENT, anchor_prefix
 from edisc_custody.log import event_record_from_row
-from edisc_custody.package import FILES, PACKAGE_FORMAT
 from edisc_custody.render_export import (
     PackageIntegrityError,
     PackageObject,
@@ -46,6 +43,9 @@ from edisc_custody.render_export import (
 from edisc_custody.zipwriter import ZipMember, ZipSizer
 from edisc_db.session import tenant_tx
 from edisc_evidence.worm import get_bytes, list_versions
+from edisc_verify.canonical import canonical_json
+from edisc_verify.chain import BATCH_EVENT, anchor_prefix
+from edisc_verify.package import FILES, PACKAGE_FORMAT
 
 Objects = Literal["embed", "omit"]
 Archives = Literal["embed", "reference"]

@@ -45,10 +45,10 @@ from edisc_custody.report_export import (
     plan_report_package,
     report_package_members,
 )
-from edisc_custody.report_package import REPORT_PACKAGE_FORMAT
 from edisc_custody.zipwriter import ZipSizeError, zip_stream
 from edisc_db.session import tenant_tx
 from edisc_evidence.writer import EvidenceWriter
+from edisc_verify.report_package import REPORT_PACKAGE_FORMAT
 from edisc_worker.reports import (
     DEFAULT_PAPER,
     create_report,

@@ -14,8 +14,8 @@ from types_aiobotocore_s3 import S3Client
 
 from edisc_core.settings import Settings
 from edisc_custody.log import verify_chain
-from edisc_custody.report_files import files_root
 from edisc_db.session import tenant_tx
+from edisc_verify.report_files import files_root
 from edisc_worker.report_loader import ReportLoader
 from edisc_worker.reports import ReportRun, create_report
 

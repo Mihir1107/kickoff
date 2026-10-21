@@ -32,7 +32,7 @@ from importlib import metadata, resources, util
 from pathlib import Path
 from typing import Any
 
-from edisc_core.canonical import canonical_json
+from edisc_verify.canonical import canonical_json
 
 NO_TOOLCHAIN = "none"
 INSTALLERS = frozenset({"pip", "setuptools", "wheel"})

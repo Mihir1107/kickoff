@@ -24,7 +24,7 @@ The plan of record is in `docs/ARCHITECTURE.md` and `docs/adr/`. Read them befor
 8. **Streaming, never loading.** Bounded chunks. Hash while uploading. Never hold a whole conversation/collection in memory.
 
 ## Layout
-- `packages/*`: libraries (`edisc_core`, `edisc_db`, `edisc_evidence`, `edisc_custody`, `edisc_connectors_base`,
+- `packages/*`: libraries (`edisc_core`, `edisc_db`, `edisc_evidence`, `edisc_custody`, `edisc_verify`, `edisc_connectors_base`,
   `edisc_connector_*`, `edisc_normalizer`, `edisc_renderers`). src layout, one uv workspace member each.
 - `apps/api` (`edisc_api`): FastAPI. `workers/collection` (`edisc_worker`): Temporal workers, one task queue per source.
 - `infra/docker-compose.yml`: Postgres, Redis, MinIO (object lock), Temporal + UI, Elasticsearch (optional `search` profile, off by default). Pinned by tag + digest.
@@ -48,6 +48,7 @@ make test-env-up / test-integration-only / test-env-down   # keep the test stack
                         # up/up-ci/test targets refuse below MIN_FREE_GB (15) free disk
 make production-readiness  # fails while anything refuses production (allow-list pending_frontend); READINESS_MODE=warn reports only
 make test-report-pdf    # report image (amd64): in-image PDF tests, PDF goldens, veraPDF, worker OOM (needs test-env-up)
+make verifier-standalone   # verifier wheel twice (reproducible), empty venv, compared with the in-tree one (needs test-env-up)
 make worker / api       # Temporal worker (+ maintenance queue, sweeper schedules, exports, renders) / API
 ```
 - **Every test run leaves its full output on disk.** Every make test target runs through
@@ -511,7 +512,18 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   anchor by writing the head without the claim). Lifecycle events and every N events are anchored; `seal_job_chain` at
   finalize; `sweep_anchors` (periodic) seals overdue/abandoned streams. `verify_chain` (DB) and `edisc-verify` (offline package, ADR 0008) share `ChainVerifier`. Anchors are always
   listed from S3 versions, never from the DB. Merkle = RFC 6962, leaves ordered by idempotency_key.
-- Keep `edisc_custody.package`/`cli`/`chain`/`merkle` free of DB and cloud imports (a test enforces it).
+- **The offline verifier is its own distribution** (`packages/verify`, `edisc-verify`, module
+  `edisc_verify`; M18 step 5, D12): it OWNS the offline code (canonical JSON, lone surrogates,
+  jsonpath, idempotency keys, UTC formatting, the chain/Merkle/package/archive/RSMF-check readers,
+  the report model and recomputation, the JWS) and imports only the stdlib, itself, `rfc8785` and
+  `cryptography`, all pinned `==` and hashed (`packages/verify/requirements.lock`, `scripts/
+  verifier_standalone.py lock`). The product imports FROM it, never the reverse; the old paths
+  (`edisc_custody.chain`, `edisc_core.canonical`, `edisc_renderers.report.model`, ...) are
+  `sys.modules` aliases for one release: new code imports `edisc_verify.*`. The JWS accepts exactly
+  ES256 (`edisc_verify.jws`): never an algorithm from the token. Wheel reproducible
+  (`SOURCE_DATE_EPOCH` = commit time). `make verifier-standalone` (CI job `verifier-standalone`,
+  needs `make test-env-up`): built twice, installed in an empty venv, compared byte for byte with
+  the in-tree verifier on real and tampered packages. Tests: `tests/unit/verify/`.
 - `completed_unverified` is never presented as a clean completion (ADR 0005).
 - Secrets: `.env.example` has placeholders only. Never commit `.env`. Wrap secrets in `SecretStr`.
 - Dummy connector (`edisc_connector_dummy`): the golden dataset and its own oracle. Expected values in tests come

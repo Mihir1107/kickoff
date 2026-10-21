@@ -20,8 +20,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from edisc_core.lone_surrogates import has_lone, replacement, substitute_key, utf16_units
 from edisc_normalizer.slack import API, _conversation_type, _parse
+from edisc_verify.lone_surrogates import has_lone, replacement, substitute_key, utf16_units
 
 USER, CONVERSATION = "user", "conversation"
 KINDS = (CONVERSATION, USER)

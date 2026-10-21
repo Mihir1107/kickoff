@@ -22,8 +22,8 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from edisc_renderers.report import html as rhtml
-from edisc_renderers.report.model import PAUSE_ENDS, UNKNOWN
-from edisc_renderers.report.version import REPORT_RENDERER_VERSION
+from edisc_verify.report.model import PAUSE_ENDS, UNKNOWN
+from edisc_verify.report.version import REPORT_RENDERER_VERSION
 
 # every hard case spike S1 names (names and error texts), §5.10
 HARD = {
@@ -382,7 +382,7 @@ def test_lone_surrogates_from_escaped_json_neither_crash_nor_corrupt() -> None:
 def test_report_json_refuses_a_lone_surrogate_loudly() -> None:
     """`report.json` keeps user strings EXACTLY; RFC 8785 cannot represent a lone surrogate, so the
     canonical encoder refuses (a failed report, never silently altered data)."""
-    from edisc_core.canonical import CanonicalizationError, canonical_json
+    from edisc_verify.canonical import CanonicalizationError, canonical_json
 
     with pytest.raises(CanonicalizationError):
         canonical_json({"error": json.loads('"\\ud800"')})
@@ -526,8 +526,8 @@ def test_the_page_carries_the_seal_dates_and_its_identity_for_the_pdf() -> None:
 
 # ------------------------------------------------------------------ lone surrogates (ADR 0018 §23)
 def test_lone_surrogates_are_valid_in_report_json_counted_and_marked_in_html() -> None:
-    from edisc_core.lone_surrogates import has_lone, restore
-    from edisc_renderers.report import model as m
+    from edisc_verify.lone_surrogates import has_lone, restore
+    from edisc_verify.report import model as m
     from tests.unit.renderers.test_report_golden import CASES
 
     exact = m.report_document(CASES["gaps_and_failures_hard_strings"]())
@@ -552,7 +552,7 @@ def test_lone_surrogates_are_valid_in_report_json_counted_and_marked_in_html() -
 
 
 def test_a_unit_failed_error_recorded_with_its_code_units_is_stated_exactly() -> None:
-    from edisc_renderers.report import model as m
+    from edisc_verify.report import model as m
 
     exact = "bad name " + chr(0xD800) + " here"
     units = [ord(c) for c in exact]

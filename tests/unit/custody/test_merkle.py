@@ -8,7 +8,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from edisc_custody.merkle import (
+from edisc_verify.merkle import (
     EMPTY_ROOT,
     batch_root,
     item_leaf,

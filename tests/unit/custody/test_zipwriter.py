@@ -22,15 +22,15 @@ from pathlib import Path
 
 import pytest
 
-from edisc_custody.archive import (
+from edisc_custody.zipwriter import MAX16, MAX32, ZipMember, ZipSizeError, ZipSizer, zip_stream
+from edisc_verify.archive import (
     ArchiveError,
     iter_central_directory,
     locate_directory,
     open_entry,
     scan,
 )
-from edisc_custody.package_source import PACKAGE_LIMITS, ZipSource, read_all
-from edisc_custody.zipwriter import MAX16, MAX32, ZipMember, ZipSizeError, ZipSizer, zip_stream
+from edisc_verify.package_source import PACKAGE_LIMITS, ZipSource, read_all
 from tests.unit.turns import turns_during
 
 
@@ -277,7 +277,7 @@ class SyntheticArchive:
             i += 1
         return bytes(out)
 
-    async def read(self, offset: int, length: int) -> bytes:  # edisc_custody.archive.Source
+    async def read(self, offset: int, length: int) -> bytes:  # edisc_verify.archive.Source
         return self.read_at(offset, length)
 
 

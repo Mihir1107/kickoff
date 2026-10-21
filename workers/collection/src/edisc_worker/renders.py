@@ -15,7 +15,7 @@ status moved and writes nothing (the status, never a value that can repeat, is t
   options (``include_context``, time zone, cap).
 - ``render_files``: renders and stores (``render_and_store``: reconcile first, then write). Files are
   committed in batches of ``render_files_batch_size``: the rows plus one ``render_files_batch`` event
-  whose Merkle root covers them (``edisc_custody.render_files``), with the natives (attachments kept
+  whose Merkle root covers them (``edisc_verify.render_files``), with the natives (attachments kept
   outside the zip, ADR 0015 §20) first referenced by those files and their ``natives_root``. A batch is committed only when
   ``batches_done`` is exactly its index; a batch an earlier attempt committed must be re-rendered to
   exactly the recorded files, else it is an integrity incident. The render id fixes the storage keys
@@ -50,13 +50,17 @@ from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from types_aiobotocore_s3 import S3Client
 
-from edisc_core.canonical import canonical_json
 from edisc_core.ids import new_id
-from edisc_core.lone_surrogates import recorded_text, replacement
 from edisc_core.settings import Settings
-from edisc_custody.chain import ANCHOR_FORMAT, anchor_key
 from edisc_custody.log import anchor_if_due, append, verify_chain
-from edisc_custody.render_files import (
+from edisc_db.session import tenant_tx
+from edisc_evidence.worm import get_bytes, list_versions
+from edisc_evidence.writer import EvidenceIntegrityError
+from edisc_renderers.rsmf import RenderError, RenderOptions, runtime_versions
+from edisc_verify.canonical import canonical_json
+from edisc_verify.chain import ANCHOR_FORMAT, anchor_key
+from edisc_verify.lone_surrogates import recorded_text, replacement
+from edisc_verify.render_files import (
     RENDER_BATCH_EVENT,
     RENDER_COMPLETED,
     RENDER_FAILED,
@@ -67,10 +71,6 @@ from edisc_custody.render_files import (
     files_root,
     natives_root,
 )
-from edisc_db.session import tenant_tx
-from edisc_evidence.worm import get_bytes, list_versions
-from edisc_evidence.writer import EvidenceIntegrityError
-from edisc_renderers.rsmf import RenderError, RenderOptions, runtime_versions
 from edisc_worker.activities import _ticking
 from edisc_worker.contracts import (
     ErrorClass,

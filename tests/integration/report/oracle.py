@@ -11,7 +11,7 @@ from typing import Any
 from edisc_connector_dummy.dataset import Dataset, unit
 from edisc_connector_dummy.spec import CountMode
 from edisc_core.schemas import JobStatus
-from edisc_renderers.report import model as m
+from edisc_verify.report import model as m
 
 
 @dataclass(frozen=True)

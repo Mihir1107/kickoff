@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from edisc_core.lone_surrogates import has_lone, replacement, substitute_key, utf16_units
+from edisc_verify.lone_surrogates import has_lone, replacement, substitute_key, utf16_units
 
 KNOWN_METADATA = frozenset(
     {

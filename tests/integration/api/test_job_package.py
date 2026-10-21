@@ -34,7 +34,7 @@ __all__ = ["report_worker"]  # the fixture, re-exported for pytest
 
 def _cli_blocking(*args: str | Path) -> tuple[int, str]:
     proc = subprocess.run(
-        [sys.executable, "-m", "edisc_custody.cli", *map(str, args)],
+        [sys.executable, "-m", "edisc_verify.cli", *map(str, args)],
         capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"}, timeout=300, check=False,
     )  # fmt: skip
     return proc.returncode, proc.stdout + proc.stderr

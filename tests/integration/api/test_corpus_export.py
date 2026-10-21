@@ -32,12 +32,12 @@ from edisc_connector_dummy.dialects.slack_export import (
     write_export,
 )
 from edisc_connector_slack_export.layout import BLIND_SPOTS_ALL, BLIND_SPOTS_PUBLIC_ONLY
-from edisc_core.canonical import canonical_json
-from edisc_core.lone_surrogates import replacement, substitute_key, utf16_units
 from edisc_custody.export import export_package
 from edisc_db.session import tenant_tx
 from edisc_renderers.report.html import escape
-from edisc_renderers.report.recompute import recompute
+from edisc_verify.canonical import canonical_json
+from edisc_verify.lone_surrogates import replacement, substitute_key, utf16_units
+from edisc_verify.report.recompute import recompute
 from edisc_worker.renders import RenderRun
 
 from ..corpus.cases import EXPORT, Case

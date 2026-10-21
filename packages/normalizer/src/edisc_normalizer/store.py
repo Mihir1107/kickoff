@@ -20,12 +20,12 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from edisc_core.canonical import canonical_hash, canonical_json
-from edisc_core.idempotency import idempotency_key
 from edisc_core.ids import new_id
 from edisc_core.time import day_bounds
 from edisc_normalizer.model import Derived, NormalizeContext, PriorState
 from edisc_normalizer.slack import NO_LONGER_OBSERVED
+from edisc_verify.canonical import canonical_hash, canonical_json
+from edisc_verify.idempotency import idempotency_key
 
 # The per-batch lookups on ``items``. For a tenant the statistics do not know yet (a new tenant's
 # first collection), the planner estimates the tenant at about one row and was seen to read ALL the

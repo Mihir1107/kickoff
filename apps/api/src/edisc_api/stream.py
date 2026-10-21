@@ -54,10 +54,10 @@ from edisc_api.stream_events import (
     UnitsEvent,
     UnitState,
 )
-from edisc_core.canonical import canonical_json
 from edisc_core.logs import get_logger
 from edisc_core.schemas import JobStatus
 from edisc_db.session import tenant_tx
+from edisc_verify.canonical import canonical_json
 
 log = get_logger(__name__)
 

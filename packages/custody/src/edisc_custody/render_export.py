@@ -1,6 +1,6 @@
 """Render packages (``edisc-render-package/3``, ADR 0015 §14, §19 and §20): one generator for the
 directory export and the download stream, verified offline by ``edisc-verify``
-(``edisc_custody.render_package``). Format 3 adds the render's natives (attachments kept outside the
+(``edisc_verify.render_package``). Format 3 adds the render's natives (attachments kept outside the
 ``.rsmf`` zips): ``natives.jsonl`` (their records, with their batch events) and, when outputs are
 embedded, ``natives/<sha256>`` after ``outputs/``; otherwise the expert supplies them with ``--file``.
 
@@ -38,16 +38,16 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
 
-from edisc_core.canonical import canonical_json
 from edisc_core.settings import Settings
 from edisc_core.time import format_utc
-from edisc_custody.chain import anchor_prefix
 from edisc_custody.log import event_record_from_row
-from edisc_custody.render_files import RENDER_STARTED
-from edisc_custody.render_package import RENDER_PACKAGE_FORMAT
 from edisc_custody.zipwriter import ZipMember, ZipSizer
 from edisc_db.session import tenant_tx
 from edisc_evidence.worm import get_bytes, list_versions, read_ranges
+from edisc_verify.canonical import canonical_json
+from edisc_verify.chain import anchor_prefix
+from edisc_verify.render_files import RENDER_STARTED
+from edisc_verify.render_package import RENDER_PACKAGE_FORMAT
 
 Outputs = Literal["embed", "reference"]
 CHUNK = 1 << 20

@@ -19,16 +19,16 @@ from types_aiobotocore_s3 import S3Client
 
 from edisc_connector_dummy.connector import DummyConnector
 from edisc_connector_dummy.dataset import LONE_SURROGATE_NAME
-from edisc_core.canonical import canonical_json
-from edisc_core.lone_surrogates import has_lone, replacement, utf16_units
 from edisc_core.schemas import ARCHIVE_CAVEAT
 from edisc_core.settings import Settings
 from edisc_custody.export import export_package
-from edisc_custody.package import verify_package
 from edisc_custody.render_export import export_render_package
-from edisc_custody.render_package import verify_render_package
 from edisc_db.session import tenant_tx
 from edisc_renderers.rsmf import golden_key
+from edisc_verify.canonical import canonical_json
+from edisc_verify.lone_surrogates import has_lone, replacement, utf16_units
+from edisc_verify.package import verify_package
+from edisc_verify.render_package import verify_render_package
 
 from ...unit.renderers.emlcheck import check_eml, custom
 from .cases import Case

@@ -49,11 +49,16 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from types_aiobotocore_s3 import S3Client
 
 from edisc_core.ids import new_id
-from edisc_core.lone_surrogates import recorded_text, replacement
 from edisc_core.settings import Settings
-from edisc_custody.chain import anchor_key
 from edisc_custody.log import anchor_if_due, append
-from edisc_custody.report_files import (
+from edisc_db.session import tenant_tx
+from edisc_evidence.worm import get_bytes
+from edisc_evidence.writer import EvidenceIntegrityError, EvidenceWriter
+from edisc_renderers.report.html import glyph_set_id
+from edisc_verify.chain import anchor_key
+from edisc_verify.lone_surrogates import recorded_text, replacement
+from edisc_verify.report.version import REPORT_RENDERER_VERSION
+from edisc_verify.report_files import (
     REPORT_FAILED,
     REPORT_GENERATED,
     REPORT_REFUSED,
@@ -61,11 +66,6 @@ from edisc_custody.report_files import (
     file_record,
     files_root,
 )
-from edisc_db.session import tenant_tx
-from edisc_evidence.worm import get_bytes
-from edisc_evidence.writer import EvidenceIntegrityError, EvidenceWriter
-from edisc_renderers.report.html import glyph_set_id
-from edisc_renderers.report.version import REPORT_RENDERER_VERSION
 from edisc_worker import versions
 from edisc_worker.activities import _ticking
 from edisc_worker.contracts import (

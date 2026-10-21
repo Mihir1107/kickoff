@@ -38,9 +38,9 @@ from edisc_custody.job_export import (
     job_package_members,
     plan_job_package,
 )
-from edisc_custody.package import PACKAGE_FORMAT
 from edisc_custody.zipwriter import ZipSizeError, zip_stream
 from edisc_db.session import tenant_tx
+from edisc_verify.package import PACKAGE_FORMAT
 
 router = APIRouter(prefix="/v1")
 

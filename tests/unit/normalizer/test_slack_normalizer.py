@@ -12,7 +12,6 @@ import pytest
 
 from edisc_connector_dummy.dataset import Dataset
 from edisc_connectors_base.types import BatchKind, WorkUnit
-from edisc_core.canonical import canonical_json, canonical_source_hash
 from edisc_core.schemas import EventKind, ItemType
 from edisc_normalizer.model import (
     NORMALIZER_VERSION,
@@ -33,6 +32,7 @@ from edisc_normalizer.slack import (
     normalize_directory_page,
     normalize_messages_page,
 )
+from edisc_verify.canonical import canonical_json, canonical_source_hash
 
 from ..dummy.conftest import batches, connection, connector, full_scope, make_spec
 

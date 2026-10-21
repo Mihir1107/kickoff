@@ -4,16 +4,15 @@ version = "0.1.0"
 description = "Append-only, hash-chained chain-of-custody log and verifier."
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "edisc-verify",
     "edisc-core",
     "edisc-db",
     "edisc-evidence",
     "types-aiobotocore[s3]>=3.9.1",
 ]
 
-[project.scripts]
-edisc-verify = "edisc_custody.cli:main"
-
 [tool.uv.sources]
+edisc-verify = { workspace = true }
 edisc-core = { workspace = true }
 edisc-db = { workspace = true }
 edisc-evidence = { workspace = true }

@@ -15,7 +15,7 @@ from edisc_api.routes.jobs import _pipeline
 from edisc_connector_dummy.spec import DatasetSpec
 from edisc_core.ids import new_id
 from edisc_db.session import tenant_tx
-from edisc_renderers.report import model as m
+from edisc_verify.report import model as m
 from edisc_worker import access_lost
 
 from .conftest import Api, TenantCtx, add_principal, secret

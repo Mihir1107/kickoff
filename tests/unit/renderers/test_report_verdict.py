@@ -10,9 +10,9 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from edisc_core.canonical import canonical_json
-from edisc_renderers.report import model as m
-from edisc_renderers.report.recompute import (
+from edisc_verify.canonical import canonical_json
+from edisc_verify.report import model as m
+from edisc_verify.report.recompute import (
     NORMALIZERS_NOT_RECORDED,
     chain_verdict,
     fold_chain,

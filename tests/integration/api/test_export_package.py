@@ -29,7 +29,7 @@ from .test_jobs import make_world
 
 
 def verify_blocking(pkg: Path, *archives: Path) -> tuple[int, str, dict[str, object]]:
-    args = [sys.executable, "-m", "edisc_custody.cli", str(pkg), "--json"]
+    args = [sys.executable, "-m", "edisc_verify.cli", str(pkg), "--json"]
     for a in archives:
         args += ["--archive", str(a)]
     proc = subprocess.run(
@@ -125,7 +125,7 @@ async def test_an_embedded_archive_is_read_inside_a_zip_package(
 
 
 def verify_text_blocking(pkg: Path, *archives: Path) -> str:
-    args = [sys.executable, "-m", "edisc_custody.cli", str(pkg)]
+    args = [sys.executable, "-m", "edisc_verify.cli", str(pkg)]
     for a in archives:
         args += ["--archive", str(a)]
     proc = subprocess.run(args, capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"},
@@ -176,7 +176,7 @@ async def test_entry_records_are_checked_against_the_archive(
         target[field] = value
         if field == "sha256":
             target["source_sha256"] = value
-        from edisc_core.canonical import canonical_json
+        from edisc_verify.canonical import canonical_json
 
         body = b"".join(canonical_json(r) + b"\n" for r in rows)
         (copy / "evidence.jsonl").write_bytes(body)

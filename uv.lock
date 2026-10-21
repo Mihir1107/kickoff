@@ -16,6 +16,7 @@ members = [
     "edisc-evidence",
     "edisc-normalizer",
     "edisc-renderers",
+    "edisc-verify",
     "edisc-worker",
     "edisc-workspace",
 ]
@@ -527,6 +528,7 @@ version = "0.1.0"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "cryptography" },
+    { name = "edisc-verify" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "rfc8785" },
@@ -536,6 +538,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=50.0.1" },
+    { name = "edisc-verify", editable = "packages/verify" },
     { name = "pydantic", specifier = ">=2.13.5" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
     { name = "rfc8785", specifier = ">=0.1.4" },
@@ -550,6 +553,7 @@ dependencies = [
     { name = "edisc-core" },
     { name = "edisc-db" },
     { name = "edisc-evidence" },
+    { name = "edisc-verify" },
     { name = "types-aiobotocore", extra = ["s3"] },
 ]
 
@@ -558,6 +562,7 @@ requires-dist = [
     { name = "edisc-core", editable = "packages/core" },
     { name = "edisc-db", editable = "packages/db" },
     { name = "edisc-evidence", editable = "packages/evidence" },
+    { name = "edisc-verify", editable = "packages/verify" },
     { name = "types-aiobotocore", extras = ["s3"], specifier = ">=3.9.1" },
 ]
 
@@ -623,6 +628,7 @@ source = { editable = "packages/renderers" }
 dependencies = [
     { name = "edisc-core" },
     { name = "edisc-custody" },
+    { name = "edisc-verify" },
     { name = "jsonschema" },
     { name = "rfc3339-validator" },
     { name = "tzdata" },
@@ -632,9 +638,25 @@ dependencies = [
 requires-dist = [
     { name = "edisc-core", editable = "packages/core" },
     { name = "edisc-custody", editable = "packages/custody" },
+    { name = "edisc-verify", editable = "packages/verify" },
     { name = "jsonschema", specifier = ">=4.23" },
     { name = "rfc3339-validator", specifier = ">=0.1.4" },
     { name = "tzdata", specifier = "==2026.5" },
+]
+
+[[package]]
+name = "edisc-verify"
+version = "0.1.0"
+source = { editable = "packages/verify" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "rfc8785" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cryptography", specifier = "==50.0.1" },
+    { name = "rfc8785", specifier = "==0.1.4" },
 ]
 
 [[package]]
@@ -689,6 +711,7 @@ dependencies = [
     { name = "edisc-evidence" },
     { name = "edisc-normalizer" },
     { name = "edisc-renderers" },
+    { name = "edisc-verify" },
     { name = "edisc-worker" },
 ]
 
@@ -728,6 +751,7 @@ requires-dist = [
     { name = "edisc-evidence", editable = "packages/evidence" },
     { name = "edisc-normalizer", editable = "packages/normalizer" },
     { name = "edisc-renderers", editable = "packages/renderers" },
+    { name = "edisc-verify", editable = "packages/verify" },
     { name = "edisc-worker", editable = "workers/collection" },
 ]
 

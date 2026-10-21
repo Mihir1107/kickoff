@@ -13,7 +13,7 @@ import pytest
 from edisc_connector_dummy.dataset import Dataset
 from edisc_connector_dummy.dialects.slack_export import ExportOptions, write_export
 from edisc_connector_dummy.spec import DatasetSpec
-from edisc_custody.archive import ArchiveLimits, BytesSource, NameEncoding, read_entry, scan
+from edisc_verify.archive import ArchiveLimits, BytesSource, NameEncoding, read_entry, scan
 
 SPEC = DatasetSpec(seed=7, conversations=4, days=2, messages_per_unit=12)
 LIMITS = ArchiveLimits(read_chunk=1 << 16)

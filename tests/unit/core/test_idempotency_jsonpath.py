@@ -2,8 +2,8 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from edisc_core.idempotency import idempotency_key
-from edisc_core.jsonpath import JsonPathError, build, parse, resolve
+from edisc_verify.idempotency import idempotency_key
+from edisc_verify.jsonpath import JsonPathError, build, parse, resolve
 
 H = "ab" * 32
 

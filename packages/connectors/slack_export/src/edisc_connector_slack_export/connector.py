@@ -71,12 +71,12 @@ from edisc_connectors_base.types import (
     UncollectableUnitError,
     WorkUnit,
 )
-from edisc_core.lone_surrogates import has_lone
 from edisc_core.redaction import register_secret
 from edisc_core.schemas import ScopeType
 from edisc_core.settings import Settings
 from edisc_core.time import ensure_utc
 from edisc_db.session import tenant_tx
+from edisc_verify.lone_surrogates import has_lone
 
 MIN_SECRET_LEN = (
     12  # shorter query values are not tokens; registering them would scrub ordinary text

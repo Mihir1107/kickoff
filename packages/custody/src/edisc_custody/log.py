@@ -33,7 +33,10 @@ from types_aiobotocore_s3 import S3Client
 from edisc_core.ids import new_id
 from edisc_core.settings import Settings
 from edisc_core.time import ensure_utc, utc_now
-from edisc_custody.chain import (
+from edisc_db.session import tenant_tx
+from edisc_evidence.retention import effective_retain_until
+from edisc_evidence.worm import get_bytes, list_versions, put_immutable
+from edisc_verify.chain import (
     BATCH_EVENT,
     GENESIS_HASH,
     LIFECYCLE_EVENTS,
@@ -47,11 +50,8 @@ from edisc_custody.chain import (
     compute_event_hash,
     hashed_fields,
 )
-from edisc_custody.merkle import batch_root
-from edisc_custody.render_files import RENDER_BATCH_EVENT
-from edisc_db.session import tenant_tx
-from edisc_evidence.retention import effective_retain_until
-from edisc_evidence.worm import get_bytes, list_versions, put_immutable
+from edisc_verify.merkle import batch_root
+from edisc_verify.render_files import RENDER_BATCH_EVENT
 
 
 @dataclass(frozen=True)

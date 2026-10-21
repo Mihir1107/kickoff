@@ -58,13 +58,13 @@ from edisc_api.stream_events import SCHEMAS
 from edisc_connector_dummy.guard import source_permitted
 from edisc_connector_slack_export.archive_access import open_archive_entry
 from edisc_connectors_base.types import CollectionScope, ThreadParentPolicy
-from edisc_core.canonical import canonical_json
 from edisc_core.ids import new_id
 from edisc_core.schemas import ARCHIVE_CAVEAT, JobStatus, ReconStatus, ScopeType
 from edisc_core.time import UtcDatetime
 from edisc_custody.log import anchor_if_due, append, verify_chain
 from edisc_db.session import tenant_tx
 from edisc_evidence.writer import EvidenceWriter
+from edisc_verify.canonical import canonical_json
 from edisc_worker import access_lost
 from edisc_worker.contracts import MAINTENANCE_QUEUE, JobInput, RunConfig, task_queue
 from edisc_worker.pipeline import Pipeline

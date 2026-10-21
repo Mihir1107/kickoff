@@ -25,8 +25,8 @@ from edisc_core.ids import new_id
 from edisc_core.settings import Settings
 from edisc_custody.export import export_package
 from edisc_db.session import tenant_tx
-from edisc_renderers.report import model as m
-from edisc_renderers.report.recompute import recompute
+from edisc_verify.report import model as m
+from edisc_verify.report.recompute import recompute
 from edisc_worker.pipeline import CrashHooks, Pipeline
 
 from ...unit.dummy.conftest import RecordingLimiter

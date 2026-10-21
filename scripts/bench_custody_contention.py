@@ -19,12 +19,12 @@ from sqlalchemy import text
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "integration"))
 from custody.conftest import new_job
 
-from edisc_core.canonical import canonical_hash
-from edisc_core.idempotency import idempotency_key
 from edisc_core.ids import new_id
 from edisc_core.settings import Settings
 from edisc_custody.log import append_batch
 from edisc_db.session import create_engine, session_factory, tenant_tx
+from edisc_verify.canonical import canonical_hash
+from edisc_verify.idempotency import idempotency_key
 
 
 async def batch_tx(sessions, job, ev_id: object, unit: str, n: int) -> float:  # type: ignore[no-untyped-def]

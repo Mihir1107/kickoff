@@ -10,7 +10,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from edisc_core.schemas import ARCHIVE_CAVEAT, JobStatus, ReconStatus, UnitStatus
-from edisc_renderers.report import model as m
+from edisc_verify.report import model as m
 
 T0 = datetime(2026, 1, 5, 9, 0, tzinfo=UTC)
 # ADR 0018 §4.6, worst first, written out here so the test does not borrow the code's constant

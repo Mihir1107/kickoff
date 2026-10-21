@@ -10,13 +10,13 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
 
-from edisc_core.canonical import canonical_json
 from edisc_core.settings import Settings
-from edisc_custody.chain import anchor_key
 from edisc_custody.log import anchor_if_due, append, verify_chain
 from edisc_custody.sweeper import SweepError, sweep_anchors
 from edisc_db.session import tenant_tx
 from edisc_evidence.worm import list_versions
+from edisc_verify.canonical import canonical_json
+from edisc_verify.chain import anchor_key
 
 from ..conftest import Connect
 from .conftest import Job, new_job

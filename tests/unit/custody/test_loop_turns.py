@@ -11,8 +11,8 @@ from typing import Any
 
 import pytest
 
-from edisc_custody import package_source, rsmf_check
-from edisc_custody.archive import ArchiveLimits, BytesSource, read_entry, scan
+from edisc_verify import package_source, rsmf_check
+from edisc_verify.archive import ArchiveLimits, BytesSource, read_entry, scan
 from tests.unit.turns import turns_during
 
 

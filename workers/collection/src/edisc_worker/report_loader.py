@@ -1,5 +1,5 @@
 """The collection report's loader (ADR 0018 §7, §8, §12; M16 step 1): reads the verified job chain and
-the database, feeds the pure model (`edisc_renderers.report.model`), and streams the files.
+the database, feeds the pure model (`edisc_verify.report.model`), and streams the files.
 
 Passes, each in keyset pages with short transactions and no transaction across S3 I/O:
 1. **Verify** the job chain with the seal required (`verify_chain`), and list the seal from S3.
@@ -32,15 +32,15 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
 
-from edisc_core.canonical import canonical_hash, canonical_json
 from edisc_core.settings import Settings
-from edisc_custody.chain import ANCHOR_FORMAT, anchor_key
 from edisc_custody.log import verify_chain
 from edisc_db.session import tenant_tx
 from edisc_evidence.worm import get_bytes, list_versions
-from edisc_renderers.report import model as m
 from edisc_renderers.report.html import report_html
-from edisc_renderers.report.version import REPORT_RENDERER_VERSION
+from edisc_verify.canonical import canonical_hash, canonical_json
+from edisc_verify.chain import ANCHOR_FORMAT, anchor_key
+from edisc_verify.report import model as m
+from edisc_verify.report.version import REPORT_RENDERER_VERSION
 
 PAGE = 2_000
 

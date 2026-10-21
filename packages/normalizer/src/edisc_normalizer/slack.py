@@ -33,9 +33,6 @@ from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from edisc_core.canonical import canonical_source_hash as canonical_hash
-from edisc_core.jsonpath import build
-from edisc_core.lone_surrogates import has_lone, replacement
 from edisc_core.schemas import EventKind, ItemType
 from edisc_core.time import day_bounds, ensure_utc
 from edisc_normalizer.model import (
@@ -49,6 +46,9 @@ from edisc_normalizer.model import (
     PageResult,
     PriorState,
 )
+from edisc_verify.canonical import canonical_source_hash as canonical_hash
+from edisc_verify.jsonpath import build
+from edisc_verify.lone_surrogates import has_lone, replacement
 
 FP_MESSAGE = "slack.message/2"  # v2: files by id/name/type, not bytes (ADR 0004, option B)
 FP_FILE = "slack.file/1"

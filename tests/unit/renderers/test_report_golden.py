@@ -29,10 +29,10 @@ from typing import Any
 
 import pytest
 
-from edisc_core.canonical import canonical_json
 from edisc_renderers.report import html as rhtml
-from edisc_renderers.report import model as m
-from edisc_renderers.report.version import REPORT_RENDERER_VERSION
+from edisc_verify.canonical import canonical_json
+from edisc_verify.report import model as m
+from edisc_verify.report.version import REPORT_RENDERER_VERSION
 
 GOLDEN = pathlib.Path(__file__).parents[2] / "golden" / "report"
 T0 = datetime(2026, 1, 5, 9, 0, tzinfo=UTC)

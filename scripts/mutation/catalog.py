@@ -67,6 +67,10 @@ Rounds (ADR 0015):
 - ``m17-reads``: the UI's reads (M17 step 3): the tenant-wide jobs list's visibility (same rule as
   ``authorize``), filters and keyset, cursors bound to route, path and filters, the custody events'
   byte budget and permission, group listings, ``/me/permissions`` and ``/roles``.
+- ``m18-verifier``: the standalone verifier (M18 step 5, plan §5, D12): the distribution imports
+  only the stdlib, itself and its exactly pinned, hashed dependencies, never the product; its wheel
+  is reproducible; its JWS accepts exactly ES256 (no algorithm from the token, no unknown header member, the kid is
+  the key's thumbprint, strict base64url, detached payloads only where detached).
 - ``s24-profile``: the loop guard samples a stall every ~10 ms while the loop is overdue and
   reports the aggregate (hottest innermost frames, functions, frames of ours), so a block is
   attributed to the code that burnt the CPU, not to wherever one sample landed (ADR 0015 §24.24).
@@ -143,6 +147,7 @@ from dataclasses import dataclass
 
 R = "packages/renderers/src/edisc_renderers/rsmf/"
 C = "packages/custody/src/edisc_custody/"
+VF = "packages/verify/src/edisc_verify/"  # the offline verifier (M18 step 5)
 W = "workers/collection/src/edisc_worker/"
 EV = "packages/evidence/src/edisc_evidence/writer.py"
 API = "apps/api/src/edisc_api/routes/renders.py"
@@ -198,6 +203,8 @@ TIN = "tests/integration/api/test_installs.py"
 TIG = "tests/integration/api/test_idp_groups.py"
 DC = "packages/connectors/dummy/src/edisc_connector_dummy/connector.py"
 ULG = "tests/unit/core/test_loopguard.py"
+UVB = "tests/unit/verify/test_boundary.py"
+UJWS = "tests/unit/verify/test_jws.py"
 LB = "packages/core/src/edisc_core/loopblock.py"
 ULB = "tests/unit/core/test_loopblock.py"
 UJ = "tests/unit/core/test_jsonstream.py"
@@ -209,7 +216,7 @@ PL = "tests/integration/pipeline/test_pipeline.py"
 CL = "tests/integration/custody/test_custody_log.py"
 RS = "tests/integration/renders/test_render_store.py"
 NS = "packages/normalizer/src/edisc_normalizer/store.py"
-RM = "packages/renderers/src/edisc_renderers/report/model.py"
+RM = "packages/verify/src/edisc_verify/report/model.py"
 RH = "packages/renderers/src/edisc_renderers/report/html.py"
 UH = "tests/unit/renderers/test_report_html.py"
 RL = "workers/collection/src/edisc_worker/report_loader.py"
@@ -232,11 +239,11 @@ UPR = "tests/unit/report_pdf/test_pdf_child_runner.py"
 UTM = "tests/unit/report_pdf/test_toolchain_manifest.py"
 RWF = "tests/integration/reports/test_report_workflow.py"
 ROP = "tests/integration/reports/test_report_operations.py"
-CAN = "packages/core/src/edisc_core/canonical.py"
+CAN = "packages/verify/src/edisc_verify/canonical.py"
 NSL = "packages/normalizer/src/edisc_normalizer/slack.py"
 NMO = "packages/normalizer/src/edisc_normalizer/model.py"
 RLO = "workers/collection/src/edisc_worker/render_loader.py"
-PKG = "packages/custody/src/edisc_custody/package.py"
+PKG = "packages/verify/src/edisc_verify/package.py"
 PIPE = "workers/collection/src/edisc_worker/pipeline.py"
 LAY = "packages/connectors/slack_export/src/edisc_connector_slack_export/layout.py"
 CON = "workers/collection/src/edisc_worker/contracts.py"
@@ -255,14 +262,14 @@ PROD = "tests/integration/production/test_production_install.py"
 JP = "apps/api/src/edisc_api/routes/job_package.py"
 REP = "apps/api/src/edisc_api/routes/reports.py"
 AUTHZ = "apps/api/src/edisc_api/authz.py"
-RPK = "packages/custody/src/edisc_custody/report_package.py"
-CLI = "packages/custody/src/edisc_custody/cli.py"
+RPK = "packages/verify/src/edisc_verify/report_package.py"
+CLI = "packages/verify/src/edisc_verify/cli.py"
 JEX = "packages/custody/src/edisc_custody/job_export.py"
 AJP = "tests/integration/api/test_job_package.py"
 ARP = "tests/integration/api/test_reports.py"
-PS = "packages/custody/src/edisc_custody/package_source.py"
-PA = "packages/custody/src/edisc_custody/package_archives.py"
-RC = "packages/renderers/src/edisc_renderers/report/recompute.py"
+PS = "packages/verify/src/edisc_verify/package_source.py"
+PA = "packages/verify/src/edisc_verify/package_archives.py"
+RC = "packages/verify/src/edisc_verify/report/recompute.py"
 EXW = "workers/collection/src/edisc_worker/exports.py"
 CONX = "packages/connectors/slack_export/src/edisc_connector_slack_export/connector.py"
 TP = "tests/integration/custody/test_package.py"
@@ -279,7 +286,7 @@ UPV = "tests/unit/renderers/test_preview.py"
 M33 = "packages/db/migrations/versions/0033_unit_facts_and_hostile_ids.py"
 M35 = "packages/db/migrations/versions/0035_code_point_order.py"
 NST = "packages/normalizer/src/edisc_normalizer/store.py"
-CLI = "packages/custody/src/edisc_custody/cli.py"
+CLI = "packages/verify/src/edisc_verify/cli.py"
 CCO = "tests/integration/corpus/test_collation.py"
 DCO = "tests/integration/db/test_collation.py"
 URV = "tests/unit/renderers/test_report_verdict.py"
@@ -363,16 +370,16 @@ CATALOG: list[Mutation] = [
       '        "outputs_included": outputs == "embed",',
       '        "outputs_included": outputs == "embed",\n        "nonce": str(uuid.uuid4()),',
       CP, "two_downloads_are_byte_identical"),
-    m("verify_object_hash", "s19-part-c", C + "render_package.py",
+    m("verify_object_hash", "s19-part-c", VF + "render_package.py",
       "        if (hashlib.sha256(data).hexdigest(), len(data)) != (sha, size):", "        if False:",
       CP, "altered_anchor_object"),
-    m("verify_manifest_files", "s19-part-c", C + "render_package.py",
+    m("verify_manifest_files", "s19-part-c", VF + "render_package.py",
       '            report.errors.append(f"{name}: does not match manifest (modified after export)")',
       "            pass", CP, "edit_without_fixing_the_manifest"),
-    m("verify_unlisted_files", "s19-part-c", C + "render_package.py",
+    m("verify_unlisted_files", "s19-part-c", VF + "render_package.py",
       '            report.errors.append(f"{extra}: not part of this package")', "            pass",
       CP, "missing_object_or_a_planted_file"),
-    m("reader_duplicate_names", "s19-part-c", C + "package_source.py",
+    m("reader_duplicate_names", "s19-part-c", VF + "package_source.py",
       "            if key in folded:\n                raise ArchiveError",
       "            if False:\n                raise ArchiveError", UZ, "refuses_duplicates"),
     m("writer_no_descriptor_flag", "s19-part-c", C + "zipwriter.py",
@@ -412,12 +419,12 @@ CATALOG: list[Mutation] = [
     m("sizer_descriptor", "s19-review", C + "zipwriter.py",
       "        descriptor = _DESCRIPTOR64.size if needs_zip64(size) else _DESCRIPTOR.size",
       "        descriptor = _DESCRIPTOR.size", UZ, "more_than_4_gib"),
-    m("tolerate_in_zip", "s19-review", C + "render_package.py",
+    m("tolerate_in_zip", "s19-review", VF + "render_package.py",
       "    tolerate = tolerate_os_metadata and not isinstance(source, ZipSource)",
       "    tolerate = tolerate_os_metadata", CP, "never_applies_to_a_zip"),
-    m("tolerated_not_listed", "s19-review", C + "render_package.py",
+    m("tolerated_not_listed", "s19-review", VF + "render_package.py",
       "            report.tolerated.append(extra)", "            pass", CP, "tolerated_and_listed"),
-    m("tolerate_too_much", "s19-review", C + "package_source.py",
+    m("tolerate_too_much", "s19-review", VF + "package_source.py",
       '        or base.startswith("._")', '        or base.startswith(".")', CP, "anything_else"),
     m("divergence_not_recorded", "s19-review", API,
       "        if plan.anchor_divergences:", "        if False:", AP, "anchor_divergence"),
@@ -466,29 +473,29 @@ CATALOG: list[Mutation] = [
       "        if wrong:\n            raise", "        if False:\n            raise", UX, "reconciler_checks"),
     m("reconcile_unplanned", "s20-natives", R + "reconcile.py",
       "if (fid, digest) not in planned:", "if False:", UX, "not_planned"),
-    m("native_ords_unsorted", "s20-natives", C + "render_files.py",
+    m("native_ords_unsorted", "s20-natives", VF + "render_files.py",
       "any(b <= a for a, b in pairwise(ords))", "any(b < a for a, b in pairwise(ords))", UF, "native_records"),
-    m("chain_no_batch_root", "s20-natives", C + "chain.py",
+    m("chain_no_batch_root", "s20-natives", VF + "chain.py",
       'if root != payload.get("natives_root"):', "if False:", UF, "natives_are_verified"),
-    m("chain_no_first_reference", "s20-natives", C + "chain.py",
+    m("chain_no_first_reference", "s20-natives", VF + "chain.py",
       "if not first_file <= ords[0] < first_file + file_count:", "if False:", UF, "first_referenced"),
-    m("chain_no_duplicate", "s20-natives", C + "chain.py",
+    m("chain_no_duplicate", "s20-natives", VF + "chain.py",
       'if view["sha256"] in self._native_shas:', "if False:", UF, "first_referenced"),
-    m("chain_leaf_unversioned", "s20-natives", C + "chain.py",
+    m("chain_leaf_unversioned", "s20-natives", VF + "chain.py",
       "root = files_root(files, file_fields(self._renderer_version))", "root = files_root(files)",
       UF, "file_leaf_follows"),
-    m("chain_no_total_root", "s20-natives", C + "chain.py",
+    m("chain_no_total_root", "s20-natives", VF + "chain.py",
       'if payload.get("natives_root") != total:', "if False:", UF, "natives_are_verified"),
-    m("chain_old_render_natives", "s20-natives", C + "chain.py",
+    m("chain_old_render_natives", "s20-natives", VF + "chain.py",
       'elif natives or "natives_root" in payload:', "elif False:", UF, "older_render"),
-    m("rsmf_placeholder_sha", "s20-natives", C + "rsmf_check.py",
+    m("rsmf_placeholder_sha", "s20-natives", VF + "rsmf_check.py",
       'fields["sha256"] != sha\n', "False\n", UR, "disagrees or field"),
-    m("rsmf_placeholder_layout", "s20-natives", C + "rsmf_check.py",
+    m("rsmf_placeholder_layout", "s20-natives", VF + "rsmf_check.py",
       'or "\\r" in text', "or False", UR, "disagrees"),
-    m("rsmf_missing_placeholder", "s20-natives", C + "rsmf_check.py",
+    m("rsmf_missing_placeholder", "s20-natives", VF + "rsmf_check.py",
       "if entry is None or entry.uncompressed_size > _PLACEHOLDER_MAX:",
       "if entry is not None and entry.uncompressed_size > _PLACEHOLDER_MAX:", UR, "without_a_placeholder"),
-    m("rsmf_line_width", "s20-natives", C + "rsmf_check.py",
+    m("rsmf_line_width", "s20-natives", VF + "rsmf_check.py",
       'if b"\\r\\n" in line[:-2] or not line.endswith(b"\\r\\n"):', "if False:", UR, "crlf"),
     # ------------------------------------------------------------------ §20 natives: stack
     m("copy_not_verified", "s20-natives", EV,
@@ -518,16 +525,16 @@ CATALOG: list[Mutation] = [
       '"   JOIN evidence_objects e ON e.render_id = r.id"\n',
       "\"   JOIN evidence_objects e ON e.render_id = r.id AND e.storage_key NOT LIKE '%/natives/%'\"\n",
       IN, "only-via-render_id"),
-    m("pkg_reference_mismatch", "s20-natives", C + "render_package.py",
+    m("pkg_reference_mismatch", "s20-natives", VF + "render_package.py",
       "        if named != listed:", "        if False:", CN, "rewritten_reference"),
-    m("pkg_unlisted_native", "s20-natives", C + "render_package.py",
+    m("pkg_unlisted_native", "s20-natives", VF + "render_package.py",
       "            if known is None:", "            if False:", CN, "dropped_from"),
-    m("pkg_native_bytes", "s20-natives", C + "render_package.py",
+    m("pkg_native_bytes", "s20-natives", VF + "render_package.py",
       '        if (digest, size) != (sha, n.get("size")):', "        if False:", CN, "altered_native"),
-    m("pkg_stray_native", "s20-natives", C + "render_package.py",
+    m("pkg_stray_native", "s20-natives", VF + "render_package.py",
       "        allowed |= {f\"natives/{n.get('sha256')}\" for n in natives}",
       '        allowed |= {x for x in source.names() if x.startswith("natives/")}', CN, "stray"),
-    m("pkg_native_not_required", "s20-natives", C + "render_package.py",
+    m("pkg_native_not_required", "s20-natives", VF + "render_package.py",
       '            report.errors.append(f"native {sha}: not in the package and not supplied")\n            continue',
       "            continue", CN, "missing_native"),
     m("stream_native_registry", "s20-natives", C + "render_export.py",
@@ -560,13 +567,13 @@ CATALOG: list[Mutation] = [
     # ------------------------------------------------------------------ §21 review
     m("name_backslash_unescaped", "s21-review", R + "render.py",
       '        "\\\\\\\\"\n        if c == "\\\\"\n        else ', "        ", UX, "round_trip or different"),
-    m("decoder_accepts_raw_controls", "s21-review", C + "rsmf_check.py",
+    m("decoder_accepts_raw_controls", "s21-review", VF + "rsmf_check.py",
       "            if unicodedata.category(c) in _ESCAPED_CATEGORIES:\n                raise RsmfCheckError",
       "            if False:\n                raise RsmfCheckError", UX, "one_encoding"),
-    m("decoder_accepts_needless_escapes", "s21-review", C + "rsmf_check.py",
+    m("decoder_accepts_needless_escapes", "s21-review", VF + "rsmf_check.py",
       "            if unicodedata.category(ch) not in _ESCAPED_CATEGORIES:", "            if False:",
       UX, "one_encoding"),
-    m("verifier_ignores_display", "s21-review", C + "rsmf_check.py",
+    m("verifier_ignores_display", "s21-review", VF + "rsmf_check.py",
       'if len(want) != 1 or (name not in want and not (name == "" and want == {fid})):', "if False:",
       UR, "display"),
     m("native_copy_unlocked", "s21-review", EV,
@@ -614,6 +621,27 @@ CATALOG: list[Mutation] = [
     m("guard_follows_sync_drivers", "s24-loop", LG,
       "        if not f.f_code.co_flags & (_ASYNC | inspect.CO_GENERATOR):\n            break\n", "",
       ULG, "synchronously"),
+    # ------------------------------------------------------------------ M18 step 5: the verifier
+    m("verifier_imports_sqlalchemy", "m18-verifier", VF + "chain.py",
+      "from __future__ import annotations\n",
+      "from __future__ import annotations\n\nimport sqlalchemy  # noqa: F401\n", UVB, "stdlib_itself"),
+    m("verifier_dependency_unpinned", "m18-verifier", "packages/verify/pyproject.toml",
+      '"rfc8785==0.1.4"', '"rfc8785>=0.1.4"', UVB, "pinned_exactly"),
+    m("verifier_wheel_not_reproducible", "m18-verifier", "packages/verify/pyproject.toml",
+      "reproducible = true", "reproducible = false", UVB, "reproducible"),
+    m("verifier_imports_the_product", "m18-verifier", VF + "report/model.py",
+      "from __future__ import annotations\n",
+      "from __future__ import annotations\n\nimport edisc_core.settings  # noqa: F401\n", UVB,
+      "loads_nothing_else"),
+    m("jws_alg_from_the_token", "m18-verifier", VF + "jws.py",
+      "    if value.get(\"alg\") != ALG:", "    if \"alg\" not in value:", UJWS, "exactly_es256"),
+    m("jws_kid_unchecked", "m18-verifier", VF + "jws.py",
+      "    if \"kid\" in head and head[\"kid\"] != thumbprint(jwk):",
+      "    if False:", UJWS, "round_trips"),
+    m("jws_base64_lenient", "m18-verifier", VF + "jws.py",
+      "    if b64url_encode(data) != text:", "    if False:", UJWS, "malformed"),
+    m("jws_payload_not_detached", "m18-verifier", VF + "jws.py",
+      "    if body:\n        raise JwsError", "    if False:\n        raise JwsError", UJWS, "malformed"),
     # ------------------------------------------------------------------ §24.24 stall profiles
     m("guard_profile_only_at_detection", "s24-profile", LG,
       "                if late > 0:  # overdue:",
@@ -635,13 +663,13 @@ CATALOG: list[Mutation] = [
     m("zipwriter_no_chunk_yield", "s24-loop", C + "zipwriter.py",
       "            yield chunk\n            await asyncio.sleep(0)  # a huge member from a ready source must not block the loop\n",
       "            yield chunk\n", UZ, "single_large_member"),
-    m("entry_reader_no_yield", "s24-loop", C + "archive.py",
+    m("entry_reader_no_yield", "s24-loop", VF + "archive.py",
       "        await asyncio.sleep(0)\n        if inflater is None:", "        if inflater is None:",
       ULT, "turn_per_chunk"),
-    m("sync_driver_refuses_turns", "s24-loop", C + "package_source.py",
+    m("sync_driver_refuses_turns", "s24-loop", VF + "package_source.py",
       "        while steps.send(None) is None:\n            pass\n",
       "        if steps.send(None) is None:\n            pass\n", ULT, "drivers"),
-    m("rsmf_driver_refuses_turns", "s24-loop", C + "rsmf_check.py",
+    m("rsmf_driver_refuses_turns", "s24-loop", VF + "rsmf_check.py",
       "        while steps.send(None) is None:\n            pass\n",
       "        if steps.send(None) is None:\n            pass\n", ULT, "drivers"),
     m("api_routes_built_on_the_loop", "s24-loop", "apps/api/src/edisc_api/app.py",
@@ -929,8 +957,8 @@ CATALOG: list[Mutation] = [
     m("source_json_accepts_joined_pair", "m16-pre5", CAN, "            if high and cp >= 0xDC00:",
       "            if False:", ULS, "high_then_low"),
     m("normalizer_strict_hash", "m16-pre5", NSL,
-      "from edisc_core.canonical import canonical_source_hash as canonical_hash",
-      "from edisc_core.canonical import canonical_hash", UNS, "hashed_losslessly"),
+      "from edisc_verify.canonical import canonical_source_hash as canonical_hash",
+      "from edisc_verify.canonical import canonical_hash", UNS, "hashed_losslessly"),
     m("derived_stored_raw", "m16-pre5", NMO,
       '            object.__setattr__(self, "derived", {**valid, FIELD: found})', "            pass",
       UNS, "hashed_losslessly"),
@@ -943,8 +971,8 @@ CATALOG: list[Mutation] = [
     m("rsmf_raw_surrogates", "m16-pre5", R + "render.py", "    valid, found = make_valid(obj)",
       "    valid, found = obj, {}", URE, "lone_surrogates"),
     m("verifier_strict_fragment_hash", "m16-pre5", PKG,
-      "from edisc_core.canonical import canonical_source_hash\n",
-      "from edisc_core.canonical import canonical_hash as canonical_source_hash\n", CORPUS,
+      "from edisc_verify.canonical import canonical_source_hash\n",
+      "from edisc_verify.canonical import canonical_hash as canonical_source_hash\n", CORPUS,
       "lone_surrogates"),
     m("failure_text_raw", "m16-pre5", PIPE, "        chain_error, exact = recorded_text(error, 2000)",
       "        chain_error, exact = error[:2000], {}", RLS, "lone_surrogate"),
@@ -2030,26 +2058,26 @@ CATALOG: list[Mutation] = [
     m("readiness_image_warns", "m17-close", "deploy/report-image/Dockerfile",
       "production_readiness.py --mode enforce", "production_readiness.py --mode warn",
       "tests/unit/test_production_readiness.py", "enforce_by_default"),
-    m("pause_end_ignored", "m17-close", "packages/renderers/src/edisc_renderers/report/model.py",
+    m("pause_end_ignored", "m17-close", "packages/verify/src/edisc_verify/report/model.py",
       '        elif e.event_type == "job_pause_ended":\n', '        elif e.event_type == "job_pause_ended_never":\n',
       "tests/unit/renderers/test_report_recompute.py", "pause_ended_is_stated"),
-    m("pause_ended_by_system", "m17-close", "packages/renderers/src/edisc_renderers/report/model.py",
+    m("pause_ended_by_system", "m17-close", "packages/verify/src/edisc_verify/report/model.py",
       "                    p.end(str(e.payload.get(\"ended_how\")), e.created_at, e.actor,\n",
       "                    p.end(str(e.payload.get(\"ended_how\")), e.created_at, \"system\",\n",
       "tests/unit/renderers/test_report_recompute.py", "pause_ended_is_stated"),
-    m("pause_reason_dropped", "m17-close", "packages/renderers/src/edisc_renderers/report/model.py",
+    m("pause_reason_dropped", "m17-close", "packages/verify/src/edisc_verify/report/model.py",
       '                          e.payload.get("reason"))  # fmt: skip\n',
       "                          None)  # fmt: skip\n",
       "tests/integration/api/test_access_lost.py", "closes_the_units"),
-    m("pause_counts_wrong", "m17-close", "packages/renderers/src/edisc_renderers/report/model.py",
+    m("pause_counts_wrong", "m17-close", "packages/verify/src/edisc_verify/report/model.py",
       '    ends = Counter(p.ended_how or "not_ended" for p in pauses)\n',
       '    ends = Counter("not_ended" for p in pauses)\n',
       "tests/unit/renderers/test_report_recompute.py", "pause_ended_is_stated"),
-    m("pauses_not_recomputed", "m17-close", "packages/renderers/src/edisc_renderers/report/recompute.py",
+    m("pauses_not_recomputed", "m17-close", "packages/verify/src/edisc_verify/report/recompute.py",
       'SECTIONS = ("job", "scopes", "access", "pauses", "actors",',
       'SECTIONS = ("job", "scopes", "access", "actors",',
       "tests/unit/renderers/test_report_recompute.py", "forged_pause_ending"),
-    m("legacy_reports_in_new_shape", "m17-close", "packages/renderers/src/edisc_renderers/report/recompute.py",
+    m("legacy_reports_in_new_shape", "m17-close", "packages/verify/src/edisc_verify/report/recompute.py",
       "    return version < (1, 6, 0)\n", "    return False\n",
       "tests/unit/renderers/test_report_recompute.py", "before_1_6_0"),
     m("pause_table_missing", "m17-close", "packages/renderers/src/edisc_renderers/report/html.py",

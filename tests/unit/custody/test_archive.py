@@ -11,7 +11,7 @@ import zlib
 
 import pytest
 
-from edisc_custody.archive import (
+from edisc_verify.archive import (
     ArchiveError,
     ArchiveErrorCode,
     ArchiveLimits,
@@ -68,7 +68,7 @@ PROBE = """
 import asyncio, resource, sys
 sys.path.insert(0, {here!r})
 from zips import SyntheticArchive
-from edisc_custody.archive import ArchiveLimits, iter_central_directory
+from edisc_verify.archive import ArchiveLimits, iter_central_directory
 
 def rss() -> int:
     v = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -252,7 +252,7 @@ def test_zip64_extra_fields_in_the_central_directory_are_honoured_and_checked() 
 def test_name_decoding_is_reported_never_guessed_silently() -> None:
     import struct as st
 
-    from edisc_custody.archive import NameEncoding, decode_name
+    from edisc_verify.archive import NameEncoding, decode_name
 
     assert decode_name(b"a.json", 0, b"", 0) == ("a.json", NameEncoding.ASCII)
     assert decode_name("café".encode(), 0x800, b"", 0) == ("café", NameEncoding.UTF8)

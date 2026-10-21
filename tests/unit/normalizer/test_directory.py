@@ -6,9 +6,9 @@ import json
 
 import pytest
 
-from edisc_core.lone_surrogates import substitute_key, utf16_units
 from edisc_normalizer import directory as d
 from edisc_normalizer.slack import NormalizationError
+from edisc_verify.lone_surrogates import substitute_key, utf16_units
 
 
 def _page(field: str, elements: list[dict[str, object]]) -> bytes:

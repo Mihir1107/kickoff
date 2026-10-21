@@ -18,12 +18,12 @@ from types_aiobotocore_s3 import S3Client
 from edisc_api.routes.renders import RenderOut, render_out
 from edisc_core.settings import Settings
 from edisc_core.time import ensure_utc
-from edisc_custody.chain import anchor_key
 from edisc_custody.log import verify_chain
 from edisc_custody.sweeper import sweep_anchors
 from edisc_db.session import tenant_tx
 from edisc_evidence.retention import effective_retain_until
 from edisc_renderers.rsmf import runtime_versions
+from edisc_verify.chain import anchor_key
 from edisc_worker import renders
 from edisc_worker.pipeline import CrashHooks
 from edisc_worker.renders import (

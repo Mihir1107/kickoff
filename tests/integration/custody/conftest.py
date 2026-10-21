@@ -14,17 +14,17 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
 
-from edisc_core.canonical import canonical_hash, canonical_json
-from edisc_core.idempotency import idempotency_key
 from edisc_core.ids import new_id
-from edisc_core.jsonpath import build
 from edisc_core.settings import Settings
 from edisc_core.time import utc_now
-from edisc_custody.chain import compute_event_hash, hashed_fields
 from edisc_custody.log import anchor_if_due, append, append_batch, seal_job_chain
 from edisc_db.session import create_tenant, tenant_tx
 from edisc_evidence.retention import effective_retain_until
 from edisc_evidence.worm import put_immutable
+from edisc_verify.canonical import canonical_hash, canonical_json
+from edisc_verify.chain import compute_event_hash, hashed_fields
+from edisc_verify.idempotency import idempotency_key
+from edisc_verify.jsonpath import build
 
 ANCHOR_EVERY = 8
 

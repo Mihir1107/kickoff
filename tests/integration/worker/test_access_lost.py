@@ -23,7 +23,7 @@ from edisc_connector_dummy.connector import DummyConnector
 from edisc_core.schemas import JobStatus
 from edisc_custody.export import export_package
 from edisc_db.session import tenant_tx
-from edisc_renderers.report.recompute import recompute
+from edisc_verify.report.recompute import recompute
 from edisc_worker import access_lost
 from edisc_worker.pipeline import CrashHooks, Pipeline
 from edisc_worker.report_loader import ReportLoader

@@ -18,7 +18,7 @@ import edisc_worker.reports as reports_module
 from edisc_core.settings import Settings
 from edisc_db.session import tenant_tx
 from edisc_renderers.report.html import glyph_set_id
-from edisc_renderers.report.version import REPORT_RENDERER_VERSION
+from edisc_verify.report.version import REPORT_RENDERER_VERSION
 from edisc_worker.pipeline import CrashHooks
 from edisc_worker.reports import ReportRun
 

@@ -8,8 +8,8 @@ from __future__ import annotations
 from typing import Any
 
 from edisc_renderers.report import html as rhtml
-from edisc_renderers.report import model as m
-from edisc_renderers.report.recompute import _access
+from edisc_verify.report import model as m
+from edisc_verify.report.recompute import _access
 
 from .test_report_golden import EXPORT, build
 from .test_report_html import _NS, doc, parse, plain, strict_tree

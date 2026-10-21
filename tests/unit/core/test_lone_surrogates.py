@@ -1,6 +1,6 @@
 """Lone UTF-16 surrogates (ADR 0018 §23): source hashes are lossless (`canonical_source_json`, checked
 against Node's well-formed `JSON.stringify`), stored and published records are valid (replacement
-text plus the exact code units, `edisc_core.lone_surrogates`)."""
+text plus the exact code units, `edisc_verify.lone_surrogates`)."""
 
 from __future__ import annotations
 
@@ -16,14 +16,14 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from edisc_core.canonical import (
+from edisc_verify.canonical import (
     CanonicalizationError,
     canonical_hash,
     canonical_json,
     canonical_source_hash,
     canonical_source_json,
 )
-from edisc_core.lone_surrogates import (
+from edisc_verify.lone_surrogates import (
     FIELD,
     from_utf16_units,
     has_lone,

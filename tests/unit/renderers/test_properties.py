@@ -21,7 +21,6 @@ from hypothesis import strategies as st
 from edisc_connector_dummy.spec import DatasetSpec
 from edisc_connectors_base.types import ThreadParentPolicy
 from edisc_core.schemas import ARCHIVE_CAVEAT
-from edisc_custody.merkle import batch_root
 from edisc_renderers.rsmf import (
     FileAttachment,
     FileUnavailable,
@@ -30,6 +29,7 @@ from edisc_renderers.rsmf import (
     render_job,
     slice_day,
 )
+from edisc_verify.merkle import batch_root
 from tests.unit.renderers.emlcheck import check_eml, custom
 from tests.unit.renderers.oracle import OracleJob, build_job
 

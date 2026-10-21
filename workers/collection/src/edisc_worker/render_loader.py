@@ -40,10 +40,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
 
 from edisc_connector_slack_export.archive_access import open_archive_entry
-from edisc_core.canonical import canonical_hash, canonical_source_hash
-from edisc_core.jsonpath import JsonPathError, resolve
-from edisc_core.lone_surrogates import FIELD as LONE_SURROGATES
-from edisc_core.lone_surrogates import restore
 from edisc_core.schemas import ItemType, JobStatus
 from edisc_core.settings import Settings
 from edisc_db.session import tenant_tx
@@ -66,6 +62,10 @@ from edisc_renderers.rsmf import (
     subject_digest,
 )
 from edisc_renderers.rsmf.model import AsyncFileOpener
+from edisc_verify.canonical import canonical_hash, canonical_source_hash
+from edisc_verify.jsonpath import JsonPathError, resolve
+from edisc_verify.lone_surrogates import FIELD as LONE_SURROGATES
+from edisc_verify.lone_surrogates import restore
 
 ID_CHUNK = 5_000
 _EXPORT_KINDS = {

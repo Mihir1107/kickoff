@@ -17,7 +17,7 @@ from types_aiobotocore_s3 import S3Client
 from edisc_connector_dummy.dataset import Dataset
 from edisc_core.settings import Settings
 from edisc_db.session import tenant_tx
-from edisc_renderers.report import model as m
+from edisc_verify.report import model as m
 from edisc_worker.report_loader import BuiltReport, ReportLoader, ReportRefusedError
 
 from ..normalizer.harness import Tenant, new_tenant

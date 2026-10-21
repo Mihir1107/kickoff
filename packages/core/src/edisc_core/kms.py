@@ -40,8 +40,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa, utils
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from edisc_core.canonical import canonical_json
 from edisc_core.settings import Settings
+from edisc_verify.canonical import canonical_json
 
 
 class KmsError(RuntimeError):

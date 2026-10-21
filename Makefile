@@ -16,8 +16,9 @@ TEST_TMP := $(or $(TMPDIR),/tmp)/edisc-tests
 TEST_RUN := EDISC_ENV_FILE=$(TEST_ENV) EDISC_COMPOSE_PROJECT=edisc-test uv run
 TEST_LOGS := test-stack-logs.txt
 TESTS ?= tests/integration
-# the suite's selection (scripts/ci_shard.py MARKERS: keep in sync); production_install has its own job
-INTEGRATION_MARKERS ?= not elasticsearch and not production_install
+# the suite's selection (scripts/ci_shard.py MARKERS: keep in sync); production_install and
+# verifier_standalone have their own jobs
+INTEGRATION_MARKERS ?= not elasticsearch and not production_install and not verifier_standalone
 # Exclusive lock on the one edisc-test stack: a second run fails fast instead of sharing it (ADR 0015 §24.6)
 TEST_LOCK := $(or $(EDISC_TEST_STACK_LOCK),$(or $(TMPDIR),/tmp)/edisc-test-stack.lock)
 STACK_LOCK := uv run python scripts/stack_lock.py
@@ -27,7 +28,7 @@ TEST_LOG := uv run python scripts/test_log.py
 STACK_LOGS_CMD := $(TEST_COMPOSE) logs --no-color --timestamps --tail=5000
 
 .DEFAULT_GOAL := help
-.PHONY: production-readiness help hooks sync disk-guard test-env-up test-env-down up up-search up-ci down nuke ps logs migrate lint fmt typecheck test test-integration test-all worker api check test-report-pdf test-production-install test-real-idp openapi openapi-check api-compat
+.PHONY: production-readiness help hooks sync disk-guard test-env-up test-env-down up up-search up-ci down nuke ps logs migrate lint fmt typecheck test test-integration test-all worker api check test-report-pdf test-production-install verifier-standalone test-real-idp openapi openapi-check api-compat
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -138,6 +139,13 @@ test-integration: disk-guard ## Integration tests on a FRESH ephemeral stack, de
 REPORT_IMAGE ?= edisc-report-test:dev
 REPORT_PDF_OUT ?= $(TEST_TMP)/report-pdf
 VERAPDF = verapdf/cli:v1.30.2@sha256:d5ee329657cf9bc4b2400392dd54c7d0a0ce9980ff6fa2da5590eebeec007cdb
+verifier-standalone: ## Verifier wheel built twice (reproducible), installed in an EMPTY venv, compared with the in-tree verifier (needs make test-env-up)
+	uv run python scripts/verifier_standalone.py check-lock
+	@# outside TEST_TMP: test-integration-only wipes that directory
+	rm -rf $(TEST_TMP)-verifier
+	uv run python scripts/verifier_standalone.py venv --out $(TEST_TMP)-verifier
+	EDISC_VERIFY_STANDALONE=$(TEST_TMP)-verifier/venv/bin/edisc-verify $(MAKE) test-integration-only TESTS=tests/integration/api/test_verifier_standalone.py INTEGRATION_MARKERS=verifier_standalone
+
 test-production-install: ## The API and every worker type start from a no-dev, non-editable install (needs make test-env-up)
 	$(MAKE) test-integration-only TESTS=tests/integration/production INTEGRATION_MARKERS=production_install
 

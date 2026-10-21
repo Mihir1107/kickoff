@@ -52,7 +52,12 @@ from edisc_core.ids import new_id
 from edisc_core.jsonstream import JsonStreamError, iter_array_elements
 from edisc_core.logs import get_logger
 from edisc_core.settings import Settings
-from edisc_custody.archive import (
+from edisc_custody.log import anchor_if_due, append
+from edisc_db.session import tenant_tx
+from edisc_evidence.archive_source import CoalescingSource, S3ObjectSource
+from edisc_evidence.writer import EvidenceWriter
+from edisc_normalizer.slack import ts_datetime
+from edisc_verify.archive import (
     ArchiveError,
     ArchiveErrorCode,
     ArchiveLimits,
@@ -63,11 +68,6 @@ from edisc_custody.archive import (
     locate_directory,
     open_entry,
 )
-from edisc_custody.log import anchor_if_due, append
-from edisc_db.session import tenant_tx
-from edisc_evidence.archive_source import CoalescingSource, S3ObjectSource
-from edisc_evidence.writer import EvidenceWriter
-from edisc_normalizer.slack import ts_datetime
 from edisc_worker.activities import _ticking
 from edisc_worker.contracts import ExportRef
 from edisc_worker.pipeline import CrashHooks

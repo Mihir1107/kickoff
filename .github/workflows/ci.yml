@@ -178,6 +178,27 @@ jobs:
       - if: always()
         run: make test-env-down
 
+  # M18 step 5 (plan §5, D12): the standalone verifier. Its wheel is built twice with
+  # SOURCE_DATE_EPOCH = the commit time and must be byte-identical; it is installed into an EMPTY venv
+  # from the wheel and the hashed requirements (--no-index after one download); then, on real
+  # packages made through the API and on tampered copies, it must answer exactly like the in-tree
+  # verifier (tests/integration/api/test_verifier_standalone.py).
+  verifier-standalone:
+    runs-on: ubuntu-24.04
+    needs: [lint, typecheck, unit]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --all-packages --locked
+      - run: make test-env-up MIN_FREE_GB=8
+      - run: make verifier-standalone
+      - if: always()
+        run: make test-env-down
+
   report-pdf:
     runs-on: ubuntu-24.04
     needs: [lint, typecheck, unit]

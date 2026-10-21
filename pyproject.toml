@@ -8,6 +8,7 @@ dependencies = [
     "edisc-db",
     "edisc-evidence",
     "edisc-custody",
+    "edisc-verify",
     "edisc-connectors-base",
     "edisc-connector-dummy",
     "edisc-connector-slack",
@@ -50,6 +51,7 @@ members = [
     "packages/db",
     "packages/evidence",
     "packages/custody",
+    "packages/verify",
     "packages/connectors/base",
     "packages/connectors/dummy",
     "packages/connectors/slack",
@@ -66,6 +68,7 @@ edisc-core = { workspace = true }
 edisc-db = { workspace = true }
 edisc-evidence = { workspace = true }
 edisc-custody = { workspace = true }
+edisc-verify = { workspace = true }
 edisc-connectors-base = { workspace = true }
 edisc-connector-dummy = { workspace = true }
 edisc-connector-slack = { workspace = true }
@@ -138,4 +141,5 @@ markers = [
     "slow: long-running acceptance tests",
     "elasticsearch: needs Elasticsearch (not started in CI during Phase 1)",
     "production_install: starts the API and workers from a no-dev install (own CI job: make test-production-install)",
+    "verifier_standalone: compares the standalone verifier venv with the in-tree verifier (own CI job: make verifier-standalone)",
 ]

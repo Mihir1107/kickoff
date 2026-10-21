@@ -41,9 +41,9 @@ from functools import cache
 from importlib import resources
 from typing import Any
 
-from edisc_core.lone_surrogates import FIELD as LONE_SURROGATES
-from edisc_renderers.report.model import exact_document
-from edisc_renderers.report.version import REPORT_RENDERER_VERSION
+from edisc_verify.lone_surrogates import FIELD as LONE_SURROGATES
+from edisc_verify.report.model import exact_document
+from edisc_verify.report.version import REPORT_RENDERER_VERSION
 
 # bidi controls: ALEF (U+061C), LRM/RLM, the embeddings/overrides U+202A-U+202E, the isolates
 # U+2066-U+2069. Not U+202F (narrow no-break space) or U+206A+ (deprecated, caught as Cf below).

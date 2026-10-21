@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from edisc_custody.rsmf_check import Base64Zip, FileRange, RsmfCheckError, _run, external_refs
 from edisc_renderers.rsmf import FileAttachment, RenderOptions, render_slice
+from edisc_verify.rsmf_check import Base64Zip, FileRange, RsmfCheckError, _run, external_refs
 from tests.unit.renderers.builders import attachment, msg, opener_for, ref, slice_input
 
 MIB = 1 << 20

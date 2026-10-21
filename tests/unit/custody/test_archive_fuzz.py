@@ -20,7 +20,7 @@ import zipfile
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from edisc_custody.archive import ArchiveError, ArchiveLimits, BytesSource, open_entry, scan
+from edisc_verify.archive import ArchiveError, ArchiveLimits, BytesSource, open_entry, scan
 
 from .zips import make_zip, zip64_central_directory
 

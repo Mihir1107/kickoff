@@ -41,12 +41,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
 
-from edisc_core.canonical import canonical_json
 from edisc_core.ids import new_id
 from edisc_core.settings import Settings
 from edisc_custody.log import anchor_if_due, append
-from edisc_custody.merkle import merkle_root
 from edisc_db.session import tenant_tx
+from edisc_verify.canonical import canonical_json
+from edisc_verify.merkle import merkle_root
 
 ACTOR = "system:legal-hold"
 PAGE = 500

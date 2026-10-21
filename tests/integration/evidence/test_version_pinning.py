@@ -86,7 +86,7 @@ async def test_shadow_version_is_never_served_and_is_reported(
     # edisc-verify: everything else verifies (items re-hash against the ORIGINAL page), shadow reported
     proc = await asyncio.to_thread(
         subprocess.run,
-        [sys.executable, "-m", "edisc_custody.cli", str(pkg)],
+        [sys.executable, "-m", "edisc_verify.cli", str(pkg)],
         capture_output=True,
         text=True,
         check=False,

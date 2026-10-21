@@ -22,7 +22,7 @@ import pytest
 from sqlalchemy import text
 from temporalio.worker import Worker
 
-import edisc_renderers.report.model as report_model
+import edisc_verify.report.model as report_model
 from edisc_connector_dummy.connector import DummyConnector
 from edisc_core.ids import new_id
 from edisc_core.time import utc_now
@@ -63,7 +63,7 @@ async def report_worker(api: Api) -> AsyncIterator[None]:
 
 def _cli_blocking(*args: str | Path) -> tuple[int, str]:
     proc = subprocess.run(
-        [sys.executable, "-m", "edisc_custody.cli", *map(str, args)],
+        [sys.executable, "-m", "edisc_verify.cli", *map(str, args)],
         capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"}, timeout=300, check=False,
     )  # fmt: skip
     return proc.returncode, proc.stdout + proc.stderr

@@ -47,7 +47,7 @@ BIG = spec(conversations=2, messages_per_unit=12, p_file=0.15, file_size_min=2 *
 
 def _cli_blocking(*args: str | Path) -> tuple[int, str]:
     proc = subprocess.run(
-        [sys.executable, "-m", "edisc_custody.cli", *map(str, args)],
+        [sys.executable, "-m", "edisc_verify.cli", *map(str, args)],
         capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"}, timeout=120, check=False,
     )  # fmt: skip
     return proc.returncode, proc.stdout + proc.stderr

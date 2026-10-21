@@ -26,11 +26,11 @@ from edisc_connector_dummy.spec import DatasetSpec, FailureSpec
 from edisc_core.settings import Settings
 from edisc_core.time import ensure_utc, utc_now
 from edisc_custody.log import verify_chain
-from edisc_custody.render_files import RENDER_BATCH_EVENT, RENDER_COMPLETED
 from edisc_custody.retention_extension import extend_retention
 from edisc_db.session import tenant_tx
 from edisc_evidence.retention import effective_retain_until
 from edisc_renderers.rsmf import FileAttachment, RenderOptions, runtime_versions
+from edisc_verify.render_files import RENDER_BATCH_EVENT, RENDER_COMPLETED
 from edisc_worker.contracts import RenderRef, render_task_queue, render_workflow_id
 from edisc_worker.render_loader import RenderLoader
 from edisc_worker.renders import RenderRun

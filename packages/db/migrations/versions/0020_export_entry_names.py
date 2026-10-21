@@ -3,7 +3,7 @@
 - ``export_entries.raw_name``: the name bytes from the central directory. The local header must repeat
   them, and ``edisc-verify`` finds entries by them; the decoded ``name`` alone cannot be re-encoded
   reliably when the archive did not flag UTF-8.
-- ``export_entries.name_encoding``: how ``name`` was decoded (``edisc_custody.archive.NameEncoding``);
+- ``export_entries.name_encoding``: how ``name`` was decoded (``edisc_verify.archive.NameEncoding``);
   anything but ascii/utf-8 is reported with the export.
 - ``slack_exports.root_prefix``: a single wrapper folder around the export, when there is one.
 

@@ -20,9 +20,7 @@ from typing import Any, Literal
 import pytest
 from types_aiobotocore_s3 import S3Client
 
-from edisc_core.canonical import canonical_json
 from edisc_core.settings import Settings
-from edisc_custody.chain import compute_event_hash
 from edisc_custody.export import export_package
 from edisc_custody.render_export import (
     PackageIntegrityError,
@@ -31,6 +29,8 @@ from edisc_custody.render_export import (
     plan_render_package,
 )
 from edisc_custody.zipwriter import zip_stream
+from edisc_verify.canonical import canonical_json
+from edisc_verify.chain import compute_event_hash
 from edisc_worker.renders import RenderRun
 
 from ..custody.conftest import superuser
@@ -42,7 +42,7 @@ from ..renders.test_render_store import _job
 def _cli_blocking(*args: str | Path) -> tuple[int, str]:
     """The verifier exactly as an expert runs it: a separate process with no DB/S3 settings."""
     proc = subprocess.run(
-        [sys.executable, "-m", "edisc_custody.cli", *map(str, args)],
+        [sys.executable, "-m", "edisc_verify.cli", *map(str, args)],
         capture_output=True,
         text=True,
         env={"PATH": "/usr/bin:/bin"},

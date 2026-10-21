@@ -22,8 +22,6 @@ from edisc_connectors_base.types import (
     InvalidCursorError,
     SourceUnavailableError,
 )
-from edisc_core.canonical import CanonicalizationError
-from edisc_custody.chain import PayloadError
 from edisc_db.session import is_retryable_db_error, sqlstate_of
 from edisc_evidence.worm import WormConflictError
 from edisc_evidence.writer import (
@@ -32,6 +30,8 @@ from edisc_evidence.writer import (
     EvidenceIntegrityError,
 )
 from edisc_normalizer.slack import NormalizationError
+from edisc_verify.canonical import CanonicalizationError
+from edisc_verify.chain import PayloadError
 from edisc_worker.contracts import NON_RETRYABLE, ErrorClass
 
 JOB_CLOSED_SQLSTATE = (

@@ -43,7 +43,6 @@ from typing import Any, Literal
 
 from edisc_core.schemas import ARCHIVE_CAVEAT
 from edisc_core.time import format_utc, from_epoch
-from edisc_custody.merkle import batch_root
 from edisc_renderers.report.html import BIDI_CONTROLS, escape, invalid_in_html, marker
 from edisc_renderers.rsmf.model import (
     FileAttachment,
@@ -56,6 +55,7 @@ from edisc_renderers.rsmf.model import (
 )
 from edisc_renderers.rsmf.runtime import TZDATA_VERSION, load_zone
 from edisc_renderers.rsmf.slicing import event_order, slice_bounds, split_parts
+from edisc_verify.merkle import batch_root
 
 PREVIEW_RENDERER_VERSION = "1.0.0"
 """Byte identity of a page is promised for the same input AND this version (+ Unicode, + tzdata for a

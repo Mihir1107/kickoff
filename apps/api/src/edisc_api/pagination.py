@@ -29,7 +29,7 @@ from fastapi import Query, Request
 from pydantic import BaseModel, ConfigDict
 
 from edisc_api.errors import ApiError, unprocessable
-from edisc_core.canonical import canonical_json
+from edisc_verify.canonical import canonical_json
 
 _BINDING: ContextVar[str] = ContextVar("edisc_cursor_binding", default="")
 UNBOUND = frozenset({"cursor", "limit"})

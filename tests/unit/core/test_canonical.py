@@ -16,7 +16,12 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from edisc_core.canonical import CanonicalizationError, canonical_hash, canonical_json, to_jsonable
+from edisc_verify.canonical import (
+    CanonicalizationError,
+    canonical_hash,
+    canonical_json,
+    to_jsonable,
+)
 
 GOLDEN = Path(__file__).resolve().parents[2] / "golden" / "jcs"
 VECTORS = json.loads((GOLDEN / "vectors.json").read_text(encoding="utf-8"))

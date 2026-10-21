@@ -15,7 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
 
 from edisc_core.settings import Settings
-from edisc_custody.archive import (
+from edisc_db.session import tenant_tx
+from edisc_evidence.archive_source import CoalescingSource, S3ObjectSource
+from edisc_verify.archive import (
     ArchiveLimits,
     Entry,
     EntryDigest,
@@ -23,8 +25,6 @@ from edisc_custody.archive import (
     open_entry,
     read_entry,
 )
-from edisc_db.session import tenant_tx
-from edisc_evidence.archive_source import CoalescingSource, S3ObjectSource
 
 LIMIT_NAMES = (
     "max_archive_bytes",

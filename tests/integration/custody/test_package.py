@@ -15,10 +15,10 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from types_aiobotocore_s3 import S3Client
 
-from edisc_core.canonical import canonical_json
 from edisc_core.settings import Settings
-from edisc_custody.chain import compute_event_hash
 from edisc_custody.export import export_package
+from edisc_verify.canonical import canonical_json
+from edisc_verify.chain import compute_event_hash
 
 from .conftest import run_job
 
@@ -28,7 +28,7 @@ Sessions = async_sessionmaker[AsyncSession]
 def _cli_blocking(pkg: Path, *args: str) -> tuple[int, str]:
     """Run the verifier exactly as an expert would: separate process, no DB/S3 settings in its env."""
     proc = subprocess.run(
-        [sys.executable, "-m", "edisc_custody.cli", str(pkg), *args],
+        [sys.executable, "-m", "edisc_verify.cli", str(pkg), *args],
         capture_output=True,
         text=True,
         env={"PATH": "/usr/bin:/bin"},
@@ -74,7 +74,7 @@ async def test_clean_package_verifies_offline(package: Path) -> None:
 
 def test_verifier_imports_no_database_or_cloud_code() -> None:
     code = (
-        "import sys, edisc_custody.cli;"
+        "import sys, edisc_verify.cli;"
         "bad = [m for m in ('sqlalchemy', 'asyncpg', 'aiobotocore', 'botocore', 'edisc_db', 'edisc_evidence')"
         " if m in sys.modules]; print(bad); sys.exit(1 if bad else 0)"
     )
@@ -157,7 +157,7 @@ def test_unreadable_package_exits_2(tmp_path: Path) -> None:
 # ------------------------------------------------------------------ strict, and zips read in place
 NO_WRITES = """
 import os, sys
-from edisc_custody.cli import main
+from edisc_verify.cli import main
 WRITE = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC
 def hook(event, args):
     if event == "open" and (

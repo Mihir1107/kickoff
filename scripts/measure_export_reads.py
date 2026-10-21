@@ -30,17 +30,17 @@ from edisc_connector_dummy.spec import DatasetSpec
 from edisc_connector_slack_export.layout import RootDetector
 from edisc_core.ids import new_id
 from edisc_core.settings import Settings
-from edisc_custody.archive import (
+from edisc_db.session import create_engine, create_tenant, session_factory
+from edisc_evidence.archive_source import CoalescingSource, S3ObjectSource
+from edisc_evidence.s3 import s3_client
+from edisc_evidence.writer import EvidenceWriter
+from edisc_verify.archive import (
     ArchiveLimits,
     Source,
     iter_central_directory,
     locate_directory,
     open_entry,
 )
-from edisc_db.session import create_engine, create_tenant, session_factory
-from edisc_evidence.archive_source import CoalescingSource, S3ObjectSource
-from edisc_evidence.s3 import s3_client
-from edisc_evidence.writer import EvidenceWriter
 
 LIMITS = ArchiveLimits()
 

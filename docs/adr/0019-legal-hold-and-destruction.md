@@ -3,8 +3,8 @@
 Status: **Accepted** (2026-10-20). Built from `docs/plans/m18.md` (the plan) with the user's
 decisions of 2026-10-20 (its §12, which wins where it differs from the rest of the plan).
 **Built so far:** step 0 (spikes, §1), step 1 (storage identities, §2), step 2 (upload quotas,
-§3), steps 3-4 (legal hold in the database and its S3 flags, §4). **Not built yet:** step 5 (the standalone verifier), steps 6-7 (destruction
-and its certificate), step 8 (closing docs). Every
+§3), steps 3-4 (legal hold in the database and its S3 flags, §4), step 5 (the standalone verifier,
+§6). **Not built yet:** steps 6-7 (destruction and its certificate), step 8 (closing docs). Every
 place where the build differs from the plan is listed in §5.
 
 ## 1. Step 0: what the spikes on the test stack's MinIO showed (2026-10-20)
@@ -83,6 +83,40 @@ results are the record.
   min) re-runs passes so objects linked later get their flag. A release clears only versions no
   other active hold covers; a flag that disagrees with the database is refused and reported (D2).
 
+## 6. The standalone verifier (M18 §5, D12; step 5)
+- **`packages/verify`** (distribution `edisc-verify`, module `edisc_verify`) OWNS the offline code,
+  moved with `git mv` (history kept): from `edisc_custody` `merkle`, `chain`, `package`, `cli`,
+  `archive`, `package_archives`, `package_source`, `rsmf_check`, `render_files`, `report_files`,
+  `render_package`, `report_package`; from `edisc_core` `canonical`, `lone_surrogates`,
+  `jsonpath`, `idempotency`, plus `utc` (`ensure_utc`, `format_utc` and their errors) and
+  `statuses` (`JobStatus`, `UnitStatus`, `ReconStatus`, `ARCHIVE_CAVEAT`), which `edisc_core.time`
+  and `edisc_core.schemas` re-export; from `edisc_renderers.report` `model`, `recompute`,
+  `version`. Every import in the tree now names `edisc_verify.*`; the old module paths are
+  `sys.modules` aliases of the new modules for one release (the same module object, so
+  monkeypatching either path patches both). The mutation catalog moved in the same change.
+- **Dependencies:** `cryptography==50.0.1` and `rfc8785==0.1.4`, exact pins equal to `uv.lock`, and
+  `requirements.lock` with hashes generated from it (a unit test fails on drift). Pydantic is gone
+  from the verifier: canonical JSON converts a model by duck typing (`model_dump`), with the same
+  bytes as before. Build backend pinned (`hatchling==1.27.0`).
+- **The JWS (`edisc_verify.jws`):** one fixed algorithm, **ES256** (D7 allowed ES256 or RS256:
+  ES256 has the RFC 7515 Appendix A.3 vector, short signatures, and is available as an AWS KMS key
+  spec for step 7). Any other header `alg` (or none, a list, a different case, a duplicated
+  member) is refused before any key is used; only `alg`, `kid`, `typ` may appear (so `crit`, `jku`,
+  `jwk`, `x5u` are refused); `kid` must be the key's RFC 7638 thumbprint; strict base64url; the
+  signature exactly 64 octets `R || S`; detached payloads (RFC 7515 Appendix F) where the
+  certificate needs them. Tests: RFC 7515 A.3 verifies, A.2 (RS256), A.4 (ES512) and A.5 (`none`)
+  are refused by their header, genuine ES256 signatures over refused headers are refused.
+- **Boundary tests** (`tests/unit/verify/test_boundary.py`): every module's imports (AST, functions
+  included), a subprocess importing the whole distribution, exact pins, the aliases, no old path
+  left in the tree, the version and formats (`edisc-verify --version`), the wheel built twice.
+- **CI job `verifier-standalone`** (`make verifier-standalone`): the wheel built twice with
+  `SOURCE_DATE_EPOCH` = commit time and compared; `python -m venv`, the locked dependencies
+  downloaded once with `--require-hashes`, installed `--no-index`, the wheel `--no-deps`; the venv
+  must hold exactly those packages and pip; then `tests/integration/api/test_verifier_standalone.py` makes a job,
+  render and report through the API and requires the standalone executable to give the same exit
+  status and output as the in-tree verifier on every package and tampered copy.
+- Mutation round `m18-verifier`: 8/8 caught.
+
 ## 5. Where the build differs from the plan
 1. **Bucket policies are not a layer on MinIO** (S0.1). Plan §3.2 put the second layer in bucket
    policies "tested on MinIO"; MinIO does not evaluate them for IAM users. The second layer is
@@ -115,3 +149,10 @@ results are the record.
    `tenant_admin` at the tenant directly or through a group's recorded members. An admin who holds
    the role only through an IdP group claim with no recorded membership is not counted: the rule
    then refuses (`second_admin_required`), the safe side.
+10. **The verifier's JWS algorithm is ES256** (plan D7 left ES256 or RS256 open; §6).
+11. **The verifier states its formats with `--version`** and does not yet carry the destruction
+    certificate format (step 7 adds it). The `verifier-v*` release job is not built (BACKLOG: the
+    `v*` tag filter would also catch it).
+12. **The standalone CI job uses packages made through the API on its own stack** (plan §5 named
+    "the corpus job package"): a dummy job with its render and report, plus tampered copies;
+    the destruction certificate joins in step 7.

@@ -26,9 +26,9 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from pydantic import SecretStr
 
-from edisc_core.canonical import canonical_json
 from edisc_core.kms import InvalidCiphertextError, KmsClient
 from edisc_core.redaction import MIN_SECRET_LENGTH, register_secret
+from edisc_verify.canonical import canonical_json
 
 BLOB_VERSION = 1
 ALG = "AES-256-GCM"

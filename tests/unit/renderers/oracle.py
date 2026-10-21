@@ -20,8 +20,6 @@ from datetime import datetime
 from edisc_connector_dummy.dataset import Dataset, Msg, h64
 from edisc_connector_dummy.spec import DatasetSpec
 from edisc_connectors_base.types import ThreadParentPolicy
-from edisc_core.canonical import canonical_hash
-from edisc_core.idempotency import idempotency_key
 from edisc_core.time import day_bounds, ensure_utc
 from edisc_renderers.rsmf import (
     ConversationInfo,
@@ -35,6 +33,8 @@ from edisc_renderers.rsmf import (
     MessageState,
     Reactions,
 )
+from edisc_verify.canonical import canonical_hash
+from edisc_verify.idempotency import idempotency_key
 
 TENANT = uuid.UUID("00000000-0000-7000-8000-00000000feed")
 SOURCE = "slack"

@@ -52,12 +52,12 @@ from edisc_custody.render_export import (
     package_members,
     plan_render_package,
 )
-from edisc_custody.render_package import RENDER_PACKAGE_FORMAT
 from edisc_custody.zipwriter import ZipSizeError, zip_stream
 from edisc_db.session import tenant_tx
 from edisc_evidence.writer import EvidenceWriter
 from edisc_renderers.rsmf import RenderInputError, RenderOptions
 from edisc_renderers.rsmf.model import EXTERNAL_OVER_BYTES, EXTERNAL_OVER_MAX, EXTERNAL_OVER_MIN
+from edisc_verify.render_package import RENDER_PACKAGE_FORMAT
 from edisc_worker.renders import create_render, options_hash, start_render_workflow
 
 router = APIRouter(prefix="/v1")
