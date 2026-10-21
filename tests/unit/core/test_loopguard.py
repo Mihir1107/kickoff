@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import tracemalloc
 from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any
@@ -130,6 +131,49 @@ async def _test_a_stall_is_profiled_and_the_cpu_attributed_to_the_function_that_
         "hottest innermost frames (self)" in text
         and "_hot_function" in text.split("profile of the stall")[-1]
     )
+
+
+def _deep(n: int, seconds: float) -> None:
+    if n:
+        return _deep(n - 1, seconds)
+    _hot_function(seconds)
+    return None
+
+
+async def _deep_stalls() -> None:
+    for _ in range(4):
+        _deep(60, 0.15)  # overdue, under the 300 ms threshold: sampled when not tracing
+        await asyncio.sleep(0.1)  # the loop beats again: each stall stands alone
+    _deep(60, 0.5)  # one block over it
+    await asyncio.sleep(0.05)
+
+
+def test_a_memory_measurement_is_never_perturbed_by_the_sampler() -> None:
+    _on_own_loop(_test_a_memory_measurement_is_never_perturbed_by_the_sampler())
+
+
+async def _test_a_memory_measurement_is_never_perturbed_by_the_sampler() -> None:
+    """CI run 39525932565: the samples of the watchdog thread (stacks over 100 frames deep, every
+    ~10 ms while the loop was overdue) counted in a test's `tracemalloc` peak and pushed
+    `test_memory_stays_bounded_on_a_200_mib_stream` over its bound. While tracemalloc traces, the
+    stall is still detected, but not sampled; the samples skipped are counted."""
+    blocks: list[loopguard.Block] = []
+    guard = loopguard.LoopGuard(asyncio.get_running_loop(), 300, blocks.append,
+                                product_roots=(HERE,), test_roots=())  # fmt: skip
+    guard.start()
+    tracemalloc.start()
+    try:
+        await _deep_stalls()
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+        guard.stop()
+    ended = [b for b in blocks if b.total_ms is not None]
+    assert len(ended) == 1 and ended[0].counts, blocks  # detection is unchanged
+    p = ended[0].profile
+    assert p is not None and p["samples"] == 0 and p["untraced"] >= 10, p
+    assert "tracemalloc was tracing" in ended[0].describe()
+    assert peak < 64 * 1024, f"{peak} bytes traced"  # a sampled run traces several hundred KiB
 
 
 def test_the_profile_aggregates_samples() -> None:

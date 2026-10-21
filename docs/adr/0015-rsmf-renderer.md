@@ -1583,3 +1583,15 @@ what was done and why.
       processes on the laptop, on the old guard too. The test spins now burn the thread's CPU
       time (`time.thread_time()`), so the assertion holds whatever the load (10/10 under the same
       contention).
+    - **The profiler's own regression (CI run 39525932565 on `139290e`, shard 2; diagnosed and
+      fixed the same day):** `test_memory_stays_bounded_on_a_200_mib_stream` failed in both
+      variants, peak traced memory 21.2 / 22.2 MiB against its 20 MiB bound (4 parts). Cause: the
+      watchdog's samples are Python allocations, and `tracemalloc` counts every thread's; on that
+      test's deep aiobotocore stacks the samples of each under-threshold stall added a few MiB at
+      the peak (measured in isolation: ~345 KiB for 200 ms stalls on a 40-frame stack). The test
+      was right; the instrument perturbed the measurement. Fix: while `tracemalloc` is tracing,
+      the watchdog detects stalls exactly as before but does not sample them (the profile says
+      so and counts the skipped samples, `untraced`). Test:
+      `test_a_memory_measurement_is_never_perturbed_by_the_sampler` (a block still detected and
+      counted, no sample, under 64 KiB traced with stalls on a 60-frame stack); mutation
+      `guard_profile_samples_under_tracemalloc`. The bound is unchanged.

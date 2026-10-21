@@ -620,7 +620,7 @@ CATALOG: list[Mutation] = [
       "                if late * 1000 > self.threshold_ms and self._open is None:  # overdue:",
       ULG, "profiled"),
     m("guard_profile_kept_from_detection", "s24-profile", LG,
-      "cpu_ms=used * 1000,\n                                  profile=self._profile(samples, dropped)))",
+      "cpu_ms=used * 1000,\n                                  profile=self._profile(samples, dropped, untraced)))",
       "cpu_ms=used * 1000))", ULG, "profiled"),
     m("guard_profile_leaf_outermost", "s24-profile", LG,
       "        path, line, name = frames[-1]\n", "        path, line, name = frames[0]\n",
@@ -657,6 +657,9 @@ CATALOG: list[Mutation] = [
     # each pure function the product runs in a thread, called on the loop instead (OFF_LOOP)
     m("dummy_page_on_loop", "s24-loop", DC, "result: T = await asyncio.to_thread(respond)",
       "result: T = respond()", UDE, "oracle_model"),
+    m("guard_profile_samples_under_tracemalloc", "s24-profile", LG,
+      "                    if tracemalloc.is_tracing():  # never perturb a memory measurement\n",
+      "                    if False:\n", ULG, "perturbed"),
     m("dummy_directory_listing_on_loop", "s24-profile", DC,
       "users, convs = await asyncio.to_thread(directory_listing, ds, epoch)",
       "users, convs = directory_listing(ds, epoch)", UDE, "rate_limit_token"),

@@ -40,6 +40,7 @@ import sys
 import threading
 import time
 import traceback
+import tracemalloc
 import uuid
 from collections import Counter, deque
 from collections.abc import Callable, Sequence
@@ -143,7 +144,7 @@ def take_sample(frame: FrameType | None) -> Sample:
 
 
 def profile(
-    samples: Sequence[Sample], *, dropped: int = 0,
+    samples: Sequence[Sample], *, dropped: int = 0, untraced: int = 0,
     product_roots: Sequence[str] = PRODUCT_ROOTS, test_roots: Sequence[str] = TEST_ROOTS,
 ) -> dict[str, Any]:  # fmt: skip
     """Aggregate the samples of one stall: where the loop's thread WAS, sample after sample.
@@ -152,10 +153,13 @@ def profile(
     per sample (inclusive time), from the deepest frame that every running sample shares inward
     (the frames the whole stall ran under, the event loop's and the test runner's, would
     otherwise fill the table at 100 %); equal counts deepest first; ``ours``: the innermost frame
-    under the product or test roots. ``waiting``: samples taken in the selector or a non-blocking socket call (the loop was not
-    running code then). ``interval_ms``: the measured mean spacing of the samples (the watchdog
-    needs the GIL, so a loop thread busy in Python stretches the 10 ms). Counts, most first, at
-    most `PROFILE_TOP` rows each (`functions`: twice that)."""
+    under the product or test roots. ``waiting``: samples taken in the selector or a
+    non-blocking socket call (the loop was not running code then). ``untraced``: samples NOT
+    taken because `tracemalloc` was tracing (a test measuring Python memory: samples are
+    allocations of their own, and they once pushed a bound-checking test over its limit, ADR
+    0015 §24.24). ``interval_ms``: the measured mean spacing of the samples (the watchdog needs
+    the GIL, so a loop thread busy in Python stretches the 10 ms). Counts, most first, at most
+    `PROFILE_TOP` rows each (`functions`: twice that)."""
     roots = (*product_roots, *test_roots)
     leaf: Counter[str] = Counter()
     functions: Counter[str] = Counter()
@@ -188,13 +192,15 @@ def profile(
     ranked = sorted(functions.items(), key=lambda kv: (-kv[1], -depth[kv[0]], kv[0]))
     return {
         "interval_ms": round(1000 * span / (len(samples) - 1), 1) if span else None,
-        "samples": len(samples), "dropped": dropped, "waiting": waiting,
+        "samples": len(samples), "dropped": dropped, "untraced": untraced, "waiting": waiting,
         "leaf": leaf.most_common(PROFILE_TOP), "functions": ranked[: 2 * PROFILE_TOP],
         "ours": ours.most_common(PROFILE_TOP),
     }  # fmt: skip
 
 
 def describe_profile(p: dict[str, Any] | None) -> str:
+    if p and not p.get("samples") and p.get("untraced"):
+        return "\n(no profile: tracemalloc was tracing, so the stall was not sampled)\n"
     if not p or not p.get("samples"):
         return "\n(no profile: the stall ended before a sample was taken)\n" if p else ""
     n = int(p["samples"])
@@ -362,6 +368,7 @@ class LoopGuard:
     _cpu: float = field(default=0.0, init=False)  # the loop thread's CPU time at its last beat
     _samples: list[Sample] = field(default_factory=list, init=False)  # since the loop was overdue
     _dropped: int = field(default=0, init=False)
+    _untraced: int = field(default=0, init=False)  # samples skipped while tracemalloc traced
 
     @property
     def tick(self) -> float:
@@ -393,22 +400,22 @@ class LoopGuard:
             late = now - self._due
             self._due = now + self.tick
             used, self._cpu = cpu - self._cpu, cpu
-            samples, dropped = self._take_samples()
+            samples, dropped, untraced = self._take_samples()
         if ended is not None:
             self.on_block(replace(ended, total_ms=late * 1000, cpu_ms=used * 1000,
-                                  profile=self._profile(samples, dropped)))  # fmt: skip
+                                  profile=self._profile(samples, dropped, untraced)))  # fmt: skip
         if not self._stop.is_set():
             self._handle = self.loop.call_later(self.tick, self._beat)
 
-    def _take_samples(self) -> tuple[list[Sample], int]:
+    def _take_samples(self) -> tuple[list[Sample], int, int]:
         """The stall's samples so far, and a fresh start (call under the lock)."""
-        taken = self._samples, self._dropped
-        self._samples, self._dropped = [], 0
+        taken = self._samples, self._dropped, self._untraced
+        self._samples, self._dropped, self._untraced = [], 0, 0
         return taken
 
-    def _profile(self, samples: Sequence[Sample], dropped: int) -> dict[str, Any]:
-        return profile(samples, dropped=dropped, product_roots=self.product_roots,
-                       test_roots=self.test_roots)  # fmt: skip
+    def _profile(self, samples: Sequence[Sample], dropped: int, untraced: int) -> dict[str, Any]:
+        return profile(samples, dropped=dropped, untraced=untraced,
+                       product_roots=self.product_roots, test_roots=self.test_roots)  # fmt: skip
 
     def _watch(self) -> None:
         poll = max(self.threshold_ms / 10000, 0.002)
@@ -420,16 +427,18 @@ class LoopGuard:
                 with self._lock:
                     ended, self._open = self._open, None
                     late, self._due = now - self._due, now + self.tick
-                    samples, dropped = self._take_samples()
+                    samples, dropped, untraced = self._take_samples()
                 if ended is not None:  # it stopped right after the stall: ends here (CPU unknown)
                     self.on_block(replace(ended, total_ms=late * 1000,
-                                          profile=self._profile(samples, dropped)))  # fmt: skip
+                                          profile=self._profile(samples, dropped, untraced)))  # fmt: skip
                 continue
             with self._lock:
                 late = now - self._due
                 if late > 0:  # overdue: whatever the loop's thread runs now is the stall
                     wait = min(poll, SAMPLE_INTERVAL)
-                    if len(self._samples) < MAX_SAMPLES:
+                    if tracemalloc.is_tracing():  # never perturb a memory measurement
+                        self._untraced += 1
+                    elif len(self._samples) < MAX_SAMPLES:
                         frame = sys._current_frames().get(self._thread_id or -1)
                         self._samples.append(take_sample(frame))
                     else:
@@ -440,7 +449,8 @@ class LoopGuard:
                 if (late - paused) * 1000 <= self.threshold_ms:
                     continue  # late because of garbage collection, not because of code
                 block = replace(
-                    self._sample(late, paused), profile=self._profile(self._samples, self._dropped)
+                    self._sample(late, paused),
+                    profile=self._profile(self._samples, self._dropped, self._untraced),
                 )  # so far
                 self._open = block
             self.on_block(block)
