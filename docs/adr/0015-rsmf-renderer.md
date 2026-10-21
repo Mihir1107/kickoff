@@ -1595,3 +1595,16 @@ what was done and why.
       `test_a_memory_measurement_is_never_perturbed_by_the_sampler` (a block still detected and
       counted, no sample, under 64 KiB traced with stalls on a 60-frame stack); mutation
       `guard_profile_samples_under_tracemalloc`. The bound is unchanged.
+25. **`test_stalled_clients_hold_nothing_pooled_and_others_are_served` failed the loop guard on CI
+    (run 39528769575, shard 2, the M18 step-5 branch, 2026-10-21): a TEST bug, fixed; the first
+    catch of the stall profiler (§24.24).**
+    - **What the guard saw:** 334 ms, 390 ms of CPU on the loop's thread. The one sample landed in
+      `edisc_api/app.py:232` (`RequestContext.__call__`), so the block was classed "product".
+    - **What the profile showed:** 13 of 15 samples in `httpx.Headers.__repr__` called from
+      `tests/integration/api/conftest.py:65` (`_scan_response`, the response hook that scans every
+      response for every credential a test handed in). It rendered `str(response.headers)` once
+      PER canary, and the canary set grows over the whole session (every `secret()` and the
+      no-echo fuzzer's), so late in a shard each response cost hundreds of header renderings on
+      the loop. Without the profile this would have been blamed on the request middleware.
+    - **Fix:** the headers are rendered once and the scan runs in a thread over a snapshot of the
+      canaries. Nothing loosened. The same code was on main (latent, growing with the suite).

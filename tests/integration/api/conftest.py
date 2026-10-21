@@ -60,9 +60,16 @@ def secret(prefix: str = "xoxb") -> str:
     return value
 
 
+def _leaks(body: str, headers: str, canaries: list[str]) -> list[str]:
+    return [s for s in canaries if s in body or s in headers]
+
+
 async def _scan_response(response: httpx.Response) -> None:
+    """In a thread, over the headers rendered ONCE: the canaries grow with the session (hundreds
+    by its end), and rendering the headers per canary on the loop blocked it 334 ms on CI (run
+    39528769575, ADR 0015 §24.25; the stall profile named this line, the one sample did not)."""
     body = (await response.aread()).decode(errors="replace")
-    leaked = [s for s in SECRETS if s in body or s in str(response.headers)]
+    leaked = await asyncio.to_thread(_leaks, body, str(response.headers), list(SECRETS))
     assert not leaked, f"{response.request.method} {response.request.url} leaked a credential"
 
 
