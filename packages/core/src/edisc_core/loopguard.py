@@ -7,7 +7,11 @@ makes it fail the test instead (`tests/conftest.py`, and every worker process a 
 
 How: a callback on the loop re-arms itself every ``tick`` seconds. A watchdog thread notices when it is
 late by more than the threshold, samples the loop thread's stack while it is still blocked, and
-reports a `Block`. The block is attributed to the innermost COROUTINE frame on that stack (the async
+reports a `Block`. From the moment the loop is overdue until it runs again, the watchdog also
+samples the loop thread's stack every `SAMPLE_INTERVAL` (10 ms) and the block carries the
+aggregate (`Block.profile`: the hottest innermost frames, functions and frames of ours): one
+sample is one instant, and twice it pointed at innocent code that merely ran next (a BEGIN's
+send, ADR 0015 §24.13; a Redis send, §24.24). The block is attributed to the innermost COROUTINE frame on that stack (the async
 function that made the blocking synchronous call): product code (`packages/`, `apps/`, `workers/`
 sources) or anything unattributable counts; a test's own coroutine (test setup that builds data
 synchronously) and asyncpg's SCRAM handshake for a new connection are recorded but do not count
@@ -37,17 +41,21 @@ import threading
 import time
 import traceback
 import uuid
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from types import FrameType
-from typing import Literal
+from typing import Any, Literal
 
 ENV_MS = "EDISC_TEST_LOOP_BLOCK_MS"
 ENV_DIR = "EDISC_TEST_LOOP_BLOCK_DIR"
 
 Origin = Literal["product", "test", "unattributed", "idle", "library"]
+# while the loop is overdue the watchdog samples its thread this often (the profile of a stall)
+SAMPLE_INTERVAL = 0.010
+MAX_SAMPLES = 6_000  # one minute of a stall; beyond, samples are counted, not kept
+PROFILE_TOP = 10  # rows per table in the profile
 # a stall counts only if the loop's thread was on the CPU for at least this share of it: CPU-bound
 # work keeps it near 1 (still above 0.25 with every core contended), a descheduled process near 0
 BUSY_SHARE = 0.25
@@ -76,6 +84,7 @@ class Block:
     total_ms: float | None = None
     gc_ms: float = 0.0  # garbage collection inside the stall (excused, not counted in the lag)
     cpu_ms: float | None = None  # CPU time of the loop's thread over the whole stall (at its end)
+    profile: dict[str, Any] | None = None  # `profile()` of the samples taken during the stall
 
     @property
     def busy(self) -> bool:
@@ -104,8 +113,105 @@ class Block:
         return (
             f"event loop blocked (pid {self.pid}, {self.origin}, lag {self.lag_ms:.0f} ms when "
             f"sampled ({self.gc_ms:.0f} ms of it garbage collection), total {total}{cpu}) in "
-            f"{self.blamed}; task {self.task}\n{self.stack}"
+            f"{self.blamed}; task {self.task}\n{self.stack}{describe_profile(self.profile)}"
         )
+
+
+# (monotonic time, waiting for I/O, frames outermost first as (path, line, qualified name))
+Sample = tuple[float, bool, tuple[tuple[str, int, str], ...]]
+
+
+def _short(path: str) -> str:
+    if path.startswith(str(_REPO) + os.sep):
+        return path[len(str(_REPO)) + 1 :]
+    _, sep, rest = path.rpartition(f"site-packages{os.sep}")
+    if sep:
+        return rest
+    _, sep, rest = path.rpartition(f"{os.sep}lib{os.sep}python")
+    return f"<stdlib>{rest[rest.find(os.sep) :]}" if sep else path
+
+
+def take_sample(frame: FrameType | None) -> Sample:
+    """The loop thread's stack at one instant: cheap (no source lines read), for aggregation."""
+    frames: list[tuple[str, int, str]] = []
+    waiting = frame is not None and _waiting(_unwrapped(frame))
+    while frame is not None and len(frames) < 200:
+        frames.append((frame.f_code.co_filename, frame.f_lineno, frame.f_code.co_qualname))
+        frame = frame.f_back
+    frames.reverse()
+    return time.monotonic(), waiting, tuple(frames)
+
+
+def profile(
+    samples: Sequence[Sample], *, dropped: int = 0,
+    product_roots: Sequence[str] = PRODUCT_ROOTS, test_roots: Sequence[str] = TEST_ROOTS,
+) -> dict[str, Any]:  # fmt: skip
+    """Aggregate the samples of one stall: where the loop's thread WAS, sample after sample.
+    ``leaf``: the innermost Python frame (self time, by line; a C call such as JSON encoding is
+    charged to the Python line that called it); ``functions``: every function on the stack, once
+    per sample (inclusive time), from the deepest frame that every running sample shares inward
+    (the frames the whole stall ran under, the event loop's and the test runner's, would
+    otherwise fill the table at 100 %); equal counts deepest first; ``ours``: the innermost frame
+    under the product or test roots. ``waiting``: samples taken in the selector or a non-blocking socket call (the loop was not
+    running code then). ``interval_ms``: the measured mean spacing of the samples (the watchdog
+    needs the GIL, so a loop thread busy in Python stretches the 10 ms). Counts, most first, at
+    most `PROFILE_TOP` rows each (`functions`: twice that)."""
+    roots = (*product_roots, *test_roots)
+    leaf: Counter[str] = Counter()
+    functions: Counter[str] = Counter()
+    depth: dict[str, int] = {}
+    ours: Counter[str] = Counter()
+    waiting = 0
+    running = [frames for _, idle, frames in samples if frames and not idle]
+    shared = 0  # how many outermost frames every running sample has in common
+    if running:
+        first = running[0]
+        while shared < len(first) and all(
+            len(f) > shared and f[shared] == first[shared] for f in running
+        ):
+            shared += 1
+    for _, idle, frames in samples:
+        waiting += idle
+        if not frames:
+            continue
+        path, line, name = frames[-1]
+        leaf[f"{_short(path)}:{line} in {name}"] += 1
+        inner = frames[max(shared - 1, 0) :] if not idle else frames[-1:]
+        names = {f"{_short(p)} in {n}": i for i, (p, _, n) in enumerate(inner)}
+        functions.update(names.keys())
+        for name, i in names.items():
+            depth[name] = max(depth.get(name, 0), i)
+        mine = next((f for f in reversed(frames) if f[0].startswith(roots)), None)
+        if mine is not None:
+            ours[f"{_short(mine[0])}:{mine[1]} in {mine[2]}"] += 1
+    span = samples[-1][0] - samples[0][0] if len(samples) > 1 else 0.0
+    ranked = sorted(functions.items(), key=lambda kv: (-kv[1], -depth[kv[0]], kv[0]))
+    return {
+        "interval_ms": round(1000 * span / (len(samples) - 1), 1) if span else None,
+        "samples": len(samples), "dropped": dropped, "waiting": waiting,
+        "leaf": leaf.most_common(PROFILE_TOP), "functions": ranked[: 2 * PROFILE_TOP],
+        "ours": ours.most_common(PROFILE_TOP),
+    }  # fmt: skip
+
+
+def describe_profile(p: dict[str, Any] | None) -> str:
+    if not p or not p.get("samples"):
+        return "\n(no profile: the stall ended before a sample was taken)\n" if p else ""
+    n = int(p["samples"])
+    out = [
+        f"\nprofile of the stall: {n} samples (one every {p['interval_ms'] or 0:.0f} ms) while "
+        f"the loop was overdue ({p['waiting']} waiting for I/O"
+        + (f", {p['dropped']} more not kept" if p.get("dropped") else "")
+        + ")"
+    ]
+    for title, key in (
+        ("hottest innermost frames (self)", "leaf"),
+        ("hottest functions (on the stack)", "functions"),
+        ("innermost frames of ours", "ours"),
+    ):
+        out.append(f"  {title}:")
+        out += [f"    {c:5d} {100 * c / n:5.1f}%  {where}" for where, c in p[key]] or ["    (none)"]
+    return "\n".join(out) + "\n"
 
 
 def _ours(
@@ -254,6 +360,8 @@ class LoopGuard:
     _handle: asyncio.TimerHandle | None = field(default=None, init=False)
     _watchdog: threading.Thread | None = field(default=None, init=False)
     _cpu: float = field(default=0.0, init=False)  # the loop thread's CPU time at its last beat
+    _samples: list[Sample] = field(default_factory=list, init=False)  # since the loop was overdue
+    _dropped: int = field(default=0, init=False)
 
     @property
     def tick(self) -> float:
@@ -285,30 +393,55 @@ class LoopGuard:
             late = now - self._due
             self._due = now + self.tick
             used, self._cpu = cpu - self._cpu, cpu
+            samples, dropped = self._take_samples()
         if ended is not None:
-            self.on_block(replace(ended, total_ms=late * 1000, cpu_ms=used * 1000))
+            self.on_block(replace(ended, total_ms=late * 1000, cpu_ms=used * 1000,
+                                  profile=self._profile(samples, dropped)))  # fmt: skip
         if not self._stop.is_set():
             self._handle = self.loop.call_later(self.tick, self._beat)
 
+    def _take_samples(self) -> tuple[list[Sample], int]:
+        """The stall's samples so far, and a fresh start (call under the lock)."""
+        taken = self._samples, self._dropped
+        self._samples, self._dropped = [], 0
+        return taken
+
+    def _profile(self, samples: Sequence[Sample], dropped: int) -> dict[str, Any]:
+        return profile(samples, dropped=dropped, product_roots=self.product_roots,
+                       test_roots=self.test_roots)  # fmt: skip
+
     def _watch(self) -> None:
         poll = max(self.threshold_ms / 10000, 0.002)
-        while not self._stop.wait(poll):
+        wait = poll
+        while not self._stop.wait(wait):
             now = time.monotonic()
+            wait = poll
             if not self.loop.is_running():  # a stopped loop is idle, not blocked
                 with self._lock:
                     ended, self._open = self._open, None
                     late, self._due = now - self._due, now + self.tick
+                    samples, dropped = self._take_samples()
                 if ended is not None:  # it stopped right after the stall: ends here (CPU unknown)
-                    self.on_block(replace(ended, total_ms=late * 1000))
+                    self.on_block(replace(ended, total_ms=late * 1000,
+                                          profile=self._profile(samples, dropped)))  # fmt: skip
                 continue
             with self._lock:
                 late = now - self._due
+                if late > 0:  # overdue: whatever the loop's thread runs now is the stall
+                    wait = min(poll, SAMPLE_INTERVAL)
+                    if len(self._samples) < MAX_SAMPLES:
+                        frame = sys._current_frames().get(self._thread_id or -1)
+                        self._samples.append(take_sample(frame))
+                    else:
+                        self._dropped += 1
                 if self._open is not None or late * 1000 <= self.threshold_ms:
                     continue
                 paused = _GC.within(self._due, now) if _GC is not None else 0.0
                 if (late - paused) * 1000 <= self.threshold_ms:
                     continue  # late because of garbage collection, not because of code
-                block = self._sample(late, paused)
+                block = replace(
+                    self._sample(late, paused), profile=self._profile(self._samples, self._dropped)
+                )  # so far
                 self._open = block
             self.on_block(block)
 

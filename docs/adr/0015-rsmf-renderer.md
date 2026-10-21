@@ -1538,19 +1538,48 @@ what was done and why.
     - **Product unaffected:** the script compares an operator-given deploy time with the server's
       stamps.
 24. **`test_a_grid_sized_directory_pages_on_its_index` failed the loop guard once on CI (run
-    39459441287, shard 3, commit `4e5f1fa`, 2026-10-20). OPEN, not diagnosed, not re-run.**
-    - **What the guard saw:** one block of 456 ms (lag 455 ms, 9 ms of it garbage collection) with
-      495 ms of CPU on the test process's loop thread, sampled "idle" in a NON-blocking Redis
-      `writelines` (`redis/asyncio/connection.py:1169` → `selector_events.py:1122`), during
-      `read_all` (test line 453: 60 pages of 500 directory entries through the in-process API).
-      The sampled frame is where the loop was when the sample landed, not what used the CPU.
-    - **Context:** the same test passed on run 39455171845 (`52a8ffe`) and locally in the API
-      suite on `4e5f1fa`'s tree (1,134 passed). `4e5f1fa` changed nothing on the directory route
-      or the per-request path (it registers the hold routes; the identity checks run at process
-      start, which test-built `Resources` skip).
-    - **Why not reproduced:** the local disk guard refused a test stack (14 GB free, guard 15;
-      not lowered).
-    - **Next:** reproduce in a loop under 8-core contention with `EDISC_TEST_LOOP_BLOCK_MS=50
-      EDISC_TEST_LOOP_BLOCK_MODE=report EDISC_TEST_LOOP_BLOCK_LOG=<file>` to find which step of a
-      page (JSON encoding of 500 entries, response validation, the cursor HMAC) spends the CPU on
-      the loop; then classify product or test bug and fix the cause (never the threshold).
+    39459441287, shard 3, commit `4e5f1fa`, 2026-10-20). DIAGNOSED AND FIXED 2026-10-21: a
+    product bug in the dummy connector (CPU on the loop), proven with the new stall profiler.**
+    - **What the guard saw:** one block of 456 ms (9 ms of it garbage collection), 495 ms of CPU
+      on the test process's loop thread, sampled "idle" in a NON-blocking Redis `writelines`
+      (`redis/asyncio/connection.py:1169`). One sample is one instant: it showed where the loop
+      was when the sample landed (the rate limiter's first request), not what burnt the CPU.
+    - **Correction of the first note:** the task was at test line 453, which is `capture(...)` (the
+      directory capture, `edisc_worker.directory.refresh_one`), not `read_all`: the 60 page
+      requests logged after it took 9-28 ms each. Neither suspect named before (500-entry page
+      serialisation, Redis per-connection work) was the cause.
+    - **The stall profiler (new, `edisc_core.loopguard`):** from the moment the loop is overdue
+      until it runs again, the watchdog samples the loop thread's stack every ~10 ms (measured
+      spacing reported: the watchdog needs the GIL, so 10-20 ms on a loop busy in Python) and the
+      block carries the aggregate (`Block.profile`): hottest innermost frames (self, by line),
+      functions (inclusive, from the deepest frame all samples share inward), innermost frames of
+      ours, samples waiting for I/O. It is printed with the block (local output, CI log) and kept
+      per failed test in the failure artifacts (`loop-blocks.json`, `failure-<phase>.txt`;
+      `EDISC_TEST_LOOP_BLOCK_LOG` lines carry it too). Tests: a synthetic 0.6 s CPU block in a
+      known function behind a 0.3 s prelude where the detection sample lands, attributed to the
+      hot function; aggregation, file round trip. Round `s24-profile` (5 breaks, all caught).
+    - **Proof (throwaway branch `diag/loop-profile`, run 39525014015, deleted afterwards):** the
+      test 12 times per variant at `EDISC_TEST_LOOP_BLOCK_MS=50` in report mode (runs 7-12 under
+      4 CPU-burning processes on the 4-vCPU runner), then once in fail mode to prove the artifacts.
+      - **Before:** a product block in EVERY run, blamed on
+        `edisc_connector_dummy/connector.py:357` (`fetch_directory`), 354-399 ms with 360-405 ms
+        of CPU unloaded and 673-1,231 ms under contention; profile: `Dataset.users` (30,000
+        `User` objects) and `Dataset.conversations` (which builds the users again, plus
+        15,000-member channels) in all 19-85 samples, `h64` and the dataclass `__init__` the
+        leaves. Locally the same listing is ~135 ms of CPU, so it crossed 250 ms only on a slower
+        runner: intermittent.
+      - **After:** no product block over 50 ms in the capture in any of the 12 runs.
+    - **Fix:** `fetch_directory` builds the listing in a thread
+      (`edisc_connector_dummy.connector.directory_listing`, in `OFF_LOOP`; mutation
+      `dummy_directory_listing_on_loop`). Output unchanged (no dummy version bump). Nothing loosened.
+    - **Also seen (recorded, not changed):** the profile names `edisc_evidence.s3.s3_client`
+      (aiobotocore loading botocore's service model JSON: gzip, file reads) at 98-239 ms under
+      contention in test fixtures; in the product it runs once per process at startup (API
+      lifespan, worker start), before any activity or request, so it delays no heartbeat. Under
+      the 250 ms threshold even with 4 hogs. `edisc_api.auth.dev_private_key` (test-origin, the dev
+      IdP key) likewise.
+    - **A test bug found on the way:** `test_a_blocked_loop_is_reported_with_the_coroutine_that_blocked_it`
+      spun on WALL time and asserted ≥ 300 ms of CPU: it failed 5 runs in 8 under 10 busy
+      processes on the laptop, on the old guard too. The test spins now burn the thread's CPU
+      time (`time.thread_time()`), so the assertion holds whatever the load (10/10 under the same
+      contention).

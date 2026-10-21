@@ -9,7 +9,11 @@ stack is still up:
   during the test (Temporal visibility, by start time; at most `MAX_WORKFLOWS`);
 - ``<test>/custody_events.jsonl``: every custody stream that got an event during the test, whole
   (superuser read, ordered by stream and seq; at most `MAX_EVENTS` rows).
-- ``<test>/test.json``: node id, phases that failed, the time window.
+- ``<test>/test.json``: node id, phases that failed, the time window;
+- ``<test>/failure-<phase>.txt``: pytest's failure text of each failed phase (a loop block's
+  stack and the profile of its stall included);
+- ``<test>/loop-blocks.json``: every event-loop block that failed the test, with its profile
+  (`edisc_core.loopguard.Block`, ADR 0015 §24).
 Nothing here runs unless a test failed and the variable is set.
 """
 
@@ -42,6 +46,8 @@ class Failed:
     stop: datetime
     phases: list[str] = field(default_factory=list)
     tmp_path: Path | None = None
+    failures: dict[str, str] = field(default_factory=dict)  # phase -> pytest's failure text
+    loop_blocks: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def slug(self) -> str:
@@ -101,12 +107,16 @@ async def _collect(settings: Settings, failed: list[Failed], root: Path) -> list
             out = root / f.slug
             (out / "temporal").mkdir(parents=True, exist_ok=True)
             logs = _copy_logs(f.tmp_path, out / "worker-logs") if f.tmp_path else 0
+            for phase, text in f.failures.items():
+                (out / f"failure-{phase}.txt").write_text(text)
+            if f.loop_blocks:
+                (out / "loop-blocks.json").write_text(json.dumps(f.loop_blocks, indent=2))
             wfs = await _histories(client, f, out / "temporal")
             events = await _custody(conn, f, out / "custody_events.jsonl")
             (out / "test.json").write_text(json.dumps({
                 "nodeid": f.nodeid, "phases": f.phases, "start": f.start.isoformat(),
                 "stop": f.stop.isoformat(), "worker_logs": logs, "workflows": wfs,
-                "custody_events": events,
+                "custody_events": events, "loop_blocks": len(f.loop_blocks),
             }, indent=2))  # fmt: skip
             notes.append(f"{f.nodeid}: {logs} logs, {wfs} workflow histories, {events} events")
     finally:

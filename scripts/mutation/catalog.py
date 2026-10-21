@@ -67,6 +67,9 @@ Rounds (ADR 0015):
 - ``m17-reads``: the UI's reads (M17 step 3): the tenant-wide jobs list's visibility (same rule as
   ``authorize``), filters and keyset, cursors bound to route, path and filters, the custody events'
   byte budget and permission, group listings, ``/me/permissions`` and ``/roles``.
+- ``s24-profile``: the loop guard samples a stall every ~10 ms while the loop is overdue and
+  reports the aggregate (hottest innermost frames, functions, frames of ours), so a block is
+  attributed to the code that burnt the CPU, not to wherever one sample landed (ADR 0015 §24.24).
 - ``s24-pool``: fixed, warmed database pools and the churn report (ADR 0015 §24.13); the timing
   guard counting an idle sample when the loop's thread was measured busy, through the blocking-I/O
   guard's wrapper.
@@ -611,6 +614,20 @@ CATALOG: list[Mutation] = [
     m("guard_follows_sync_drivers", "s24-loop", LG,
       "        if not f.f_code.co_flags & (_ASYNC | inspect.CO_GENERATOR):\n            break\n", "",
       ULG, "synchronously"),
+    # ------------------------------------------------------------------ §24.24 stall profiles
+    m("guard_profile_only_at_detection", "s24-profile", LG,
+      "                if late > 0:  # overdue:",
+      "                if late * 1000 > self.threshold_ms and self._open is None:  # overdue:",
+      ULG, "profiled"),
+    m("guard_profile_kept_from_detection", "s24-profile", LG,
+      "cpu_ms=used * 1000,\n                                  profile=self._profile(samples, dropped)))",
+      "cpu_ms=used * 1000))", ULG, "profiled"),
+    m("guard_profile_leaf_outermost", "s24-profile", LG,
+      "        path, line, name = frames[-1]\n", "        path, line, name = frames[0]\n",
+      ULG, "aggregates"),
+    m("guard_profile_shared_frames_listed", "s24-profile", LG,
+      "        inner = frames[max(shared - 1, 0) :] if not idle else frames[-1:]\n",
+      "        inner = frames\n", ULG, "aggregates"),
     m("jsonstream_no_yield", "s24-loop", "packages/core/src/edisc_core/jsonstream.py",
       "        await asyncio.sleep(0)\n", "", UJ, "turn"),
     m("zipwriter_no_yield", "s24-loop", C + "zipwriter.py",
@@ -640,6 +657,9 @@ CATALOG: list[Mutation] = [
     # each pure function the product runs in a thread, called on the loop instead (OFF_LOOP)
     m("dummy_page_on_loop", "s24-loop", DC, "result: T = await asyncio.to_thread(respond)",
       "result: T = respond()", UDE, "oracle_model"),
+    m("dummy_directory_listing_on_loop", "s24-profile", DC,
+      "users, convs = await asyncio.to_thread(directory_listing, ds, epoch)",
+      "users, convs = directory_listing(ds, epoch)", UDE, "rate_limit_token"),
     m("dummy_plan_on_loop", "s24-loop", DC,
       "batches = await asyncio.to_thread(self.plan, conn, unit_, scope)",
       "batches = self.plan(conn, unit_, scope)", UDE, "oracle_model"),

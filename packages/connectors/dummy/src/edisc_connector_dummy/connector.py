@@ -77,6 +77,13 @@ def _encode(index: int) -> Cursor:
     return base64.urlsafe_b64encode(json.dumps({"v": 1, "i": index}).encode()).decode()
 
 
+def directory_listing(ds: Dataset, epoch: int) -> tuple[list[Any], list[str]]:
+    """The directory's users and conversation ids. CPU work that grows with the dataset (30,000
+    users: about 135 ms here, several times that on CI), so ``fetch_directory`` runs it in a
+    thread: on the loop it blocked the event loop 456 ms in CI run 39459441287 (ADR 0015 §24.24)."""
+    return list(ds.users(epoch)), [c.id for c in ds.conversations()]
+
+
 def _decode(cursor: Cursor | None) -> int:
     if cursor is None:
         return 0
@@ -354,8 +361,7 @@ class DummyConnector:
         """Users, then conversations (with members): one cursor over both, so a resumed directory unit
         continues exactly where it stopped."""
         ds, epoch = self.dataset(conn)
-        users = list(ds.users(epoch))
-        convs = [c.id for c in ds.conversations()]
+        users, convs = await asyncio.to_thread(directory_listing, ds, epoch)
         size = ds.spec.page_size
         index = _decode(cursor)
         user_pages = max(1, -(-len(users) // size))

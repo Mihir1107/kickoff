@@ -29,8 +29,11 @@ def _guard(blocks: list[loopguard.Block], *, as_product: bool) -> loopguard.Loop
 
 
 def _spin(seconds: float) -> None:
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
+    """Burn ``seconds`` of the thread's CPU time (not wall time: on a contended host a wall-clock
+    spin gets a fraction of the CPU, and the CPU assertions failed 5 runs in 8 under 10 busy
+    processes on the laptop, 2026-10-21)."""
+    deadline = time.thread_time() + seconds
+    while time.thread_time() < deadline:
         pass
 
 
@@ -73,6 +76,97 @@ async def _test_a_blocked_loop_is_reported_with_the_coroutine_that_blocked_it() 
     assert "_blocking_coroutine" in b.blamed and "_spin(seconds)" in b.stack
     assert b.lag_ms > 100 and ended[0].total_ms is not None and ended[0].total_ms >= 350
     assert ended[0].cpu_ms is not None and ended[0].cpu_ms >= 300 and ended[0].counts
+
+
+def _innocent_prelude(seconds: float) -> None:  # CPU seconds, like `_spin`
+    deadline = time.thread_time() + seconds
+    while time.thread_time() < deadline:
+        pass
+
+
+def _hot_function(seconds: float) -> None:  # CPU seconds, like `_spin`
+    deadline = time.thread_time() + seconds
+    while time.thread_time() < deadline:
+        pass
+
+
+async def _cheap_then_hot() -> None:
+    _innocent_prelude(0.3)  # where the one detection sample lands (threshold 100 ms)
+    _hot_function(0.6)  # where the stall's CPU went
+
+
+def test_a_stall_is_profiled_and_the_cpu_attributed_to_the_function_that_burnt_it() -> None:
+    _on_own_loop(_test_a_stall_is_profiled_and_the_cpu_attributed_to_the_function_that_burnt_it())
+
+
+async def _test_a_stall_is_profiled_and_the_cpu_attributed_to_the_function_that_burnt_it() -> None:
+    """The single sample at detection pointed twice at innocent code that merely ran next (ADR
+    0015 §24.13, §24.24). The stall is sampled every ~10 ms while the loop is overdue, and the
+    block carries the aggregate: here the detection sample lands in the 0.3 s prelude, the
+    profile names the 0.6 s hot function."""
+    blocks: list[loopguard.Block] = []
+    guard = _guard(blocks, as_product=True)
+    guard.start()
+    try:
+        await _cheap_then_hot()
+        await asyncio.sleep(0.05)
+    finally:
+        guard.stop()
+    detected = [b for b in blocks if b.total_ms is None]
+    ended = [b for b in blocks if b.total_ms is not None]
+    assert len(detected) == 1 and len(ended) == 1, blocks
+    assert "_innocent_prelude" in detected[0].stack.splitlines()[-2]  # the one instant: innocent
+    p = ended[0].profile
+    assert p is not None and p["samples"] >= 20, p  # ~45-90 over 0.9 s; one = sampled at detection
+    leaf = dict(p["leaf"])
+    hot = sum(c for where, c in leaf.items() if "in _hot_function" in where)
+    cold = sum(c for where, c in leaf.items() if "in _innocent_prelude" in where)
+    assert p["leaf"][0][0].endswith("in _hot_function") and hot >= 0.5 * p["samples"], p
+    assert hot > 1.4 * cold, p  # 0.6 s against 0.3 s
+    assert p["ours"][0][0].endswith("in _hot_function"), p
+    assert any(w.endswith("in _cheap_then_hot") for w, _ in p["functions"]), p
+    text = ended[0].describe()
+    assert (
+        "hottest innermost frames (self)" in text
+        and "_hot_function" in text.split("profile of the stall")[-1]
+    )
+
+
+def test_the_profile_aggregates_samples() -> None:
+    a = (HERE + "a.py", 1, "outer")
+    b = (HERE + "b.py", 7, "middle")
+    lib = ("/usr/lib/python3.12/json/encoder.py", 3, "encode")
+    samples: list[loopguard.Sample] = [
+        (0.0, False, (a, b, lib)), (0.01, False, (a, b, lib)), (0.02, False, (a, b, b)),
+        (0.03, True, (a,)), (0.04, False, ()),
+    ]  # fmt: skip
+    p = loopguard.profile(samples, product_roots=(HERE,), test_roots=(), dropped=2)
+    assert p["samples"] == 5 and p["waiting"] == 1 and p["dropped"] == 2 and p["interval_ms"] == 10
+    assert p["leaf"][0] == ("<stdlib>/json/encoder.py:3 in encode", 2)
+    # from the deepest frame all running samples share (`middle`) inward; recursion counts once
+    # per sample; `outer` (outside it) only from the waiting sample's innermost frame
+    assert dict(p["functions"]) == {
+        f"{loopguard._short(b[0])} in middle": 3,
+        "<stdlib>/json/encoder.py in encode": 2,
+        f"{loopguard._short(a[0])} in outer": 1,
+    }
+    assert dict(p["ours"]) == {
+        f"{loopguard._short(b[0])}:7 in middle": 3,
+        f"{loopguard._short(a[0])}:1 in outer": 1,
+    }
+    block = loopguard.Block(id="x", pid=1, lag_ms=300, origin="product", blamed="b", task=None,
+                            stack="", total_ms=400, cpu_ms=390, profile=p)  # fmt: skip
+    assert "60.0%" in block.describe()  # 3 of 5 samples in `middle`
+
+
+def test_a_profile_survives_the_report_file(tmp_path: Path) -> None:
+    sample: loopguard.Sample = (0.0, False, ((HERE + "x.py", 2, "f"),))
+    p = loopguard.profile([sample, sample], product_roots=(HERE,), test_roots=())
+    block = loopguard.Block(id="y", pid=2, lag_ms=300, origin="product", blamed="b", task=None,
+                            stack="", total_ms=400, cpu_ms=390, profile=p)  # fmt: skip
+    loopguard.write_block(tmp_path, block)
+    (read,) = loopguard.read_blocks(tmp_path, set())
+    assert read.describe() == block.describe()
 
 
 def test_a_test_coroutine_blocking_the_loop_is_recorded_but_does_not_count() -> None:
@@ -137,6 +231,7 @@ def test_a_worker_process_reports_to_the_directory_and_refuses_outside_test(
     seen: set[str] = set()
     (block,) = loopguard.read_blocks(tmp_path, seen)
     assert block.counts and block.total_ms is not None and block.total_ms >= 400
+    assert block.profile is not None and block.profile["samples"] >= 10, block.profile
     assert json.loads((tmp_path / next(iter(seen))).read_text())["pid"] == block.pid
 
     refused = subprocess.run(

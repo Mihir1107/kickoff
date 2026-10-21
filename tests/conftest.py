@@ -75,6 +75,7 @@ OFF_LOOP = (
     "edisc_renderers.preview:render_preview",
     "edisc_renderers.report.model:valid_document",
     "edisc_connector_dummy.connector:DummyConnector.plan",
+    "edisc_connector_dummy.connector:directory_listing",
     "edisc_connector_dummy.dialects.slack:history_page",
     "edisc_connector_dummy.dialects.slack:replies_page",
     "edisc_connector_dummy.dialects.slack:users_page",
@@ -213,6 +214,8 @@ def _check(item: pytest.Item, phase: str) -> Generator[None, Any, None]:
     blocks, on_loop, violations = state.take(phase), state.take_on_loop(), state.take_violations()
     if not blocks and not on_loop and not violations:
         return
+    # each block with its profile, for the failure artifacts (tests/integration/artifacts.py)
+    item.user_properties.append(("loop_blocks", [{"phase": phase, **asdict(b)} for b in blocks]))
     text = "\n\n".join([*on_loop, *violations, *(b.describe() for b in blocks)])
     msg = (
         f"{len(on_loop)} call(s) of thread-only functions on the event loop, {len(violations)} "

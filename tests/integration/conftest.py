@@ -107,6 +107,10 @@ def pytest_runtest_makereport(
         item.nodeid, artifacts.Failed(item.nodeid, item.stash[_STARTED], artifacts.now())
     )
     entry.stop, entry.phases = artifacts.now(), [*entry.phases, report.when]
+    entry.failures[report.when] = report.longreprtext
+    for key, value in report.user_properties:
+        if key == "loop_blocks":
+            entry.loop_blocks += value
     tmp = getattr(item, "funcargs", {}).get("tmp_path")
     if isinstance(tmp, Path):
         entry.tmp_path = tmp

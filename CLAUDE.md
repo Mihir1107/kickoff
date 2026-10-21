@@ -559,7 +559,9 @@ make worker / api       # Temporal worker (+ maintenance queue, sweeper schedule
   for a new slot is churn and fails the test (`loopblock.report_product`; ADR 0015 §24.13).
 - Every test fails if the event loop was blocked longer than `EDISC_TEST_LOOP_BLOCK_MS` (250 ms;
   `tests/conftest.py`, `edisc_core.loopguard`), in the test process or in any worker it spawned, with
-  the blocked stack in the failure. Every function the product runs in a thread is listed in
+  the blocked stack and a profile of the whole stall in the failure and in the failure artifacts
+  (`loop-blocks.json`): sampled every ~10 ms while the loop is overdue; trust its hottest frames,
+  not the one sampled stack (ADR 0015 §24.24). Every function the product runs in a thread is listed in
   `OFF_LOOP` there (a call on a loop thread fails the test, however fast): a new `to_thread` site
   adds its function there and a mutation entry (ADR 0015 §24). Async generators over sources that
   may not suspend (`jsonstream`, the RSMF envelope) `await asyncio.sleep(0)` per chunk.
