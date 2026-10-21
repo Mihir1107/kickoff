@@ -1,4 +1,4 @@
-# Handoff (2026-10-20: M18 decisions taken; M18 steps 0-4 built: storage identities, upload quotas, legal hold with S3 flags (migrations 0046-0047); STOPPED by instruction before step 5 (the standalone verifier) and destruction)
+# Handoff (2026-10-21: loop-guard stall profiler; CI 39459441287's block diagnosed and fixed; M18 step 5 (the standalone verifier) BUILT on branch `m18-step5`, NOT merged: its report-pdf job needs new PDF goldens that the local disk guard blocked)
 
 This file alone is enough to continue. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisions §1-§18, notes
@@ -7,29 +7,83 @@ design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisi
 `docs/runs/2026-10-12-m16-complete.md`. Expert guide: `docs/VERIFYING.md`. Demo: `docs/DEMO.md`.
 **M18: plan `docs/plans/m18.md` (accepted; the user's decisions in its §12 win over the rest),
 design of record `docs/adr/0019-legal-hold-and-destruction.md` (spikes §1, what is built §2-§4,
-every deviation from the plan §5).** M17 plan: `docs/plans/m17.md` (every decision: its §12;
-ADR 0016 Amendments 1 and 2). M17 is built except step 7 (legal review) and step 9 (frontend);
-real-tenant confirmation of steps 3b and 6 is pending. Phase 3 decisions so far: `docs/plans/phase-3.md`.
+every deviation from the plan §5; step 5 is §6 ON THE BRANCH).** M17 plan: `docs/plans/m17.md`
+(every decision: its §12; ADR 0016 Amendments 1 and 2). M17 is built except step 7 (legal review)
+and step 9 (frontend); real-tenant confirmation of steps 3b and 6 is pending. Phase 3 decisions so
+far: `docs/plans/phase-3.md`.
 
 ## Current state
 **Branch and CI:** `main`. Repo: `github.com/Mihir1107/kickoff`. Migrations at head: **0047**.
-- `52a8ffe` (M18 steps 0-2): CI run 39455171845 **green, every job**.
-- `4e5f1fa` (M18 steps 3-4): CI run 39459441287 **FAILED one test** in integration shard 3,
-  every other job green (lint, typecheck, unit, api-compat, production-install, report-pdf,
-  production-readiness, integration 0-2): `test_a_grid_sized_directory_pages_on_its_index`, a
-  456 ms event-loop block (ADR 0015 §24 note 24). **Not re-run to green, not diagnosed yet**:
-  the local disk guard blocked the reproduction loop. It is the first item under "Next".
+- `139290e` (stall profiler + the dummy directory fix): CI 39525932565 failed one memory test in
+  shard 2 (the profiler's own allocations under `tracemalloc`, ADR 0015 §24.24, fixed next).
+- `771cb77` (no sampling while tracemalloc traces): CI 39528727361 **green, every job**.
+- `976f96a` (test credential scan off the loop, ADR 0015 §24.25): CI 39530887546 every job green
+  except integration shard 0, which never ran a test: the test stack's Temporal namespace init
+  failed once (ADR 0015 §24.26, diagnosed; the init script now retries until the namespace
+  describes). The commit after it carries that fix; see "Next" 0 for its CI run.
+- **Branch `m18-step5`** (one commit on top of main): M18 step 5. CI 39531182020: lint,
+  typecheck, unit, api-compat, production-install and integration 0-3 green; `report-pdf` failed
+  as predicted (no PDF goldens for toolchain `1e861ea7e088`); `verifier-standalone` failed on a
+  TEST setup error (two collect workers on `collect-dummy`: Temporal refuses overlapping workers),
+  fixed on the branch after that run, not yet re-run when this was written.
 Renderer 1.3.2, dummy connector 0.5.0, normalizer 0.3.0, report renderer 1.6.0, preview renderer
-1.0.0 (unchanged by M18 so far).
+1.0.0 (unchanged).
 
-**Local machine (2026-10-20):** the `edisc-demo` compose stack was STOPPED (user's choice, volumes
-kept; `docker compose -p edisc-demo start` brings it back). Docker build cache was pruned to its
-newest 2.5 GB. Free disk swings with macOS swap: at the end of the session it was 10 GB, below
-the 15 GB guard, so the last full local suite could not run (guard not lowered); CI's four shards
-are the full-suite gate for `4e5f1fa`. **A local `.env` made before 2026-10-20 needs the new
-variables from `.env.example`** (`EDISC_S3_ROOT_USER/PASSWORD` for MinIO root, and the
-`edisc-app` / `edisc-hold` / `edisc-destroy` identity pairs); `make up` re-runs `minio-init`,
-which provisions the identities (idempotent).
+**Local machine (2026-10-21):** 7-10 GB free (guard 15, NOT lowered): no local integration run
+was possible this session; every integration result is CI's. The `edisc-demo` compose stack is
+stopped (volumes kept). A local `.env` made before 2026-10-20 needs the identity variables of
+`.env.example`.
+
+## Done: the stall profiler and CI 39459441287's loop block (2026-10-21; ADR 0015 §24.24-25)
+- **Profiler** (`edisc_core.loopguard`): while the loop is overdue the watchdog samples its thread
+  every ~10 ms; each block carries the aggregate (hottest innermost frames, functions, frames of
+  ours) in the failure text, `EDISC_TEST_LOOP_BLOCK_LOG` lines and the failure artifacts
+  (`loop-blocks.json`, `failure-<phase>.txt`, proven on CI). Not sampled while `tracemalloc`
+  traces (it perturbed a memory test's peak). Round `s24-profile` 6/6.
+- **The open block was a product bug in the dummy connector**: `fetch_directory` built the whole
+  30,000-user listing on the loop (354-399 ms on CI in EVERY run, 1.1 s under contention; proven
+  on throwaway branch `diag/loop-profile`, run 39525014015, deleted). The note's first reading
+  ("during read_all") was wrong: test line 453 is the capture. Now in a thread (`OFF_LOOP`).
+- **First catch of the profiler**: a 334 ms block whose one sample said "product, request
+  middleware" was the test hook `_scan_response` rendering response headers once per canary
+  (§24.25; fixed in `976f96a`).
+- Test bug fixed on the way: the guard's own tests spun on wall time and asserted CPU time.
+- Also seen, recorded only: `s3_client` creation loads botocore's model on the loop (98-239 ms
+  under contention): once per process at startup, no heartbeat affected.
+
+## Done on branch `m18-step5`: M18 step 5, the standalone verifier (ADR 0019 §6, deviations 10-12)
+- `packages/verify` (`edisc-verify`, `edisc_verify`) owns the offline code (moved with `git mv`);
+  every import in the tree names `edisc_verify.*`; the old paths are `sys.modules` aliases for one
+  release. Pins `cryptography==50.0.1`, `rfc8785==0.1.4` (= uv.lock), hashed
+  `packages/verify/requirements.lock`; Pydantic gone from the verifier.
+- `edisc_verify.jws`: exactly ES256 (the choice D7 left open), RFC 7515 A.3 verifies, A.2/A.4/A.5
+  refused by header, only `alg`/`kid`/`typ`, kid = RFC 7638 thumbprint, strict base64url.
+- Reproducible wheel (two builds byte-identical, entries stamped with the commit time), CI job
+  `verifier-standalone` / `make verifier-standalone` (empty venv, `--no-index`, compared byte for
+  byte with the in-tree verifier on real + tampered packages: `tests/integration/api/
+  test_verifier_standalone.py`), `edisc-verify --version` states the formats. Round
+  `m18-verifier` 8/8 (an equivalent mutant, a redundant `crit` branch, was removed).
+- **Why it is not on main:** the report image's toolchain id hashes every installed distribution,
+  `edisc-*` included, so the new `edisc-verify` in the worker venv moves it from `e24aecbb3dd4` to
+  `1e861ea7e088` (computed, and confirmed by CI: "NOT ADMITTED: no PDF goldens for toolchain
+  1e861ea7e088..."). PDF bytes do not change, but the goldens must be recorded by hand in the image
+  (`make test-env-up` + `EDISC_RECORD_REPORT_PDF=1 make test-report-pdf`), which needs >= 15 GB
+  free here. It also changes the report queue name (`...p1e861ea7e088...`).
+
+## Next
+0. **Check the CI runs started at the end of the session** (`gh run list --limit 3`): main with
+   the namespace-init fix, and the branch's `verifier-standalone` re-run (expected: everything
+   green on main; on the branch everything but `report-pdf`). A failure is a bug until diagnosed.
+1. **Merge step 5:** with disk to spare: `git switch m18-step5`, `make test-env-up`, record the PDF
+   goldens for toolchain `1e861ea7e088` in the image (`EDISC_RECORD_REPORT_PDF=1 make
+   test-report-pdf`; ADR 0018 §22; never in CI, never overwrite), commit them on the branch, run
+   the full suite + `make verifier-standalone`, then fast-forward main. The user may instead pick
+   another option (see the session's report): exclude workspace `edisc-*` distributions from the
+   toolchain id (also a one-time new id + goldens), or derive the generation.
+2. Then M18 step 6 destruction (spike S0.7, the `edisc_destroyer` definer pattern, first) and step
+   7 the certificate (signing with ES256 on a KMS key; `edisc-verify --destruction`).
+3. On a machine with disk to spare: the full local integration suite.
+4. AWS (cloud items): bucket policies and identity policies confirmed on AWS.
 
 ## Done: M18 steps 0-4 (2026-10-20)
 **Decisions (user, 2026-10-20; docs/plans/m18.md §12):** all approved; the changes the user made:
@@ -86,19 +140,6 @@ policy files not tested as files, the root probe untested on a bucket without po
 status filter masking a break, a refused create's staged upload never checked, no missing-version
 case, and migration rules testable only on a database migrated in the test
 (`tests/integration/db/test_hold_rules.py`).
-
-## Next
-0. **Diagnose CI run 39459441287's loop block** (ADR 0015 §24 note 24): reproduce
-   `test_a_grid_sized_directory_pages_on_its_index` in a loop under CPU contention with the guard
-   in report mode at 50 ms, find the CPU on the loop, fix the cause. Needs >= 15 GB free.
-1. **M18 step 5, the standalone verifier** (`packages/verify`, plan §5, D12 with the user's
-   cryptography rules), then step 6 destruction (spike S0.7, the `edisc_destroyer` definer pattern,
-   first) and step 7 the certificate. The user asked to stop after legal hold: confirm before
-   starting step 5.
-2. On a machine with disk to spare: the full local integration suite on `4e5f1fa`'s tree
-   (`make test-integration`).
-3. AWS (cloud items): the bucket policies in `infra/aws/*-bucket-policy.json` and the identity
-   policies as IAM roles, each statement confirmed refused for the other roles.
 
 ## Done: new tenants' items on stale statistics; the ANALYZE functions hardened (2026-10-19, user-approved)
 **CI:** run 39288602056 on `d2b77e4`: green, every job (the full suite on four shards). Full local integration suite: on the first version 15 failed (the deadlock), 1,441 passed. After

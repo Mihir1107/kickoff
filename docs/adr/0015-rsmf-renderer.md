@@ -1608,3 +1608,16 @@ what was done and why.
       the loop. Without the profile this would have been blamed on the request middleware.
     - **Fix:** the headers are rendered once and the scan runs in a thread over a snapshot of the
       canaries. Nothing loosened. The same code was on main (latent, growing with the suite).
+26. **Integration shard 0 of CI run 39530887546 (`976f96a`) never ran a test: the test stack's
+    start failed (2026-10-21; an infrastructure race in our init script, fixed).**
+    - **What failed:** `make test-env-up` → the `temporal-namespace` init job: after `temporal
+      operator cluster health` had passed, the describe-or-create step failed with "failed
+      connecting to Temporal server at temporal:7233: context deadline exceeded" (DNS resolved,
+      TCP connected, gRPC not answering before the CLI's deadline), and `set -e` ended the job.
+      The other shards and jobs of the run started the same stack normally.
+    - **Cause:** `infra/temporal/namespace.sh` treated the first call after the health check as
+      final; a frontend can pass `cluster health` and still not answer the next RPC in time on a
+      busy runner. One transient failure at start-up failed the whole shard.
+    - **Fix:** retry until the namespace DESCRIBES (at most 120 attempts, one a second, each
+      failed create printed); "ready" is printed only after describe succeeds. Nothing loosened:
+      a namespace that never becomes describable still fails the start, loudly.
