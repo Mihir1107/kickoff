@@ -1,4 +1,37 @@
-# Handoff (2026-10-21: loop-guard stall profiler; CI 39459441287's block diagnosed and fixed; M18 step 5 (the standalone verifier) BUILT on branch `m18-step5`, NOT merged: its report-pdf job needs new PDF goldens that the local disk guard blocked)
+# Handoff (2026-10-21: HANDED OVER to the platform owner; the entry point is the top-level README.md)
+
+## Handover (2026-10-21)
+**Start with [../README.md](../README.md)**: what the module is, status, setup, the demo, offline
+verification, tests, architecture, the repository map, a glossary, the ADR table, troubleshooting,
+and the open questions (the owner's requested changes, all not started, and library vs service).
+This file stays the detailed engineering log: the state below, then every milestone's record.
+
+Checked for the handover:
+- **Secrets:** gitleaks 8.30.1 over all 168 commits (`--log-opts=--all`): one finding, a test
+  canary in `tests/unit/core/test_redaction.py`. Targeted searches (private keys, AWS, GitHub,
+  Anthropic and Slack token shapes) found only test canaries. `.env` is untracked; `.env.example`
+  holds placeholders only.
+- **The GitHub repository is PUBLIC** (`gh repo view`), although `LICENSE` says proprietary. The
+  user decided on 2026-10-21 to leave it public for now.
+- **Fresh clone** (`git clone`, `make sync`, `make hooks`, `cp .env.example .env`, `make check`:
+  974 passed, 23 skipped with visible reasons, 2 min 35 s) and `scripts/demo.sh` from it: every
+  step as documented, both tampers FAILED, 203 s. The verifier installed alone (`uv sync --frozen
+  --no-dev --package edisc-renderers`) gives VERIFIED (0), FAILED (1), unreadable (2).
+- **Found and fixed (user's decision):** `scripts/demo.sh` step 0 removed the previous `edisc-demo`
+  stack only through `compose down`, which needs `.env.demo`, so the first run in a fresh clone
+  REUSED a stack another checkout left (its database still held the earlier tenant). The teardown
+  now removes every container, volume and network labelled with the project, says when they came
+  from another checkout, and refuses (before anything starts, keeping `demo-output/`) when any of it
+  remains. `tests/unit/test_demo_teardown.py` runs the real script against a fake `docker`; round
+  `handover` 2/2 caught.
+- **Unit mutation round in the fresh clone:** 235/235 caught, 13 minutes (the old notes said 2).
+- **Not run (disk guard, 9 GB free, NOT lowered):** listed in the README ("Not yet verified on a
+  fresh clone"): a warm demo run, the dev stack (`make up` / `migrate` / `worker` / `api`), the
+  MinIO console login, every integration target. CI is the integration gate. When the disk allows:
+  run them, correct the README, remove the list's entries that pass.
+
+The rest of this file was written before the handover. Rules are in `CLAUDE.md` (read it first, in
+full).
 
 This file alone is enough to continue. Rules are in `CLAUDE.md` (read it first, in full). The M16
 design of record is **`docs/adr/0018-collection-report-and-preview.md`** (decisions §1-§18, notes
@@ -1221,7 +1254,8 @@ Where the data is (verified 2026-10-05/06):
   `MIN_FREE_GB=12 make test-env-up`, then `make test-integration-only TESTS=...`, then
   `make test-env-down`; the full suite on a fresh stack is `MIN_FREE_GB=12 make test-integration`
   (about 20 minutes here). This laptop often has 13-16 GB free; the stack uses under 1 GB.
-- Mutation checks: `uv run python scripts/mutation/run.py --kind unit` (2 minutes), `--kind
+- Mutation checks: `uv run python scripts/mutation/run.py --kind unit` (235 breaks, 13 minutes in a fresh clone on
+  2026-10-21), `--kind
   integration` on the test stack (10 minutes); README in `scripts/mutation/`.
 - Goldens: `EDISC_RECORD_RSMF=1` (renderer), `EDISC_RECORD_CORPUS=1` (corpus, including
   `tests/integration/acceptance/test_render_batch_boundary.py`) only after a deliberate renderer or

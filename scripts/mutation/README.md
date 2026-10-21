@@ -10,7 +10,7 @@ one (never with `git checkout`, so other uncommitted work in the tree survives).
 ```
 uv run python scripts/mutation/run.py --list                 # what is in the catalog
 uv run python scripts/mutation/run.py --check                # every edit still applies (no tests run)
-uv run python scripts/mutation/run.py --kind unit            # no services needed (about 2 minutes)
+uv run python scripts/mutation/run.py --kind unit            # no services needed (235 breaks: 13 min in a fresh clone, 2026-10-21)
 MIN_FREE_GB=12 make test-env-up                              # integration breaks need the test stack
 uv run python scripts/mutation/run.py --kind integration     # about 10 minutes on a laptop
 make test-env-down
@@ -71,6 +71,7 @@ broken next to a `<name>.mutation-backup` copy: the runner refuses to start unti
 | `m18-quotas` | export upload quotas (M18 §4): the lock, what counts, no echo, upload expiry, no staged upload left by a refusal | 5 |
 | `m18-holds` | legal hold in the database (M18 §1.1-§1.4, ADR 0019 §4): closing refused (API and trigger), the one "held" definition (client holds, dedup links, exports only by a direct client hold), extension under hold, two people, expiry, cooling-off, who reads | 13 |
 | `m18-hold-flags` | the S3 flags (M18 §1.3): linked items flagged, a release never clears another hold's flag, a disagreeing flag refused, progress only as confirmed, the clearing intent | 5 |
+| `handover` | the demo's clean start: any `edisc-demo` stack removed by label (also one another checkout left, without `.env.demo`), a refusal when any of it remains | 2 |
 
 646 entries: 229 unit, 413 integration, 4 image.
 

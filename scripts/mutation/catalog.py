@@ -55,6 +55,8 @@ Rounds (ADR 0015):
   fixed 500 and its message-free log line, log paths without client segments, uvicorn's access log
   off, statement errors without parameters, recorded worker texts redacted on the way out, the
   route refusals that quoted the request.
+- ``handover``: the demo always starts from its own clean stack, even in a fresh clone that has no
+  ``.env.demo``, and refuses when a stack it cannot remove is left (README "Troubleshooting").
 - ``m17-logs``: the sweep of every test that asserts on log output (M17, before step 2): each one
   reads the production logging pipeline (``tests/logcapture.py``) and proves the lines under test
   reached it before asserting what they must not contain. Each break leaks a value into a log line
@@ -2323,4 +2325,13 @@ CATALOG: list[Mutation] = [
       "            # the intent, committed BEFORE any flag is turned off (resume vs tampering, D2)\n"
       "            if False: await s.execute(text(",
       "tests/integration/custody/test_holds.py", "crash"),
+    # ------------------------------------------------------------------ the demo's clean start (handover)
+    m("demo_reuses_a_stack_without_env_file", "handover", "scripts/demo.sh",
+      "  containers=$(project ps -aq)\n",
+      '  [ -f "$ENV_FILE" ] || return 0\n  containers=$(project ps -aq)\n',
+      "tests/unit/test_demo_teardown.py", "another_checkout_left"),
+    m("demo_starts_on_a_stack_left_behind", "handover", "scripts/demo.sh",
+      '  if [ -n "$(project ps -aq)$(project volume ls -q)$(project network ls -q)" ]; then',
+      "  if false; then",
+      "tests/unit/test_demo_teardown.py", "cannot_be_removed or refuses_too"),
 ]  # fmt: skip

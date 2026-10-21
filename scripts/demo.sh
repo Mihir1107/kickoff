@@ -5,7 +5,9 @@
 #                          PDF in the report image), preview, job package, edisc-verify (job, render,
 #                          report recomputed from the job chain), two tampers that FAIL
 #   scripts/demo.sh down   destroy the demo stack (all its volumes) and demo-output/
-# Uses its own compose project (edisc-demo) and ports; never the dev or test stacks.
+# Uses its own compose project (edisc-demo) and ports; never the dev or test stacks. Both forms first
+# remove EVERY container, volume and network of project edisc-demo, including a stack another
+# checkout of this repository left, and refuse to go on if any of it remains.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -20,9 +22,33 @@ COMPOSE=(docker compose -p "$PROJECT" -f infra/docker-compose.yml --env-file "$E
 export EDISC_ENV_FILE=$ENV_FILE EDISC_COMPOSE_PROJECT=$PROJECT
 
 bold() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
+# Everything of compose project $PROJECT, whichever checkout started it: compose labels its containers,
+# volumes and networks with the project name, and another checkout's demo stack has the same name.
+# Found by label, not through `compose down`, which needs this checkout's .env.demo (a fresh clone has
+# none, and then reused the old stack: its database, evidence and Temporal history).
+project() { docker "$@" --filter "label=com.docker.compose.project=$PROJECT"; }
 teardown() {
   docker rm -f "$REPORT_WORKER" >/dev/null 2>&1 || true
-  if [ -f "$ENV_FILE" ]; then "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true; fi
+  local containers volumes networks others
+  containers=$(project ps -aq)
+  if [ -n "$containers" ]; then
+    # shellcheck disable=SC2086  # ids, one per word
+    others=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' \
+      $containers | sort -u | grep -vxF "$(pwd -P)/infra" || true)
+    [ -z "$others" ] || echo "   removing the $PROJECT stack another checkout left: $others"
+    docker rm -f -v $containers >/dev/null || true  # shellcheck disable=SC2086
+  fi
+  volumes=$(project volume ls -q)
+  [ -z "$volumes" ] || docker volume rm -f $volumes >/dev/null || true  # shellcheck disable=SC2086
+  networks=$(project network ls -q)
+  [ -z "$networks" ] || docker network rm $networks >/dev/null || true  # shellcheck disable=SC2086
+  # whatever failed above is caught here, loudly: never start on top of a stack that is still there
+  if [ -n "$(project ps -aq)$(project volume ls -q)$(project network ls -q)" ]; then
+    echo "refusing: the $PROJECT stack (containers, volumes or networks) could not be removed." >&2
+    echo "  See what is left: docker ps -a, docker volume ls, docker network ls" >&2
+    echo "    --filter label=com.docker.compose.project=$PROJECT; remove it, then run scripts/demo.sh again." >&2
+    exit 1
+  fi
 }
 
 if [ "${1:-run}" = "down" ]; then

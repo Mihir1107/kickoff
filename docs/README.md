@@ -1,10 +1,10 @@
 # Documentation index
 
-Start with [HANDOFF.md](HANDOFF.md) (current state, open decisions, next milestone) and
+New to the repository? Start with the [top-level README](../README.md). Then [HANDOFF.md](HANDOFF.md) (current state, open decisions, next milestone) and
 [ARCHITECTURE.md](ARCHITECTURE.md) (the map). Engineering rules are in [../CLAUDE.md](../CLAUDE.md).
 
 ## Architecture Decision Records ([adr/](adr/))
-Statuses as of 2026-10-04, taken from each ADR's status line.
+Statuses as of 2026-10-21, taken from each ADR's status line.
 
 | # | Title | Status |
 |---|---|---|
@@ -22,14 +22,21 @@ Statuses as of 2026-10-04, taken from each ADR's status line.
 | [0012](adr/0012-temporal-workflow-design.md) | Temporal workflow design: fan-out, continue-as-new, errors, cancellation, versioning | Accepted, with review changes R1–R6 |
 | [0013](adr/0013-api-authn-authz.md) | API authentication and authorization (tenant > client > matter > workspace) | Accepted; decisions (a) and (c) pending product-owner confirmation |
 | [0014](adr/0014-slack-export-ingestion.md) | Slack export ingestion | Accepted, with review changes R1–R7; implemented (M14) |
-| [0015](adr/0015-rsmf-renderer.md) | RSMF renderer | Accepted; steps 1–3 implemented, steps 4–5 next (M15) |
-| [0016](adr/0016-session-auth.md) | Browser sessions, CSRF, re-authentication and source install flows | Accepted, not implemented yet (M17) |
+| [0015](adr/0015-rsmf-renderer.md) | RSMF renderer | Accepted, implemented (M15) |
+| [0016](adr/0016-session-auth.md) | Browser sessions, CSRF, re-authentication and source install flows | Accepted, amended (Amendments 1-2), implemented (M17) except step 7 (legal review) and step 9 (frontend) |
+| [0017](adr/0017-render-worker-versions.md) | Render worker versions over time (old renderer/Unicode/tzdata triples) | Accepted; version-keyed queues and unroutable episodes built, the rest planned |
+| [0018](adr/0018-collection-report-and-preview.md) | Collection report (JSON, HTML, reproducible PDF) and HTML preview | Accepted, implemented (M16) |
+| [0019](adr/0019-legal-hold-and-destruction.md) | Storage identities, upload quotas, legal hold, destruction | Accepted; steps 0-4 implemented (M18), step 5 on branch `m18-step5`, steps 6-7 not built |
 
 ## Plans ([plans/](plans/))
 - [plans/m13-api.md](plans/m13-api.md): the M13 collection API plan (implemented, M13.1 to M13.7).
 - [plans/phase-2.md](plans/phase-2.md): Phase 2: Slack export ingestion, RSMF, preview and report,
   minimal UI. The decisions were recorded on 2026-10-02. M14 is done and M15 is in progress (see
   HANDOFF for the current state).
+- [plans/m16.md](plans/m16.md): M16, the collection report and preview (implemented; ADR 0018).
+- [plans/m17.md](plans/m17.md): M17, sessions, installs, the UI's reads, job streams, the API contract (implemented but steps 7 and 9).
+- [plans/m18.md](plans/m18.md): M18, storage identities, quotas, legal hold, destruction, the standalone verifier (steps 0-4 on main).
+- [plans/phase-3.md](plans/phase-3.md): Phase 3, live Slack API and Teams connectors (decisions so far).
 
 ## Measurement runs ([runs/](runs/))
 How runs are recorded: [runs/README.md](runs/README.md).
@@ -38,8 +45,14 @@ How runs are recorded: [runs/README.md](runs/README.md).
 - [2026-10-01 resume soak](runs/2026-10-01-resume-soak.md): SIGKILL resume soak (M12 acceptance)
 - [2026-10-01 storage and throughput](runs/2026-10-01-storage-throughput-breakdown.md): storage per component and per-stage throughput (10k messages)
 - [2026-10-02 export range reads](runs/2026-10-02-export-range-reads.md): range requests per 1,000 archive entries (ADR 0014 R6)
+- [2026-10-06 report scale](runs/2026-10-06-report-scale.md): the collection report at 10k-100k units
+- [2026-10-12 M16 complete](runs/2026-10-12-m16-complete.md): what M16 built, tests, mutation rounds, measurements
+- [2026-10-12 preview audit burst](runs/2026-10-12-preview-audit-burst.md): the cost of one forced anchor per preview view
+- [2026-10-15 SSE 500 streams](runs/2026-10-15-sse-500-streams.md): 500 concurrent job streams
+- [2026-10-19 export validation on stale statistics](runs/2026-10-19-export-validation-stale-statistics.md): diagnosis, fix, 20M-entry estimate
 
 ## Other documents
+- [VERIFYING.md](VERIFYING.md): the guide for an outside expert running `edisc-verify`.
 - [DEMO.md](DEMO.md): the one-command demo (`scripts/demo.sh`) and what each step shows.
 - [HANDOFF.md](HANDOFF.md): state, decisions, open questions, next milestone, gotchas.
 - [ARCHITECTURE.md](ARCHITECTURE.md): components, data flow, principles.
