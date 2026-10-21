@@ -20,12 +20,13 @@ far: `docs/plans/phase-3.md`.
 - `976f96a` (test credential scan off the loop, ADR 0015 §24.25): CI 39530887546 every job green
   except integration shard 0, which never ran a test: the test stack's Temporal namespace init
   failed once (ADR 0015 §24.26, diagnosed; the init script now retries until the namespace
-  describes). The commit after it carries that fix; see "Next" 0 for its CI run.
-- **Branch `m18-step5`** (one commit on top of main): M18 step 5. CI 39531182020: lint,
-  typecheck, unit, api-compat, production-install and integration 0-3 green; `report-pdf` failed
-  as predicted (no PDF goldens for toolchain `1e861ea7e088`); `verifier-standalone` failed on a
-  TEST setup error (two collect workers on `collect-dummy`: Temporal refuses overlapping workers),
-  fixed on the branch after that run, not yet re-run when this was written.
+  describes).
+- `910f8e0` (that fix + this file): CI 39533325040 **green, every job** (all four shards).
+- **Branch `m18-step5`** (`8d6e4bc`, one commit on top of `910f8e0`): M18 step 5. CI 39535223933
+  (dispatched): **every job green, `verifier-standalone` included, except `report-pdf`**, which
+  fails exactly as predicted: "NOT ADMITTED: no PDF goldens for toolchain 1e861ea7e088...". (Two
+  earlier branch runs failed `verifier-standalone` on my test's setup: two collect workers on one
+  queue, then a render package fetched without `outputs=embed`; both fixed.)
 Renderer 1.3.2, dummy connector 0.5.0, normalizer 0.3.0, report renderer 1.6.0, preview renderer
 1.0.0 (unchanged).
 
@@ -71,9 +72,6 @@ stopped (volumes kept). A local `.env` made before 2026-10-20 needs the identity
   free here. It also changes the report queue name (`...p1e861ea7e088...`).
 
 ## Next
-0. **Check the CI runs started at the end of the session** (`gh run list --limit 3`): main with
-   the namespace-init fix, and the branch's `verifier-standalone` re-run (expected: everything
-   green on main; on the branch everything but `report-pdf`). A failure is a bug until diagnosed.
 1. **Merge step 5:** with disk to spare: `git switch m18-step5`, `make test-env-up`, record the PDF
    goldens for toolchain `1e861ea7e088` in the image (`EDISC_RECORD_REPORT_PDF=1 make
    test-report-pdf`; ADR 0018 §22; never in CI, never overwrite), commit them on the branch, run
